@@ -6,9 +6,16 @@ Command contract (plan §5.4, verified on Terraform 1.14.7):
   in ``env`` and only through a redacting stream callback); ``TF_WORKSPACE`` in ``env`` selects a workspace.
 - ``-no-color`` and ``-input=false`` are added where the subcommand accepts them; flags are always ``-flag=value``.
 - ``plan -detailed-exitcode``: exit 2 means changes and is returned, never collapsed into a failure.
-- ``show -json`` / ``output -json`` / ``providers schema -json`` are parsed in memory. They hold sensitive
-  values in plain text; this class never writes them. Redaction is the caller's job: ``stream`` receives every
-  stdout/stderr line and is where a ``StreamRedactor`` attaches (this module does not import ``codeorca.redact``).
+- ``show -json`` / ``output -json`` / ``providers schema -json`` / ``version -json`` / ``validate -json`` are
+  parsed in memory. They hold sensitive values in plain text; this class never writes them and never hands their
+  stdout to ``stream`` either (only their stderr is streamed). Every other command streams both channels;
+  redaction is the caller's job: ``stream`` is where a ``StreamRedactor`` attaches (this module does not import
+  ``codeorca.redact``).
+- ``TF_CLI_ARGS`` and ``TF_CLI_ARGS_<cmd>`` are dropped from the child environment: Terraform would splice them
+  into the command line after ``check_argv`` saw it (``TF_CLI_ARGS_plan=-destroy`` is a destroy plan).
+- ``deadline`` (a ``time.monotonic()`` instant) bounds every command of the session: on expiry the engine gets
+  SIGINT, ``interrupt_grace`` seconds to unwind (release the state lock), then SIGKILL, and ``TerraformTimeout``
+  is raised. The engine is NOT put in its own session, so a terminal's Ctrl-C still reaches it directly.
 - ``apply`` runs only a plan file whose sha256 matches the approved one.
 - Non-secret backend settings go through a temporary ``.hcl``; credential-looking keys are refused, because
   ``.terraform/terraform.tfstate`` persists ``-backend-config`` values in plain text.
@@ -21,6 +28,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import tempfile
 import threading
@@ -43,6 +51,9 @@ CREDENTIAL_KEY_PATTERN = re.compile(
 )
 
 
+TF_CLI_ARGS_PREFIX = "TF_CLI_ARGS"  # TF_CLI_ARGS and TF_CLI_ARGS_<subcommand>: splice flags past the floor
+
+
 class TerraformError(RuntimeError):
     """The engine could not be run, or a command failed in a way the caller cannot act on."""
 
@@ -53,6 +64,10 @@ class EngineNotFound(TerraformError):
 
 class PlanBindingError(TerraformError):
     """The plan file on disk is not the one that was approved."""
+
+
+class TerraformTimeout(TerraformError):
+    """The session's deadline passed while a command ran (or before it could start)."""
 
 
 @dataclass
@@ -137,15 +152,80 @@ def render_backend_hcl(backend_config: Mapping[str, object]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _read_test_commands(tests_dir: Path) -> list[tuple[Path, str]]:
-    """``(file, command)`` for every ``command = ...`` in ``*.tftest.hcl`` under the tests directory."""
-    found = []
-    if not tests_dir.is_dir():
-        return found
-    pattern = re.compile(r"^\s*command\s*=\s*(\w+)", re.MULTILINE)
-    for path in sorted(tests_dir.rglob("*.tftest.hcl")):
-        for match in pattern.finditer(path.read_text(encoding="utf-8")):
-            found.append((path, match.group(1)))
+_RUN_HEADER = re.compile(r'^\s*run\s+"[^"]*"\s*\{', re.MULTILINE)
+_COMMAND_LINE = re.compile(r"^\s*command\s*=\s*(\w+)", re.MULTILINE)
+_COMMAND_PLAN = re.compile(r"^\s*command\s*=\s*plan\s*(#.*|//.*)?$", re.MULTILINE)
+
+
+def _block_body(text: str, start: int) -> str:
+    depth = 1
+    i = start
+    while i < len(text) and depth:
+        ch = text[i]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+        i += 1
+    return text[start : i - 1]
+
+
+def _hcl_test_offenders(text: str) -> list[str]:
+    """Names of ``run`` blocks in a ``*.tftest.hcl`` that are not explicitly ``command = plan``.
+
+    A ``run`` block with no ``command`` defaults to apply (Terraform docs, verified on 1.14.7). The brace matcher
+    is textual, so a ``{`` inside a string could let one block swallow the next: a whole-file cross-check (as
+    many ``command = plan`` lines as ``run`` headers, and no ``command = <other>`` at all) closes that hole.
+    """
+    headers = list(_RUN_HEADER.finditer(text))
+    offenders: list[str] = []
+    for m in headers:
+        body = _block_body(text, m.end())
+        if not _COMMAND_PLAN.search(body):
+            offenders.append(m.group(0).split('"')[1])
+    if not offenders:
+        plan_lines = len(_COMMAND_PLAN.findall(text))
+        others = [c for c in _COMMAND_LINE.findall(text) if c != "plan"]
+        if plan_lines < len(headers) or others:
+            offenders.append("<file>")
+    return offenders
+
+
+def _json_test_offenders(text: str) -> list[str]:
+    """Same for ``*.tftest.json`` (HCL JSON syntax: ``run`` is an object of blocks or a list of single-key objects)."""
+    try:
+        document = json.loads(text)
+    except ValueError:
+        return ["<unparsable>"]
+    if not isinstance(document, dict):
+        return ["<unparsable>"]
+    run = document.get("run")
+    blocks: list[tuple[str, object]] = []
+    if isinstance(run, dict):
+        blocks = list(run.items())
+    elif isinstance(run, list):
+        for item in run:
+            if isinstance(item, dict):
+                blocks.extend(item.items())
+            else:
+                blocks.append(("<unparsable>", None))
+    elif run is not None:
+        blocks = [("<unparsable>", None)]
+    return [name for name, block in blocks if not (isinstance(block, dict) and block.get("command") == "plan")]
+
+
+def test_files_not_in_plan_mode(workdir: Path, tests_dir: Path) -> list[tuple[Path, list[str]]]:
+    """``(file, offending run blocks)`` over the root module directory (where Terraform also discovers test
+    files) and the tests directory (recursively), for ``*.tftest.hcl`` and ``*.tftest.json``."""
+    candidates: list[Path] = sorted(workdir.glob("*.tftest.hcl")) + sorted(workdir.glob("*.tftest.json"))
+    if tests_dir.is_dir():
+        candidates += sorted(tests_dir.rglob("*.tftest.hcl")) + sorted(tests_dir.rglob("*.tftest.json"))
+    found: list[tuple[Path, list[str]]] = []
+    for path in candidates:
+        text = path.read_text(encoding="utf-8", errors="replace")
+        offenders = _json_test_offenders(text) if path.suffix == ".json" else _hcl_test_offenders(text)
+        if offenders:
+            found.append((path, offenders))
     return found
 
 
@@ -161,13 +241,17 @@ class TerraformRunner:
         lock: bool = True,
         lock_timeout: str = "60s",
         plugin_cache_dir: str | os.PathLike[str] | None = None,
+        deadline: float | None = None,
+        interrupt_grace: float = 10.0,
     ):
         self.workdir = Path(workdir)
         self.engine = engine
         self.stream = stream
         self.lock = lock
         self.lock_timeout = lock_timeout
-        base = dict(env)
+        self.deadline = deadline  # time.monotonic() instant; None = unbounded
+        self.interrupt_grace = interrupt_grace
+        base = {k: v for k, v in env.items() if not k.startswith(TF_CLI_ARGS_PREFIX)}
         base["TF_IN_AUTOMATION"] = "1"
         base["TF_INPUT"] = "0"
         if plugin_cache_dir is not None:
@@ -193,18 +277,25 @@ class TerraformRunner:
             raise EngineNotFound(f"engine {self.engine!r} not found on PATH")
         return found
 
-    def _pump(self, pipe, channel: str, sink: list[str]) -> None:
+    def _pump(self, pipe, channel: str, sink: list[str], stream: bool) -> None:
         for line in iter(pipe.readline, ""):
             sink.append(line.rstrip("\r\n"))
-            if self.stream is not None:
+            if stream and self.stream is not None:
                 with self._stream_lock:  # stdout and stderr pumps share one callback; never re-enter it
                     self.stream(line, channel)
         pipe.close()
 
-    def _run(self, args: list[str], *, allow_migrate_state: bool = False) -> CommandResult:
-        """The single subprocess boundary: policy check, then line-pumped execution, then a recorded result."""
+    def _remaining(self) -> float | None:
+        return None if self.deadline is None else self.deadline - time.monotonic()
+
+    def _run(self, args: list[str], *, allow_migrate_state: bool = False, stream_stdout: bool = True) -> CommandResult:
+        """The single subprocess boundary: policy check, then line-pumped execution, then a recorded result.
+        ``stream_stdout=False`` keeps a command's stdout in memory only (documents that hold secrets)."""
         argv = [self.engine, *args]
         policy.check_argv(argv, allow_migrate_state=allow_migrate_state)
+        remaining = self._remaining()
+        if remaining is not None and remaining <= 0:
+            raise TerraformTimeout(f"{args[0]}: the session deadline passed before the command could start")
         argv[0] = self._engine_path()
         started = time.monotonic()
         proc = subprocess.Popen(  # noqa: S603 - argv list, no shell, policy-checked above
@@ -221,14 +312,19 @@ class TerraformRunner:
         out: list[str] = []
         err: list[str] = []
         threads = [
-            threading.Thread(target=self._pump, args=(proc.stdout, "stdout", out), daemon=True),
-            threading.Thread(target=self._pump, args=(proc.stderr, "stderr", err), daemon=True),
+            threading.Thread(target=self._pump, args=(proc.stdout, "stdout", out, stream_stdout), daemon=True),
+            threading.Thread(target=self._pump, args=(proc.stderr, "stderr", err, True), daemon=True),
         ]
         for t in threads:
             t.start()
+        timed_out = False
+        try:
+            exit_code = proc.wait(timeout=remaining)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            exit_code = self._interrupt(proc)
         for t in threads:
-            t.join()
-        exit_code = proc.wait()
+            t.join(timeout=None if not timed_out else 5)
         result = CommandResult(
             argv=argv,
             exit_code=exit_code,
@@ -238,10 +334,23 @@ class TerraformRunner:
             duration_s=time.monotonic() - started,
         )
         self.history.append(result)
+        if timed_out:
+            raise TerraformTimeout(f"{args[0]}: the session deadline passed after {result.duration_s:.1f}s")
         return result
 
+    def _interrupt(self, proc: subprocess.Popen) -> int:
+        """SIGINT (Terraform unwinds and releases its lock), a grace period, then SIGKILL; returns the exit code."""
+        try:
+            proc.send_signal(signal.SIGINT)
+            return proc.wait(timeout=self.interrupt_grace)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            return proc.wait()
+        except ProcessLookupError:
+            return proc.wait()
+
     def _json_document(self, args: list[str], what: str) -> dict:
-        result = self._run(args)
+        result = self._run(args, stream_stdout=False)
         if result.exit_code != 0:
             raise TerraformError(f"{what} failed (exit {result.exit_code}): {result.stderr.strip()[:2000]}")
         try:
@@ -291,7 +400,7 @@ class TerraformRunner:
 
     def validate(self) -> dict:
         """``validate -json``. Exit 1 means invalid and is reported in the document (``valid: false``)."""
-        result = self._run(["validate", "-no-color", "-json"])
+        result = self._run(["validate", "-no-color", "-json"], stream_stdout=False)
         try:
             document = json.loads(result.stdout)
         except ValueError:
@@ -356,16 +465,21 @@ class TerraformRunner:
         )
 
     def test(self, plan_mode_only: bool = True, tests_dir: str | os.PathLike[str] = "tests") -> dict:
-        """``test -json``. With ``plan_mode_only`` a ``run`` block that says ``command = apply`` is refused up front.
+        """``test -json``. With ``plan_mode_only`` every ``run`` block must say ``command = plan`` explicitly; any
+        other block (``command = apply`` or no ``command``, which defaults to apply) refuses the whole test.
 
-        Terraform has no flag that forces plan mode (``run`` blocks default to apply), so the only enforcement
-        is reading the ``*.tftest.hcl`` files before running them.
+        Terraform has no flag that forces plan mode and its ``-json`` stream does not say which mode a run block
+        used, so the only enforcement is reading the ``*.tftest.hcl`` / ``*.tftest.json`` files (root module
+        directory and ``tests_dir``) before running them.
         """
         if plan_mode_only:
-            apply_runs = [(p, c) for p, c in _read_test_commands(self.workdir / tests_dir) if c == "apply"]
-            if apply_runs:
-                names = ", ".join(str(p.relative_to(self.workdir)) for p, _ in apply_runs)
-                raise policy.PolicyError("test-apply", f"terraform test run blocks with command = apply: {names}")
+            offenders = test_files_not_in_plan_mode(self.workdir, self.workdir / tests_dir)
+            if offenders:
+                names = ", ".join(f"{p.relative_to(self.workdir)} ({', '.join(blocks)})" for p, blocks in offenders)
+                raise policy.PolicyError(
+                    "test-apply",
+                    f"terraform test run blocks that are not `command = plan` (apply is the default): {names}",
+                )
         result = self._run(["test", "-no-color", "-json"])
         messages = tfjson.parse_json_stream(result.stdout_lines)
         summary = next((m.get("test_summary") for m in messages if m.get("type") == "test_summary"), None) or {}

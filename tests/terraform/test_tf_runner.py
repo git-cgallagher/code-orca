@@ -20,6 +20,7 @@ from codeorca.adapters.terraform import (
     PlanResult,
     TerraformError,
     TerraformRunner,
+    TerraformTimeout,
     is_transient,
     plan_file_sha256,
     render_backend_hcl,
@@ -304,7 +305,7 @@ def test_live_exit_code_2_preserved_end_to_end_and_apply_bound_to_sha256(tmp_pat
     assert document["variables"]["app_secret"]["value"] == SECRET
     assert SECRET in json.dumps(document)
     assert tfjson.sensitive_variables(document) == ["app_secret"]
-    assert SECRET in "".join(seen)  # and so did the stream, which is where a StreamRedactor attaches
+    assert SECRET not in "".join(seen)  # but the document's stdout never reaches the stream (in memory only)
     assert not any(p.suffix == ".json" for p in tmp_path.rglob("*") if p.is_file())  # nothing written by the runner
 
     digest = plan_file_sha256(plan.plan_file)
@@ -371,3 +372,102 @@ def test_live_plan_error_is_exit_1(tmp_path, stack):
     assert result.exit_code == 1 and not result.changed
     assert "app_secret" in result.stderr + result.stdout
     assert not (tmp_path / "p.tfplan").exists()
+
+
+# ---------------------------------------------------------------- offline: what never reaches the stream / the child
+
+
+def test_json_documents_are_consumed_in_memory_and_never_streamed_on_stdout(tmp_path):
+    """show/output/providers schema/version/validate stdout holds secrets in clear; only stderr is streamed."""
+    quiet = tmp_path / "quiet"
+    quiet.write_text(
+        '#!/bin/sh\nprintf \'%s\\n\' "$FAKE_STDOUT"\necho diag >&2\nexit "${FAKE_EXIT:-0}"\n', encoding="utf-8"
+    )
+    quiet.chmod(0o700)
+    seen: list[tuple[str, str]] = []
+    env = base_env(tmp_path) | {"FAKE_STDOUT": '{"a":"FIXTURE-SECRET-in-document","valid":true}'}
+    runner = TerraformRunner(tmp_path, env, engine=str(quiet), stream=lambda line, ch: seen.append((ch, line)))
+    assert runner.show_state()["a"] == "FIXTURE-SECRET-in-document"
+    assert runner.output_json()["a"] == "FIXTURE-SECRET-in-document"
+    assert runner.providers_schema()["a"] == "FIXTURE-SECRET-in-document"
+    assert runner.version()["a"] == "FIXTURE-SECRET-in-document"
+    assert runner.validate()["valid"] is True
+    assert [ch for ch, _ in seen] == ["stderr"] * 5
+    assert all(line == "diag\n" for _, line in seen)
+    # the plan's human-readable stdout IS streamed (it is where redaction attaches)
+    seen.clear()
+    runner.plan(tmp_path / "p.tfplan")
+    assert ("stdout", '{"a":"FIXTURE-SECRET-in-document","valid":true}\n') in seen
+
+
+def test_tf_cli_args_never_reach_the_child(tmp_path):
+    """TF_CLI_ARGS / TF_CLI_ARGS_<cmd> would be inserted by Terraform after the policy check saw the argv."""
+    probe = tmp_path / "probe"
+    probe.write_text(
+        '#!/bin/sh\nprintf \'plan=%s all=%s\\n\' "${TF_CLI_ARGS_plan-unset}" "${TF_CLI_ARGS-unset}"\n', encoding="utf-8"
+    )
+    probe.chmod(0o700)
+    env = base_env(tmp_path) | {"TF_CLI_ARGS_plan": "-destroy", "TF_CLI_ARGS": "-target=a.b", "TF_CLI_ARGS_apply": "x"}
+    runner = TerraformRunner(tmp_path, env, engine=str(probe))
+    assert not any(k.startswith("TF_CLI_ARGS") for k in runner.env)
+    result = runner.plan(tmp_path / "p.tfplan")
+    assert result.stdout_lines == ["plan=unset all=unset"]
+    assert not any(k.startswith("TF_CLI_ARGS") for k in result.env_names)
+
+
+@pytest.mark.parametrize(
+    ("path", "text", "what"),
+    [
+        (
+            "tests/noop.tftest.hcl",
+            'run "x" {\n  assert {\n    condition = true\n    error_message = "e"\n  }\n}\n',
+            "no command",
+        ),
+        ("root.tftest.hcl", 'run "r" {\n  command = apply\n}\n', "root dir"),
+        ("tests/j.tftest.json", '{"run": {"j": {"assert": []}}}', "json object form"),
+        ("tests/l.tftest.json", '{"run": [{"a": {"command": "plan"}}, {"b": {"command": "apply"}}]}', "json list form"),
+        (
+            "tests/mixed.tftest.hcl",
+            'run "a" {\n  command = plan\n}\nrun "b" {\n  variables {\n    x = "{"\n  }\n}\n',
+            "brace in string",
+        ),
+        ("tests/one.tftest.hcl", 'run "a" {\n  command = plan\n}\nrun "b" {\n}\n', "second block"),
+    ],
+)
+def test_test_refuses_any_run_block_that_is_not_explicitly_plan_mode(tmp_path, fake_engine, path, text, what):
+    """Terraform's run blocks default to apply, load *.tftest.json too, and are also discovered in the root dir."""
+    target = tmp_path / path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(text, encoding="utf-8")
+    runner = TerraformRunner(tmp_path, base_env(tmp_path), engine=str(fake_engine))
+    with pytest.raises(PolicyError) as info:
+        runner.test()
+    assert info.value.rule == "test-apply" and path.split("/")[-1] in str(info.value) and runner.history == [], what
+
+
+def test_test_runs_when_every_run_block_says_plan(tmp_path, fake_engine):
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    (tests / "a.tftest.hcl").write_text('run "a" {\n  command = plan // comment\n}\nrun "b" {\n  command = plan\n}\n')
+    (tests / "b.tftest.json").write_text('{"run": {"c": {"command": "plan"}}, "variables": {}}')
+    (tmp_path / "root.tftest.hcl").write_text('run "r" {\n  command = plan\n}\n')
+    (tmp_path / "vars.tftest.json").write_text('{"variables": {"x": 1}}')  # no run blocks: nothing to refuse
+    runner = TerraformRunner(tmp_path, base_env(tmp_path), engine=str(fake_engine))
+    assert runner.test()["exit_code"] == 0
+
+
+def test_deadline_interrupts_then_kills_a_hung_engine(tmp_path):
+    import sys
+
+    sleeper = tmp_path / "sleeper"
+    sleeper.write_text(f"#!/bin/sh\nexec {sys.executable} -c 'import time; time.sleep(30)'\n", encoding="utf-8")
+    sleeper.chmod(0o700)
+    runner = TerraformRunner(tmp_path, base_env(tmp_path), engine=str(sleeper), interrupt_grace=0.2)
+    runner.deadline = time.monotonic() + 0.5
+    started = time.monotonic()
+    with pytest.raises(TerraformTimeout, match="plan"):
+        runner.plan(tmp_path / "p.tfplan")
+    assert time.monotonic() - started < 10
+    assert runner.history and runner.history[-1].exit_code < 0  # killed by a signal, recorded
+    with pytest.raises(TerraformTimeout):  # the deadline has passed: nothing else starts
+        runner.version()

@@ -4,7 +4,9 @@ Two layers, both fail-closed:
 
 - ``DENY_FLOOR`` is a tuple of frozen rules over a Terraform argv. ``check_argv`` runs before every
   subprocess the adapter starts. Nothing in a project file can reach it: ``Policy`` has no field that
-  names the floor, ``check_argv`` takes no ``Policy``, and ``DENY_FLOOR`` is immutable.
+  names the floor, ``check_argv`` takes no ``Policy``, and ``DENY_FLOOR`` is immutable. The floor checks the
+  argv the adapter builds; the one other way to put a flag on Terraform's command line, ``TF_CLI_ARGS`` /
+  ``TF_CLI_ARGS_<cmd>`` in the environment, is closed by the adapter dropping those variables.
 - ``Policy`` (``extra='forbid'``) holds what a project file *may* say, and all of it only narrows:
   stateful types and the critical tag add plan-gate blocks; transient error patterns limit retries.
 - ``plan_gate`` ports ``aws-account-baseline/PLAN-SAFETY-HOOK.md``: any ``resource_changes[].change.actions``

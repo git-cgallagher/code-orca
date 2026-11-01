@@ -27,6 +27,10 @@ Consumers keep their own `codeorca.yaml`, `workflows/`, `specs/` in their own (u
 | `src/codeorca/tfjson.py` | pure parsers for `-json` streams (tolerant of non-JSON lines) and `show -json` plan/state documents: summary, sensitive variables/outputs, prior and previous outputs |
 | `src/codeorca/adapters/terraform.py` | `TerraformRunner`: one policy-checked `_run` for init/validate/plan/show/output/providers schema/apply/test; `-detailed-exitcode` 2 preserved; apply bound to the plan's sha256; stream callback is where redaction attaches |
 | `tests/terraform/` | deny floor, plan gate, tfjson and runner tests (the live ones skip without `terraform` on PATH) |
+| `src/codeorca/ansible_plugins/` | plugins handed to `ansible-playbook` by path: `callback/codeorca_jsonl.py` is the **stdout** callback (one JSON object per line for every event, nothing else; schema in its docstring; imports only stdlib + `ansible`, never `codeorca`) |
+| `src/codeorca/adapters/ansible.py` | `AnsibleRunner`: `ansible-playbook` as an argv subprocess with the callback forced in (`ANSIBLE_STDOUT_CALLBACK`/`ANSIBLE_CALLBACK_PLUGINS`), `CODEORCA_REDACTION_KEY`/`ANSIBLE_DEBUG`/`ANSIBLE_LOG_PATH`/`ANSIBLE_VERBOSITY` dropped, JSONL parsed tolerantly, `(line, channel)` stream callback where redaction attaches, bitmask exit codes, tree kill on timeout; `generate_inventory`, `generate_role_playbook`, `write_handoff` |
+| `src/codeorca/steps/ansible.py` | the `ansible` executor (`make_executor(registry)`): playbook or generated `import_role` play, 0600 inventory + extra-vars handoff files deleted after the run, `<step dir>/inventory.yml` kept redacted for the host-spec renderer, pre-run registration of denylist-named `extra_vars`/inventory values, `events.jsonl` through the stream redactor, `--check --diff` under `--dry-run`, `check_unsupported` policy (stricter of project and step) |
+| `tests/ansible/`, `tests/fixtures/ansible/` | callback, adapter and step tests over an offline `connection: local` fixture playbook (ok/changed/skipped/failed/no_log/loop/check-unsupported tasks), a `sleep` playbook for timeouts and a role with `meta/argument_specs.yml`; they need `ansible-playbook` on PATH or next to the test interpreter (`pip install -e '.[dev,ansible]'`) and skip otherwise |
 | `tests/fixtures/terraform/` | 1.14.7 captures from the reference stack via `regenerate.py` (plan, replace plan, state, outputs, providers schema, init/apply streams) + hand-made `delete-plan.json` and `init-mixed.jsonl`; the placeholder secret is in them on purpose |
 | `src/codeorca/project.py` | Pydantic models for the project file `codeorca.yaml` (`load_project`, `project_json_schema`): s3 backend needs bucket/region/account_id, stack `depends_on` DAG, `max_parallel` must be 1 |
 | `src/codeorca/expr.py` | `${{ … }}` expressions: sandboxed Jinja2 + StrictUndefined, `render`/`render_value`/`render_tree`, `evaluate_when` (must be a bool), GHA-style `success()`/`always()`/`failure()`/`cancelled()` |
@@ -178,6 +182,17 @@ Ansible (core 2.21.5):
   `suppress_env_files`; that is why code-orca drives `ansible-playbook` directly.
 - `cloud.terraform.terraform_state` runs `terraform state pull` and dumps every state attribute into
   hostvars; not used.
+- **A process-group kill does not stop a running module.** Every ansible-core worker calls `os.setsid()`
+  (`WORKER_SESSION_ISOLATION`, on by default), so the worker, its `AnsiballZ_*.py` and whatever that runs are in
+  sessions of their own; `killpg(leader)` kills only `ansible-playbook` and the `sleep` keeps running. The adapter
+  lists the leader's descendants with `ps -axo pid=,ppid=` *before* killing and SIGKILLs every pid and group
+  (found on the Phase 2 timeout test, 2026-11-01).
+- **`ansible.builtin.command` in check mode says "Command would have run if not in check mode"**, not "does not
+  support check mode" (that wording is `module_utils/basic.py` and the action base class): the callback's
+  `check_unsupported` detection matches both.
+- **`ruamel.yaml`'s `add_representer` is a classmethod on a shared dict**: calling it on `yaml.representer` to
+  quote strings changed every later dump in the process (the spec renderer's output broke two tests). Subclass
+  `SafeRepresenter` and assign `yaml.Representer`.
 
 Container (for the image phase):
 - The base image is Debian 13 trixie: Microsoft's legacy `microsoft.asc` key fails under trixie's apt,
@@ -198,7 +213,9 @@ Container (for the image phase):
    (`state_specs: true`; the renderer exists, the executor does not call `show_state` yet), the `resource_drift`
    shape is assumed identical to `resource_changes` (plan §10, unverified), `--dry-run` is a no-op for the
    read-only Terraform actions, and `required_env` is checked by the terraform step only.
-2. Ansible adapter + redacting stdout callback, inventory/handoff generation, host-spec renderer.
+2. Ansible adapter + redacting stdout callback, inventory/handoff generation, host-spec renderer. (Adapter, callback and
+   step landed 2026-11-01; `vault_password_file` is not a step field yet, Windows/psrp targets are deferred, and the
+   executor is registered by the integration step.)
 3. Helpers (python/powershell/shell), gate with TTY + resume, apply bound to the plan sha256, backend bootstrap.
 4. Container image on `ghcr.io/git-cgallagher/ansible-runtime`: the pyproject ranges (`pydantic`, `ruamel.yaml`,
    `jinja2`) must be pinned exactly, with hashes, in `requirements/codeorca.txt` for the image; ranges are for pip users only.

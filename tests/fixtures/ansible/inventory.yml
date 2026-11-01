@@ -1,0 +1,7 @@
+# Offline test inventory: every host is the controller itself.
+app:
+  hosts:
+    app-host:
+      ansible_connection: local
+      ansible_python_interpreter: "{{ ansible_playbook_python }}"
+      app_port: "{{ 8000 + 80 }}"

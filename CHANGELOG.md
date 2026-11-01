@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Ansible step (Phase 2): the `codeorca_jsonl` stdout callback (one JSON event per line, no default-callback line
+  ever reaches stdout, `no_log` censoring kept, check-mode-unsupported detection), `adapters/ansible.py`
+  (`AnsibleRunner`: argv subprocess, hardened child env, tolerant JSONL parsing, stats/failed/unreachable hosts,
+  bitmask exit codes, whole-tree kill on timeout; inventory, role-playbook and 0600 handoff generation) and the
+  `ansible` executor (playbook or `role:`, handoff files that live only while the play runs, redacted
+  `inventory.yml` kept for the host spec, `events.jsonl` through the stream redactor, `--check --diff` under
+  `--dry-run`, `check_unsupported` warn/fail/ignore); `pip install 'code-orca[ansible]'` pins ansible-core 2.21.
 - Phase 1 review fixes (secrets): Terraform's `-json` documents are parsed in memory and never streamed to
   `stdout.log`, and the human `plan` output is written only after the registry was seeded from the plan JSON;
   every `TF_VAR_<name>` whose variable is declared sensitive or denylist-named is registered before Terraform

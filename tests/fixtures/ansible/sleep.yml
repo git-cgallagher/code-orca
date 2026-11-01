@@ -1,0 +1,9 @@
+# A task that outlives the step timeout: the adapter must kill the worker, the module and the command it runs.
+# The tests pass an unusual duration (extra var sleep_seconds) so they can look for THEIR sleep afterwards.
+- name: Sleep play
+  hosts: app
+  gather_facts: false
+  tasks:
+    - name: sleep
+      ansible.builtin.command:
+        argv: [sleep, "{{ sleep_seconds | default('60') }}"]

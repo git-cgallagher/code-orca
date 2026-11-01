@@ -1,0 +1,56 @@
+# Fixture playbook for the ansible adapter tests: one task per result kind. Every value is a placeholder.
+# Extra vars the tests pass: scratch_dir (where the copy task writes), do_fail (true runs the failing task),
+# echo_value (echoed by a debug task; the tests pass a FIXTURE-SECRET placeholder and prove it is redacted).
+- name: Fixture play
+  hosts: app
+  gather_facts: false
+  vars:
+    do_fail: false
+    echo_value: "nothing to echo"
+  tasks:
+    - name: ok task
+      ansible.builtin.debug:
+        msg: "port={{ app_port }}"
+
+    - name: echo handed-over value
+      ansible.builtin.debug:
+        msg: "value={{ echo_value }}"
+
+    - name: changed task
+      ansible.builtin.copy:
+        content: "hello from {{ inventory_hostname }}\n"
+        dest: "{{ scratch_dir }}/hello.txt"
+        mode: "0644"
+      when: scratch_dir is defined
+
+    - name: skipped task
+      ansible.builtin.debug:
+        msg: never shown
+      when: false
+
+    - name: no_log task
+      ansible.builtin.debug:
+        msg: "hidden FIXTURE-SECRET-nolog-001"
+      no_log: true
+
+    - name: looped task
+      ansible.builtin.debug:
+        msg: "item {{ item }}"
+      loop: [one, two]
+
+    - name: check-unsupported task
+      ansible.builtin.command:
+        argv: [/bin/sh, -c, "exit 0"]
+      changed_when: false
+
+    - name: handoff files as the play sees them
+      ansible.builtin.find:
+        paths: "{{ inventory_dir }}"
+        file_type: file
+      register: handoff_files
+      when: inventory_dir is defined
+
+    - name: failing task
+      ansible.builtin.fail:
+        msg: "deliberate failure with {{ echo_value }}"
+      when: do_fail | bool

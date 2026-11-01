@@ -182,6 +182,15 @@ def terraform(stack: Path, *args: str, secret: str) -> None:
     subprocess.run(["terraform", f"-chdir={stack}", *args], env=env, check=True, capture_output=True, text=True)
 
 
+def run_where(runs_dir: Path, **fields: object) -> Path:
+    """The run dir whose run.json carries every given field (ids order by second only: never pick by position)."""
+    for run_id in list_runs(runs_dir):
+        record = json.loads(read(runs_dir / run_id / "run.json"))
+        if all(record.get(k) == v for k, v in fields.items()):
+            return runs_dir / run_id
+    raise AssertionError(f"no run with {fields} under {runs_dir}")
+
+
 def registry_with(*values: str) -> SecretRegistry:
     r = SecretRegistry(KEY.encode(), "env:test")
     for v in values:
@@ -203,7 +212,7 @@ def test_applied_state_secrets_never_reach_the_run_dir(project: Path, capsys, mo
     assert cli.main(["drift", "-p", p]) == 2
     out = capsys.readouterr().out
     assert "app    drift" in out and OLD not in out and NEW not in out
-    run_dir = runs_dir / list_runs(runs_dir)[-1]
+    run_dir = run_where(runs_dir, kind="drift")
     registry = registry_with(OLD, NEW)
     assert scan_outputs(run_dir, registry) == []  # the run dir only: the stack dir holds a tfstate we never read
     assert scan_outputs(project / "specs", registry) == []
@@ -223,7 +232,7 @@ def test_applied_state_secrets_never_reach_the_run_dir(project: Path, capsys, mo
     monkeypatch.delenv("TF_VAR_app_secret")
     assert cli.main(["run", "outputs", "-p", p]) == 0
     assert OLD not in capsys.readouterr().out
-    run_dir = runs_dir / list_runs(runs_dir)[-1]
+    run_dir = run_where(runs_dir, workflow="outputs")
     tf_outputs = json.loads(read(run_dir / "steps" / "out_app" / "tf-outputs.json"))
     assert tf_outputs["app_token"] == {"value": registry.placeholder(OLD), "sensitive": True, "type": "string"}
     assert tf_outputs["app_host"]["value"] == "127.0.0.1"
@@ -237,7 +246,7 @@ def test_applied_state_secrets_never_reach_the_run_dir(project: Path, capsys, mo
     # a value Go escapes in every -json document: neither the raw nor the escaped form may survive
     assert cli.main(["run", "plan-only", "-p", p, "--input", f"app_secret={GO_UNSAFE}"]) == 0
     capsys.readouterr()
-    run_dir = runs_dir / list_runs(runs_dir)[-1]
+    run_dir = run_where(runs_dir, workflow="plan-only")
     registry = registry_with(OLD, GO_UNSAFE)
     assert scan_outputs(run_dir, registry) == [] and scan_outputs(project / "specs", registry) == []
     everything = "".join(f.read_bytes().decode("utf-8", "replace") for f in run_dir.rglob("*") if f.is_file())

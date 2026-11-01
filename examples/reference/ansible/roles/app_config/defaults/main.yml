@@ -1,0 +1,4 @@
+---
+# Native templating turns this string into the int 8080; the host spec shows the native value.
+app_listen_port: "{{ 8000 + 80 }}"
+app_config_dir: /tmp/codeorca-reference

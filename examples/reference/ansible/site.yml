@@ -1,11 +1,9 @@
-# Reference playbook: configures the container itself (connection: local) from Terraform outputs
-# handed over as extra vars. The role lands with the Ansible adapter (Phase 2).
+---
+# Reference playbook: configures the machine it runs on (`ansible_connection: local` in the inventory the
+# workflow generates) from values handed over as extra vars.
 - name: Configure the example app host
   hosts: app
   gather_facts: false
-  vars:
-    app_listen_port: "{{ 8000 + 80 }}"
-  tasks:
-    - name: Show the handed-over values
-      ansible.builtin.debug:
-        msg: "env={{ app_environment }} bucket={{ app_bucket }} port={{ app_listen_port }}"
+  roles:
+    - role: app_config
+      tags: [config]

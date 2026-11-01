@@ -1,0 +1,6 @@
+# Managed by Ansible (code-orca reference role app_config)
+environment = {{ app_environment }}
+bucket = {{ app_bucket }}
+listen_port = {{ app_listen_port }}
+config_paths = {{ app_config_paths | join(',') }}
+api_token = {{ app_api_token | default('') }}

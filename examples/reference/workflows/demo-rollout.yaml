@@ -1,7 +1,7 @@
 # yaml-language-server: $schema=../../../schema/codeorca-workflow.schema.json
-# The full rollout. It VALIDATES in Phase 1 but does not run yet: gate, apply, ansible, python and powershell
-# steps are "not implemented in this phase" (the runner errors on the first one). `plan-only.yaml` is the
-# workflow that runs end to end today.
+# The full rollout. It VALIDATES but does not run yet: gate, apply, python and powershell steps are "not
+# implemented in this phase" (the runner errors on the first one). `plan-only.yaml` (Terraform) and
+# `configure-local.yaml` (Ansible + host spec) are the workflows that run end to end today.
 api: codeorca/v1
 kind: workflow
 name: demo-rollout
@@ -63,7 +63,7 @@ steps:
     extra_vars:
       app_environment: "${{ inputs.env }}"
       app_bucket: "${{ steps.apply_app.outputs.tf.app_bucket.value }}"
-    tags: [config]
+    tags: [config]                                        # the role import in site.yml carries this tag
     outputs:
       stats: "${{ result.stats }}"
 
@@ -75,7 +75,7 @@ steps:
       ansible:
         inventory: "${{ steps.configure.outputs.inventory_path }}"
         host: app-host
-        play_scope: { playbook: ansible/site.yml, vars: [app_listen_port, app_config_paths] }
+        play_scope: { playbook: ansible/site.yml, vars: [app_listen_port, app_config_paths, app_config_dir] }
         templates: [ansible/roles/app_config/templates/app.conf.j2]
     output: specs/app/hosts/app-host.yaml
 

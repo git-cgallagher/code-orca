@@ -1,0 +1,8 @@
+---
+# Playbook-adjacent group_vars for the `app` group. Placeholders only.
+app_config_paths:
+  - "/etc/example-app/{{ app_environment }}.conf"
+  - /etc/example-app/common.conf
+# `ansible.builtin.env` is on redaction.lookup_denylist: the host spec never runs this lookup and shows
+# `<skipped: lookup ansible.builtin.env is a secret source>` instead of the value.
+app_home_dir: "{{ lookup('ansible.builtin.env', 'HOME') }}"

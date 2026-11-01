@@ -1,0 +1,12 @@
+---
+- name: Create the config directory
+  ansible.builtin.file:
+    path: "{{ app_config_dir }}"
+    state: directory
+    mode: "0700"
+
+- name: Write the app config
+  ansible.builtin.template:
+    src: app.conf.j2
+    dest: "{{ app_config_dir }}/app.conf"
+    mode: "0600"

@@ -1,8 +1,9 @@
 """codeorca command line (plan section 5.1).
 
 Phase 1 ships ``validate``, ``schema export``, ``run``, ``drift``, ``doctor``, ``render``, ``summary`` and
-``runs gc``. ``resume`` arrives with the gate (Phase 3). Every command that touches a project takes
-``-p/--project codeorca.yaml`` (default: ``./codeorca.yaml``); paths in the project file resolve against it.
+``runs gc``; Phase 2 adds ``lint ansible``. ``resume`` arrives with the gate (Phase 3). Every command that touches a
+project takes ``-p/--project codeorca.yaml`` (default: ``./codeorca.yaml``; optional for ``lint ansible``, which
+then uses the default key denylist); paths in the project file resolve against it.
 """
 
 from __future__ import annotations
@@ -368,6 +369,56 @@ def cmd_runs_gc(args: argparse.Namespace) -> int:
     return 0
 
 
+LINT_SKIP_DIRS = frozenset({"group_vars", "host_vars", "defaults", "vars", "meta", "files", "templates", ".git"})
+
+
+def _lint_files(paths: list[str]) -> list[Path]:
+    """Every ``*.yml``/``*.yaml`` under the given files and directories, minus vars/meta/templates/files trees
+    (they hold no tasks), sorted."""
+    found: set[Path] = set()
+    for raw in paths:
+        path = Path(raw)
+        if path.is_file():
+            found.add(path)
+            continue
+        if not path.is_dir():
+            raise CliError(f"lint: {path} is neither a file nor a directory")
+        for dirpath, dirnames, filenames in os.walk(path):
+            dirnames[:] = sorted(d for d in dirnames if d not in LINT_SKIP_DIRS and not d.startswith("."))
+            found.update(Path(dirpath) / f for f in filenames if f.endswith((".yml", ".yaml")))
+    return sorted(found)
+
+
+def cmd_lint_ansible(args: argparse.Namespace) -> int:
+    from codeorca.lint import lint_playbooks
+    from codeorca.redact import DEFAULT_KEY_DENYLIST
+
+    key_denylist: tuple[str, ...] = DEFAULT_KEY_DENYLIST
+    lookup_denylist: tuple[str, ...] = ()
+    if args.project:
+        from codeorca.secrets import key_denylist as project_key_denylist
+
+        project = _project(args)
+        key_denylist = project_key_denylist(project)
+        lookup_denylist = tuple(project.redaction.lookup_denylist)
+    rc = 0
+    count = 0
+    for file in _lint_files(args.paths):
+        try:
+            findings = lint_playbooks([file], key_denylist, lookup_denylist)
+        except Exception as e:  # noqa: BLE001 - a file that does not parse is a finding, not a crash
+            print(f"{file}:0 parse-error error {type(e).__name__}: {str(e).splitlines()[0] if str(e) else ''}")
+            rc = 1
+            continue
+        for f in findings:
+            print(f"{f['file']}:{f['line']} {f['rule']} {f['level']} {f['message']}")
+            count += 1
+            if f["level"] != "info":
+                rc = 1
+    print(f"lint: {count} finding(s); exit {rc}", file=sys.stderr)
+    return rc
+
+
 # -------------------------------------------------------------------------------------------------- parser
 
 
@@ -421,6 +472,15 @@ def build_parser() -> argparse.ArgumentParser:
     sm.add_argument("run_id", help="a run id or 'latest'")
     _add_project(sm)
     sm.set_defaults(func=cmd_summary)
+
+    lint = sub.add_parser("lint", help="static lints over consumer content")
+    lsub = lint.add_subparsers(dest="lint_command", required=True)
+    la = lsub.add_parser(
+        "ansible", help="secret-handling lint over playbooks and role task files; exit 1 on any non-info finding"
+    )
+    la.add_argument("paths", nargs="+", help="playbooks, task files or directories (searched for *.yml/*.yaml)")
+    la.add_argument("-p", "--project", help="take the key and lookup denylists from this project file")
+    la.set_defaults(func=cmd_lint_ansible)
 
     runs = sub.add_parser("runs", help="run directory housekeeping")
     rsub = runs.add_subparsers(dest="runs_command", required=True)

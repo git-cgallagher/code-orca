@@ -589,3 +589,17 @@ def test_interrupt_finalises_the_run_record_before_propagating(tmp_path):
     assert record["status"] == "failed" and record["exit_code"] == EXIT_FAILED and record["finished"]
     assert record["steps"]["a"]["status"] == "cancelled" and "interrupted" in record["steps"]["a"]["error"]
     assert record["steps"]["b"]["status"] == "cancelled" and record["steps"]["f"]["status"] == "cancelled"
+
+
+def test_override_function_inside_a_string_literal_does_not_evaluate_an_omitted_step(tmp_path):
+    wf = workflow(
+        [
+            shell("a", FAIL),
+            shell("b", OK, needs=["a"], outputs={"m": "1"}),
+            shell("c", OK, needs=["b"], when="steps.b.outputs.m != 'failure()'"),
+        ],
+        fail_fast=False,
+    )
+    rc, r = run(wf, tmp_path)
+    assert rc == EXIT_FAILED
+    assert statuses(r) == {"a": "failed", "b": "omitted", "c": "omitted"}

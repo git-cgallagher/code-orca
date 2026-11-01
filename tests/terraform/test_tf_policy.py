@@ -171,6 +171,8 @@ def test_policy_defaults():
     assert policy.stateful_types == [] and policy.transient_errors == []
     assert policy.critical_tag_pair() == ("critical", "true")
     assert Policy(critical_tag="Tier=gold").critical_tag_pair() == ("Tier", "gold")
+    with pytest.raises(ValidationError):
+        Policy(critical_tag="critical")  # no '=': would silently never match anything
 
 
 # ---------------------------------------------------------------- plan gate

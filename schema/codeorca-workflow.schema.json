@@ -46,7 +46,11 @@
           "default": {
             "limit": 0,
             "policy": "failure",
-            "backoff": {}
+            "backoff": {
+              "duration": 0.0,
+              "factor": 1.0,
+              "max_duration": null
+            }
           }
         },
         "on_failure": {
@@ -215,6 +219,48 @@
       "title": "AnsibleSource",
       "type": "object"
     },
+    "Backoff": {
+      "additionalProperties": false,
+      "description": "``duration * factor ** (attempt - 1)``, capped at ``max_duration``; durations are Go strings or seconds.",
+      "properties": {
+        "duration": {
+          "anyOf": [
+            {
+              "pattern": "^\\d+(ns|us|ms|s|m|h)(\\d+(ns|us|ms|s|m|h))*$",
+              "type": "string"
+            },
+            {
+              "type": "number"
+            }
+          ],
+          "default": 0.0,
+          "title": "Duration"
+        },
+        "factor": {
+          "default": 1.0,
+          "title": "Factor",
+          "type": "number"
+        },
+        "max_duration": {
+          "anyOf": [
+            {
+              "pattern": "^\\d+(ns|us|ms|s|m|h)(\\d+(ns|us|ms|s|m|h))*$",
+              "type": "string"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Duration"
+        }
+      },
+      "title": "Backoff",
+      "type": "object"
+    },
     "Gate": {
       "additionalProperties": false,
       "properties": {
@@ -261,7 +307,11 @@
           "default": {
             "limit": 0,
             "policy": "failure",
-            "backoff": {}
+            "backoff": {
+              "duration": 0.0,
+              "factor": 1.0,
+              "max_duration": null
+            }
           }
         },
         "on_failure": {
@@ -504,7 +554,11 @@
           "default": {
             "limit": 0,
             "policy": "failure",
-            "backoff": {}
+            "backoff": {
+              "duration": 0.0,
+              "factor": 1.0,
+              "max_duration": null
+            }
           }
         },
         "on_failure": {
@@ -637,7 +691,11 @@
           "default": {
             "limit": 0,
             "policy": "failure",
-            "backoff": {}
+            "backoff": {
+              "duration": 0.0,
+              "factor": 1.0,
+              "max_duration": null
+            }
           }
         },
         "on_failure": {
@@ -743,19 +801,12 @@
           "type": "string"
         },
         "backoff": {
-          "additionalProperties": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "number"
-              }
-            ]
-          },
-          "default": {},
-          "title": "Backoff",
-          "type": "object"
+          "$ref": "#/$defs/Backoff",
+          "default": {
+            "duration": 0.0,
+            "factor": 1.0,
+            "max_duration": null
+          }
         }
       },
       "title": "Retry",
@@ -822,7 +873,11 @@
           "default": {
             "limit": 0,
             "policy": "failure",
-            "backoff": {}
+            "backoff": {
+              "duration": 0.0,
+              "factor": 1.0,
+              "max_duration": null
+            }
           }
         },
         "on_failure": {
@@ -935,7 +990,11 @@
           "default": {
             "limit": 0,
             "policy": "failure",
-            "backoff": {}
+            "backoff": {
+              "duration": 0.0,
+              "factor": 1.0,
+              "max_duration": null
+            }
           }
         },
         "on_failure": {
@@ -1091,7 +1150,11 @@
           "default": {
             "limit": 0,
             "policy": "failure",
-            "backoff": {}
+            "backoff": {
+              "duration": 0.0,
+              "factor": 1.0,
+              "max_duration": null
+            }
           }
         },
         "on_failure": {

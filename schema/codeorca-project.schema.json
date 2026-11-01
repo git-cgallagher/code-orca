@@ -149,6 +149,7 @@
         },
         "critical_tag": {
           "default": "critical=true",
+          "pattern": "^[^=]+=.+$",
           "title": "Critical Tag",
           "type": "string"
         },

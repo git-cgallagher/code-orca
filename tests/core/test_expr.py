@@ -124,9 +124,13 @@ def test_status_functions_in_context():
     assert evaluate_when("cancelled()", {**CTX, **fns}) is True
 
 
-def test_names_override_function_is_textual():
+def test_names_override_function_reads_calls_from_the_parsed_expression():
     assert names_override_function("always()")
     assert names_override_function("steps.x.outputs.y and failure ()")
+    assert names_override_function("not cancelled() and (always() or 1)")
     assert not names_override_function("success()")
     assert not names_override_function("steps.x.status == 'always'")
     assert not names_override_function("vars.always_on")
+    assert not names_override_function("steps.b.outputs.m != 'failure()'")  # inside a string literal
+    assert not names_override_function("inputs.always()")  # an attribute call, not the status function
+    assert names_override_function("always( ")  # unparsable: falls back to the text so evaluation reports it

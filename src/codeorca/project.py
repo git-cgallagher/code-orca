@@ -21,6 +21,7 @@ from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 
 from codeorca.config import load_yaml
 from codeorca.models import Duration
+from codeorca.policy import CRITICAL_TAG_PATTERN
 
 SsmRef = Annotated[str, Field(pattern=r"^ssm:/.+")]
 
@@ -85,7 +86,7 @@ class Policy(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
     stateful_types: list[str] = []
-    critical_tag: str = "critical=true"
+    critical_tag: str = Field(default="critical=true", pattern=CRITICAL_TAG_PATTERN)  # key exact, value case-folded
     transient_errors: list[str] = []  # regexes matched against a step's error text for ``retry.policy: transient``
     profile_allows: dict[str, dict[str, bool]] = {}
 

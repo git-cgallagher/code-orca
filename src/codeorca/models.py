@@ -24,11 +24,20 @@ STEP_REF = re.compile(r"steps\.([A-Za-z_][A-Za-z0-9_]*)\.outputs\.([A-Za-z_][A-Z
 YAML11_BOOL_KEYS = frozenset({"on", "off", "yes", "no", "y", "n", "true", "false"})
 
 
+class Backoff(BaseModel):
+    """``duration * factor ** (attempt - 1)``, capped at ``max_duration``; durations are Go strings or seconds."""
+
+    model_config = ConfigDict(extra="forbid")
+    duration: Duration | float = 0.0
+    factor: float = 1.0
+    max_duration: Duration | float | None = None
+
+
 class Retry(BaseModel):
     model_config = ConfigDict(extra="forbid")
     limit: int = 0
     policy: Literal["failure", "error", "transient"] = "failure"  # not `on`: YAML 1.1 reads that key as True
-    backoff: dict[str, str | float] = {}
+    backoff: Backoff = Backoff()
 
 
 class StepBase(BaseModel):
@@ -231,13 +240,26 @@ class Workflow(BaseModel):
     @model_validator(mode="after")
     def _dag_and_refs(self):
         ids = [s.id for s in self.steps]
-        if len(ids) != len(set(ids)):
-            raise ValueError("duplicate step id")
+        seen: set[str] = set()
+        for sid in [*ids, *(s.id for s in self.finally_)]:
+            if sid in seen:
+                raise ValueError(f"duplicate step id {sid!r}")
+            seen.add(sid)
         graph = self.graph()
         for s in self.steps:
             for n in s.needs:
                 if n not in ids:
                     raise ValueError(f"{s.id}: needs unknown step {n}")
+        for s in self.finally_:
+            if s.needs:
+                # finally steps always run after the main graph; their status functions describe the run
+                raise ValueError(f"finally step {s.id}: needs is not allowed on a finally step (they always run last)")
+        outputs_written: dict[str, str] = {}
+        for s in [*self.steps, *self.finally_]:
+            if s.type == "spec-render":
+                other = outputs_written.setdefault(s.output, s.id)
+                if other != s.id:
+                    raise ValueError(f"spec-render output {s.output!r} is written by steps {other} and {s.id}")
         try:
             tuple(graphlib.TopologicalSorter(graph).static_order())
         except graphlib.CycleError as e:

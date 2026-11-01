@@ -17,7 +17,10 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
+
+# ``key=value``; a tag with no ``=`` would partition to (key, "") and never match a resource (silently off).
+CRITICAL_TAG_PATTERN = r"^[^=]+=.+$"
 
 
 class PolicyError(ValueError):
@@ -186,10 +189,12 @@ class Policy(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     stateful_types: list[str] = []
-    critical_tag: str = "critical=true"
+    critical_tag: str = Field(default="critical=true", pattern=CRITICAL_TAG_PATTERN)
     transient_errors: list[str] = []
 
     def critical_tag_pair(self) -> tuple[str, str]:
+        """``key=value``. The key is compared exactly (cloud tag keys are case-sensitive); the value
+        case-insensitively."""
         key, _, value = self.critical_tag.partition("=")
         return key, value
 

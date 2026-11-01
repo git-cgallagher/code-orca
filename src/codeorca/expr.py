@@ -25,7 +25,7 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 import jinja2
-from jinja2 import StrictUndefined, UndefinedError
+from jinja2 import StrictUndefined, TemplateSyntaxError, UndefinedError, nodes
 from jinja2.sandbox import ImmutableSandboxedEnvironment
 
 VAR_START = "${{"
@@ -36,7 +36,8 @@ _WHOLE = re.compile(r"^\s*\$\{\{(?P<expr>(?:(?!\}\}).)*)\}\}\s*$", re.DOTALL)
 _ANY = re.compile(r"\$\{\{")
 # Status functions that override the implicit ``success()`` (GitHub Actions rule): if a step's needs are unmet
 # the runner decides without evaluating unless the expression text names one of these.
-OVERRIDE_FUNCTIONS = re.compile(r"\b(always|failure|cancelled)\s*\(")
+OVERRIDE_FUNCTION_NAMES = frozenset({"always", "failure", "cancelled"})
+OVERRIDE_FUNCTIONS = re.compile(r"\b(always|failure|cancelled)\s*\(")  # the fallback for unparsable text
 STATUS_FUNCTION_NAMES = ("success", "always", "failure", "cancelled")
 
 
@@ -123,9 +124,18 @@ def evaluate_when(expression: str, ctx: Mapping[str, Any]) -> bool:
 
 
 def names_override_function(expression: str) -> bool:
-    """True when the text calls ``always()``, ``failure()`` or ``cancelled()`` (decided on the text, not during
-    evaluation: ``steps.x.outputs.y and always()`` would raise before ``always`` runs)."""
-    return bool(OVERRIDE_FUNCTIONS.search(expression))
+    """True when the expression calls ``always()``, ``failure()`` or ``cancelled()`` (decided before evaluation:
+    ``steps.x.outputs.y and always()`` would raise before ``always`` runs). Read from the parsed expression, so
+    the words inside a string literal or an attribute call do not count; an unparsable expression falls back to
+    the text, and evaluation then reports the syntax error."""
+    try:
+        tree = ENV.parse(f"{VAR_START} {expression} {VAR_END}")
+    except TemplateSyntaxError:
+        return bool(OVERRIDE_FUNCTIONS.search(expression))
+    return any(
+        isinstance(call.node, nodes.Name) and call.node.name in OVERRIDE_FUNCTION_NAMES
+        for call in tree.find_all(nodes.Call)
+    )
 
 
 def status_functions(needs_met: bool, needs_failed: bool, cancelled: bool) -> dict[str, Callable[[], bool]]:

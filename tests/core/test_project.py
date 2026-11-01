@@ -114,3 +114,11 @@ def test_project_schema_is_draft_2020_12():
     assert schema["$schema"].endswith("2020-12/schema")
     assert schema["additionalProperties"] is False
     assert "stacks" in schema["properties"]
+
+
+@pytest.mark.parametrize("tag", ["critical", "=true", "critical=", ""])
+def test_critical_tag_must_be_key_equals_value(reference, tag):
+    data = copy.deepcopy(reference)
+    data["policy"]["critical_tag"] = tag
+    with pytest.raises(ValidationError, match="critical_tag"):
+        Project.model_validate(data)

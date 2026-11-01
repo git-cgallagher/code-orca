@@ -517,12 +517,10 @@ class Runner:
 
     def _backoff(self, step, attempt: int) -> float:
         b = step.retry.backoff
-        base = b.get("duration", 0)
-        base_s = parse_duration(base) if isinstance(base, str) else float(base)
-        factor = float(b.get("factor", 1))
-        wait = base_s * (factor ** (attempt - 1))
-        cap = b.get("max_duration")
-        if cap is not None:
+        base_s = parse_duration(b.duration) if isinstance(b.duration, str) else float(b.duration)
+        wait = base_s * (b.factor ** (attempt - 1))
+        if b.max_duration is not None:
+            cap = b.max_duration
             wait = min(wait, parse_duration(cap) if isinstance(cap, str) else float(cap))
         return wait
 

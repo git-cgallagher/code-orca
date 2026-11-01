@@ -1,0 +1,447 @@
+{
+  "$defs": {
+    "AnsibleConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "env": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "title": "Env",
+          "type": "object"
+        },
+        "check_unsupported": {
+          "default": "warn",
+          "enum": [
+            "warn",
+            "fail",
+            "ignore"
+          ],
+          "title": "Check Unsupported",
+          "type": "string"
+        }
+      },
+      "title": "AnsibleConfig",
+      "type": "object"
+    },
+    "Backend": {
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "enum": [
+            "s3",
+            "local"
+          ],
+          "title": "Type",
+          "type": "string"
+        },
+        "account_id": {
+          "anyOf": [
+            {
+              "pattern": "^\\d{12}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Account Id"
+        },
+        "bucket": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Bucket"
+        },
+        "region": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Region"
+        },
+        "encryption": {
+          "default": "aes256",
+          "pattern": "^(aes256|kms:.+)$",
+          "title": "Encryption",
+          "type": "string"
+        },
+        "locking": {
+          "const": "lockfile",
+          "default": "lockfile",
+          "title": "Locking",
+          "type": "string"
+        },
+        "noncurrent_version_expiry_days": {
+          "default": 90,
+          "minimum": 1,
+          "title": "Noncurrent Version Expiry Days",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "title": "Backend",
+      "type": "object"
+    },
+    "GateConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "max_age": {
+          "default": "24h",
+          "pattern": "^\\d+(ns|us|ms|s|m|h)(\\d+(ns|us|ms|s|m|h))*$",
+          "title": "Max Age",
+          "type": "string"
+        }
+      },
+      "title": "GateConfig",
+      "type": "object"
+    },
+    "NeverRender": {
+      "additionalProperties": false,
+      "description": "Values dropped before redaction; the name is kept and shown as ``<never rendered: stack policy>``.",
+      "properties": {
+        "outputs": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Outputs",
+          "type": "array"
+        },
+        "resources": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Resources",
+          "type": "array"
+        }
+      },
+      "title": "NeverRender",
+      "type": "object"
+    },
+    "Policy": {
+      "additionalProperties": false,
+      "description": "Can only NARROW the code-level deny floor (plan section 5.4).",
+      "properties": {
+        "stateful_types": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Stateful Types",
+          "type": "array"
+        },
+        "critical_tag": {
+          "default": "critical=true",
+          "title": "Critical Tag",
+          "type": "string"
+        },
+        "transient_errors": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Transient Errors",
+          "type": "array"
+        },
+        "profile_allows": {
+          "additionalProperties": {
+            "additionalProperties": {
+              "type": "boolean"
+            },
+            "type": "object"
+          },
+          "default": {},
+          "title": "Profile Allows",
+          "type": "object"
+        }
+      },
+      "title": "Policy",
+      "type": "object"
+    },
+    "Redaction": {
+      "additionalProperties": false,
+      "properties": {
+        "placeholder": {
+          "default": "hmac",
+          "enum": [
+            "hmac",
+            "sha256"
+          ],
+          "title": "Placeholder",
+          "type": "string"
+        },
+        "hmac_key": {
+          "anyOf": [
+            {
+              "pattern": "^ssm:/.+",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Hmac Key"
+        },
+        "key_denylist": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Key Denylist",
+          "type": "array"
+        },
+        "lookup_denylist": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Lookup Denylist",
+          "type": "array"
+        }
+      },
+      "title": "Redaction",
+      "type": "object"
+    },
+    "Runtime": {
+      "additionalProperties": false,
+      "description": "The expected execution environment; ``codeorca doctor`` fails closed on any mismatch.",
+      "properties": {
+        "image": {
+          "title": "Image",
+          "type": "string"
+        },
+        "terraform": {
+          "title": "Terraform",
+          "type": "string"
+        },
+        "ansible_core": {
+          "title": "Ansible Core",
+          "type": "string"
+        },
+        "python": {
+          "title": "Python",
+          "type": "string"
+        },
+        "pwsh": {
+          "title": "Pwsh",
+          "type": "string"
+        },
+        "collections": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "title": "Collections",
+          "type": "object"
+        },
+        "python_packages": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "title": "Python Packages",
+          "type": "object"
+        },
+        "collections_from_file": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Collections From File"
+        }
+      },
+      "required": [
+        "image",
+        "terraform",
+        "ansible_core",
+        "python",
+        "pwsh"
+      ],
+      "title": "Runtime",
+      "type": "object"
+    },
+    "Stack": {
+      "additionalProperties": false,
+      "properties": {
+        "dir": {
+          "title": "Dir",
+          "type": "string"
+        },
+        "key": {
+          "title": "Key",
+          "type": "string"
+        },
+        "aws_profile": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Aws Profile"
+        },
+        "tfvars_committed": {
+          "default": true,
+          "title": "Tfvars Committed",
+          "type": "boolean"
+        },
+        "state_specs": {
+          "default": false,
+          "title": "State Specs",
+          "type": "boolean"
+        },
+        "never_render": {
+          "$ref": "#/$defs/NeverRender",
+          "default": {
+            "outputs": [],
+            "resources": []
+          }
+        },
+        "plan_lock": {
+          "default": false,
+          "title": "Plan Lock",
+          "type": "boolean"
+        },
+        "depends_on": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Depends On",
+          "type": "array"
+        },
+        "required_env": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Required Env",
+          "type": "array"
+        },
+        "secrets": {
+          "additionalProperties": {
+            "pattern": "^ssm:/.+",
+            "type": "string"
+          },
+          "default": {},
+          "title": "Secrets",
+          "type": "object"
+        }
+      },
+      "required": [
+        "dir",
+        "key"
+      ],
+      "title": "Stack",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "api": {
+      "const": "codeorca/v1",
+      "title": "Api",
+      "type": "string"
+    },
+    "project": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]*$",
+      "title": "Project",
+      "type": "string"
+    },
+    "runtime": {
+      "$ref": "#/$defs/Runtime"
+    },
+    "state_dir": {
+      "default": ".codeorca/runs",
+      "title": "State Dir",
+      "type": "string"
+    },
+    "specs_dir": {
+      "default": "specs",
+      "title": "Specs Dir",
+      "type": "string"
+    },
+    "max_parallel": {
+      "default": 1,
+      "title": "Max Parallel",
+      "type": "integer"
+    },
+    "backend": {
+      "$ref": "#/$defs/Backend"
+    },
+    "stacks": {
+      "additionalProperties": {
+        "$ref": "#/$defs/Stack"
+      },
+      "default": {},
+      "title": "Stacks",
+      "type": "object"
+    },
+    "policy": {
+      "$ref": "#/$defs/Policy",
+      "default": {
+        "stateful_types": [],
+        "critical_tag": "critical=true",
+        "transient_errors": [],
+        "profile_allows": {}
+      }
+    },
+    "redaction": {
+      "$ref": "#/$defs/Redaction"
+    },
+    "ansible": {
+      "$ref": "#/$defs/AnsibleConfig",
+      "default": {
+        "env": {},
+        "check_unsupported": "warn"
+      }
+    },
+    "gate": {
+      "$ref": "#/$defs/GateConfig",
+      "default": {
+        "max_age": "24h"
+      }
+    },
+    "workflows_dir": {
+      "default": "workflows",
+      "title": "Workflows Dir",
+      "type": "string"
+    }
+  },
+  "required": [
+    "api",
+    "project",
+    "runtime",
+    "backend",
+    "redaction"
+  ],
+  "title": "Project",
+  "type": "object",
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}

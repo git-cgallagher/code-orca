@@ -22,6 +22,12 @@ Consumers keep their own `codeorca.yaml`, `workflows/`, `specs/` in their own (u
 | `src/codeorca/adapters/terraform.py` | `TerraformRunner`: one policy-checked `_run` for init/validate/plan/show/output/providers schema/apply/test; `-detailed-exitcode` 2 preserved; apply bound to the plan's sha256; stream callback is where redaction attaches |
 | `tests/terraform/` | deny floor, plan gate, tfjson and runner tests (the live ones skip without `terraform` on PATH) |
 | `tests/fixtures/terraform/` | 1.14.7 captures from the reference stack via `regenerate.py` (plan, replace plan, state, outputs, providers schema, init/apply streams) + hand-made `delete-plan.json` and `init-mixed.jsonl`; the placeholder secret is in them on purpose |
+| `src/codeorca/project.py` | Pydantic models for the project file `codeorca.yaml` (`load_project`, `project_json_schema`): s3 backend needs bucket/region/account_id, stack `depends_on` DAG, `max_parallel` must be 1 |
+| `src/codeorca/expr.py` | `${{ … }}` expressions: sandboxed Jinja2 + StrictUndefined, `render`/`render_value`/`render_tree`, `evaluate_when` (must be a bool), GHA-style `success()`/`always()`/`failure()`/`cancelled()` |
+| `src/codeorca/rundir.py` | `RunDir` (`<state_dir>/<run_id>/{run.json, steps/<id>/, outputs/, handoff/ (0700), specs/}`), run id format, `stack_lock` (flock), `list_runs`, `gc` |
+| `src/codeorca/runner.py` | `Runner`: sequential graphlib DAG, status propagation, retry/backoff, timeouts, inputs, outputs from the typed `result`, `finally`, run.json; `StepContext`/`StepResult`/`Executor` |
+| `src/codeorca/steps/` | executor registry (`register`/`lookup`/`default_executors`), the `shell` executor (argv only, logs via line sink + stream hook), "not implemented in this phase" placeholders for the other types |
+| `tests/core/` | project model, expressions, run directory and runner tests (shell-step workflows on `sys.executable`) |
 | `schema/` | exported JSON Schema; CI fails if it differs from the models (`schema export --check`) |
 | `src/codeorca/redact/` | redaction pipeline (plan §5.7): `registry.py` (`SecretRegistry`, HMAC placeholders, encodings), `text.py` (`redact_tree`/`redact_text`, key denylist), `terraform.py` (`mask_by_map`, `merge_unknown`, `schema_sensitive_paths`, `mask_by_schema`), `stream.py` (`StreamRedactor`), `gate.py` (`scan_outputs`), `entropy.py` (`entropy_warnings`); residual risk in the package docstring |
 | `examples/reference/` | the offline reference project: project config, a provider-free Terraform stack, a localhost playbook, workflows |

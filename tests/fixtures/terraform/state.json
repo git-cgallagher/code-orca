@@ -1,0 +1,80 @@
+{
+  "format_version": "1.0",
+  "terraform_version": "1.14.7",
+  "values": {
+    "outputs": {
+      "app_bucket": {
+        "sensitive": false,
+        "type": "string",
+        "value": "example-app-123456789012"
+      },
+      "app_fqdn": {
+        "sensitive": false,
+        "type": "string",
+        "value": "app-dev.example.com"
+      },
+      "app_host": {
+        "sensitive": false,
+        "type": "string",
+        "value": "127.0.0.1"
+      },
+      "app_token": {
+        "sensitive": true,
+        "type": "string",
+        "value": "FIXTURE-SECRET-tf-input-001"
+      }
+    },
+    "root_module": {
+      "resources": [
+        {
+          "address": "terraform_data.app",
+          "mode": "managed",
+          "name": "app",
+          "provider_name": "terraform.io/builtin/terraform",
+          "schema_version": 0,
+          "sensitive_values": {
+            "input": {
+              "secret": true
+            },
+            "output": {},
+            "triggers_replace": [
+              false
+            ]
+          },
+          "type": "terraform_data",
+          "values": {
+            "id": "499b4adc-1cb3-dfe4-7fa5-5bc9e1e8c0f0",
+            "input": {
+              "name": "example-app-dev",
+              "secret": "FIXTURE-SECRET-tf-input-001"
+            },
+            "output": {
+              "name": "example-app-dev",
+              "secret": "FIXTURE-SECRET-tf-input-001"
+            },
+            "triggers_replace": [
+              "dev"
+            ]
+          }
+        },
+        {
+          "address": "terraform_data.app_secret",
+          "mode": "managed",
+          "name": "app_secret",
+          "provider_name": "terraform.io/builtin/terraform",
+          "schema_version": 0,
+          "sensitive_values": {
+            "input": true
+          },
+          "type": "terraform_data",
+          "values": {
+            "id": "1275305d-b55c-b65e-bb2e-e8b95a09fe23",
+            "input": "FIXTURE-SECRET-tf-input-001",
+            "output": "FIXTURE-SECRET-tf-input-001",
+            "triggers_replace": null
+          }
+        }
+      ]
+    }
+  }
+}

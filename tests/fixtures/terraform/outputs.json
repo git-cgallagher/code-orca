@@ -1,0 +1,22 @@
+{
+  "app_bucket": {
+    "sensitive": false,
+    "type": "string",
+    "value": "example-app-123456789012"
+  },
+  "app_fqdn": {
+    "sensitive": false,
+    "type": "string",
+    "value": "app-dev.example.com"
+  },
+  "app_host": {
+    "sensitive": false,
+    "type": "string",
+    "value": "127.0.0.1"
+  },
+  "app_token": {
+    "sensitive": true,
+    "type": "string",
+    "value": "FIXTURE-SECRET-tf-input-001"
+  }
+}

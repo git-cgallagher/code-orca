@@ -1,4 +1,7 @@
 # yaml-language-server: $schema=../../../schema/codeorca-workflow.schema.json
+# The full rollout. It VALIDATES in Phase 1 but does not run yet: gate, apply, ansible, python and powershell
+# steps are "not implemented in this phase" (the runner errors on the first one). `plan-only.yaml` is the
+# workflow that runs end to end today.
 api: codeorca/v1
 kind: workflow
 name: demo-rollout
@@ -16,7 +19,7 @@ steps:
     outputs:
       changed: "${{ result.exit_code == 2 }}"
       plan_file: "${{ result.files.plan_file }}"
-      plan_json: "${{ result.files.plan_json }}"           # piped + masked show -json, stored under the run dir only
+      plan_json: "${{ result.files.plan_json }}"           # the redacted plan document (not raw show -json), under the run dir only
       prior_app_host: "${{ result.prior_outputs.app_host.value }}"   # from prior_state in the plan JSON (non-sensitive)
 
   - id: plan_spec

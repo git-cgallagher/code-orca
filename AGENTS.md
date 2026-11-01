@@ -16,16 +16,47 @@ Consumers keep their own `codeorca.yaml`, `workflows/`, `specs/` in their own (u
 |---|---|
 | `src/codeorca/models.py` | Pydantic v2 models: the single source of truth for workflow files and the JSON Schema |
 | `src/codeorca/config.py` | YAML 1.2 loader (ruamel, pure) |
-| `src/codeorca/cli.py` | `codeorca validate`, `codeorca schema export [--check]` |
+| `src/codeorca/cli.py` | `codeorca validate`, `schema export [--check]` (workflow + project schemas), `run`, `drift`, `doctor`, `render`, `summary`, `runs gc`; every project command takes `-p` |
+| `src/codeorca/secrets.py` | run-wide redaction wiring: `build_registry` (HMAC key from `CODEORCA_REDACTION_KEY` in this phase, fail-closed; seeds from `AWS_SECRET_ACCESS_KEY`/`AWS_SESSION_TOKEN` + every stack's `secrets:`/`required_env` values), `seed_inputs` (inputs whose name matches the key denylist), `line_hook` for `Runner(stream=)`, `record_filter` for `Runner(redact=)`, `terraform_stream` (a `StreamRedactor` per channel) for `TerraformRunner(stream=)` |
+| `src/codeorca/doctor.py` | `codeorca doctor`: tiny dependency-free version matcher (`exact`, `>=,<`, `7.6.*`, `*`), injectable probes, table / `--json` / `--lock` output |
+| `src/codeorca/specs/` | spec rendering: `__init__.py` (`render_spec_yaml`, `write_spec` + `.meta.yaml` sidecar + the post-write gate, `build_header`, `NEVER_RENDERED`), `terraform_plan.py` (`seed_registry`, `build_plan_document`: merge_unknown -> placeholder mask -> schema mask -> value scrub + key denylist on value trees only, provenance from `configuration.*.expressions`, `never_render`) |
+| `src/codeorca/steps/terraform.py` | the `terraform` executor (`make_executor(registry)`): stack resolution, per-stack flock, non-secret backend config, pre-plan registration of sensitive `var_overrides` / `TF_VAR_*`, `init` (`-lockfile=readonly` under `CI`), `validate`/`plan`/`output`/`test`; `apply` and `migrate_backend` fail with the Phase 3 message; `open_session` + `plan_stack` are what `codeorca drift` reuses |
+| `src/codeorca/steps/spec_render.py` | the `spec-render` executor (`terraform_plan` source only this phase) and `render_run` behind `codeorca render` |
+| `tests/specs/`, `tests/steps/`, `tests/cli/`, `tests/integration/` | plan document + YAML writer over the fixtures; executors without a terraform binary; doctor with injected probes; the reference project end to end through the CLI (skipped without `terraform`) |
+| `src/codeorca/policy.py` | Terraform deny floor as code (`DENY_FLOOR`, `check_argv`), the `Policy` model (narrow-only, `extra='forbid'`) and the plan gate (`plan_gate` -> `GateVerdict`) |
+| `src/codeorca/tfjson.py` | pure parsers for `-json` streams (tolerant of non-JSON lines) and `show -json` plan/state documents: summary, sensitive variables/outputs, prior and previous outputs |
+| `src/codeorca/adapters/terraform.py` | `TerraformRunner`: one policy-checked `_run` for init/validate/plan/show/output/providers schema/apply/test; `-detailed-exitcode` 2 preserved; apply bound to the plan's sha256; stream callback is where redaction attaches |
+| `tests/terraform/` | deny floor, plan gate, tfjson and runner tests (the live ones skip without `terraform` on PATH) |
+| `tests/fixtures/terraform/` | 1.14.7 captures from the reference stack via `regenerate.py` (plan, replace plan, state, outputs, providers schema, init/apply streams) + hand-made `delete-plan.json` and `init-mixed.jsonl`; the placeholder secret is in them on purpose |
+| `src/codeorca/project.py` | Pydantic models for the project file `codeorca.yaml` (`load_project`, `project_json_schema`): s3 backend needs bucket/region/account_id, stack `depends_on` DAG, `max_parallel` must be 1 |
+| `src/codeorca/expr.py` | `${{ … }}` expressions: sandboxed Jinja2 + StrictUndefined, `render`/`render_value`/`render_tree`, `evaluate_when` (must be a bool), GHA-style `success()`/`always()`/`failure()`/`cancelled()` |
+| `src/codeorca/rundir.py` | `RunDir` (`<state_dir>/<run_id>/{run.json, steps/<id>/, outputs/, handoff/ (0700), specs/}`), run id format, `stack_lock` (flock), `list_runs`, `gc` |
+| `src/codeorca/runner.py` | `Runner`: sequential graphlib DAG, status propagation, retry/backoff, timeouts, inputs, outputs from the typed `result`, `finally`, run.json; `StepContext`/`StepResult`/`Executor` |
+| `src/codeorca/steps/` | executor registry (`register`/`lookup`/`default_executors`), the `shell` executor (argv only, logs via line sink + stream hook), "not implemented in this phase" placeholders for the other types |
+| `tests/core/` | project model, expressions, run directory and runner tests (shell-step workflows on `sys.executable`) |
 | `schema/` | exported JSON Schema; CI fails if it differs from the models (`schema export --check`) |
+| `src/codeorca/redact/` | redaction pipeline (plan §5.7): `registry.py` (`SecretRegistry`, HMAC placeholders, encodings), `text.py` (`redact_tree`/`redact_text`, key denylist), `terraform.py` (`mask_by_map`, `merge_unknown`, `schema_sensitive_paths`, `mask_by_schema`), `stream.py` (`StreamRedactor`), `gate.py` (`scan_outputs`), `entropy.py` (`entropy_warnings`); residual risk in the package docstring |
 | `examples/reference/` | the offline reference project: project config, a provider-free Terraform stack, a localhost playbook, workflows |
 | `tests/` | pytest; `tests/negative/` holds workflow files that must fail validation, each for a named reason |
+| `tests/redact/` | redaction tests (no terraform/ansible binary needed); `fixtures/` holds a hand-scrubbed plan/state/output JSON, a providers-schema excerpt and two log captures, all with `FIXTURE-SECRET-*` placeholders; regeneration recipe in `conftest.py` |
 
 ## Conventions
 
 - **Deny floor in code.** The Terraform `action` enum and the `apply` -> `plan_file` rule live in the
   models. A workflow file can only narrow policy, never widen it. Do not add `destroy`, `import`,
-  `state`, `taint` or an auto-approve flag to the enum.
+  `state`, `taint` or an auto-approve flag to the enum. The floor covers the `terraform` step type; helpers
+  (`shell` today, `python`/`powershell` later) are trusted code, but the `shell` executor still runs
+  `policy.check_argv` over an argv whose program is `terraform`/`tofu`, so `run: [terraform, destroy]` is
+  refused too. The adapter drops `TF_CLI_ARGS*` from every child environment (the one other way onto the
+  command line).
+- **Model rules with a negative test each** (`tests/test_models.py`): duplicate step ids across `steps` and
+  `finally`; `needs` on a finally step is refused (finally steps always run last; their status functions
+  describe the run); `retry` + `on_failure: continue`; references to unknown or non-ancestor steps; unknown
+  keys; `retry.backoff` is a typed `Backoff` (`duration`/`max_duration` as Go durations or seconds, `factor`);
+  two `spec-render` steps may not share an `output`; `policy.critical_tag` must be `key=value` (the key is
+  compared exactly, the value case-folded).
+- **Workflow `vars` are rendered once at run start** over `inputs`/`run`/`project` (never `steps`) and
+  `run.json` carries the resolved values.
 - **Every new model field is validated fail-closed** (`extra='forbid'`), gets a negative test when it
   carries a rule, and the committed schema is regenerated in the same PR (`codeorca schema export schema`).
 - **Expressions use `${{ … }}`**, never `{{ … }}`, so Ansible's own templating passes through untouched.
@@ -37,6 +68,80 @@ Consumers keep their own `codeorca.yaml`, `workflows/`, `specs/` in their own (u
   satisfies the "external contributor review" ruleset for the owner's own PRs).
 
 ## ⚠️ Gotchas (learned during the design research, 2026-11-01)
+
+Phase 1 integration (2026-11-01):
+- **`prior_state.values.outputs` is not the previous value.** On 1.14.7 it holds the root outputs re-evaluated
+  against the *current* configuration and variables (a first plan already lists them; a plan that changes an output
+  shows the new value there). The value the state recorded is `output_changes[name].before`
+  (`tfjson.previous_outputs`); `prior_outputs` is the fallback for outputs with no change entry.
+- **`init -json` and `-migrate-state` are mutually exclusive** on 1.14.7; the `migrate_backend` action (Phase 3) must
+  run its init without `-json` (tolerant text parsing) or not at all.
+- **The redaction key is `CODEORCA_REDACTION_KEY` in Phase 1** (bytes of its UTF-8; key id `env:<sha256[:8]>` in
+  spec headers). There is no SSM wrapper yet, so `redaction.hmac_key` is validated but unused; a project with
+  `placeholder: hmac` fails closed when the variable is absent. The key's own text is registered, so it never
+  appears in a log either.
+- **A sensitive variable's value must be registered before Terraform starts**, and the plan JSON that says which
+  variables are sensitive only exists after it ran: the executor reads `sensitive = true` out of the stack's `*.tf`
+  / `*.tf.json` files (`#`, `//`, `/* */` comments tolerated) and registers `var_overrides` and **every**
+  `TF_VAR_<name>` whose variable is declared sensitive or whose name matches the key denylist first;
+  `seed_registry` over the plan JSON (sensitive flags plus denylist-named variables) is the authoritative second
+  pass. A value shorter than the registry's `min_length` (8) is never registered: the step result lists it under
+  `unprotected_overrides` and a warning, by name only.
+- **Terraform's `-json` documents are never streamed, and the human `plan` output is held back.** `show -json`,
+  `output -json`, `providers schema`, `version` and `validate` stdout is parsed in memory only (their stderr still
+  streams). `plan`'s stdout prints state-held values that nothing can flag before `show -json` ran (a computed
+  attribute echoing a secret: `~ output = "<the secret>" -> (known after apply)`), so the step buffers it and
+  writes it through the registry only after `seed_registry`, and holds `plan`'s stderr (diagnostics) the same
+  way. Proven by the applied-state integration test. Every other command's stderr streams live through the
+  redactor, which then knows only the pre-registered values (inputs, `TF_VAR_*` of sensitive or denylist-named
+  variables, env tokens): a diagnostic from `init`/`validate`/`output` that quotes an undeclared secret is the
+  residual.
+- **The shell step's terraform check is a courtesy, not a boundary.** `run: [terraform, destroy]` is refused by
+  basename; `env terraform …`, `sh -c`, or a renamed binary are not inspected. Helpers are bounded by the
+  credentials they get and by review, not by argv inspection.
+- **Go's `encoding/json` escapes `<`, `>`, `&` as `\u003c`, `\u003e`, `\u0026`** in every `-json` document and
+  stream; Python's `json.dumps` does not. The registry's encodings include both Go-escaped JSON forms, so a
+  password with `&` in it is matched by the stream redactor and seen by the gate.
+- **A multi-line registered value also registers each of its lines** (`SecretRegistry.add`): the shell step's
+  hook is per line, so a PEM body line printed on its own is still matched; the whole value still collapses to
+  one placeholder.
+- **`timeout:` on a terraform step is a deadline over the whole session** (init included): on expiry the engine
+  gets SIGINT (so it releases the state lock), `interrupt_grace` (10 s) to unwind, then SIGKILL, and the step is
+  `errored` with `timeout:` (`retry.policy: error` applies). The adapter does NOT start Terraform in its own
+  session: a terminal's Ctrl-C reaches it directly. The shell step's timeout bounds the pipe drain too (a
+  background child holding stdout open cannot keep the step alive), and an interrupt kills its process group
+  before propagating; the runner finalises `run.json` (status `failed`, the in-flight step `cancelled`) on any
+  escape, Ctrl-C included.
+- **`terraform test` run blocks default to apply**, Terraform also loads `*.tftest.hcl` / `*.tftest.json` from
+  the root module directory, and the `-json` stream never says which mode a run block used: the `test` action
+  refuses the whole test unless every run block says `command = plan` explicitly (textual scan with a
+  whole-file cross-check; `python-hcl2` would be the real parse).
+- **Whatever a child process writes is unredacted**: `CODEORCA_OUTPUT_FILE` is rewritten through the hook
+  whenever it exists, before it is parsed and whatever the exit (bad JSON and a timeout included), and unlinked
+  before every attempt so a failed attempt's file is never a retry's output; shell `argv.json` goes through the
+  hook too; `run.json`/`result.json`/`outputs/*.json` go through `Runner(redact=)`; `plan.json`,
+  `tf-outputs.json` and a spec are scanned in memory and only then written (0600 for the run-dir files, atomic
+  temp + `os.replace` for a spec, so a gate hit leaves the committed spec untouched). No child ever sees
+  `CODEORCA_REDACTION_KEY`. `plan.tfplan` holds the
+  sensitive variable values in clear inside a zip; on the reference stack the entries are deflated so the value is not
+  byte-visible (observed, not guaranteed: deflate may emit stored blocks), which is why the file is 0600, never copied
+  out of the run dir, and `scan_outputs` over the whole run dir is part of the integration test. Nothing else under the
+  run dir is written by anyone but the orchestrator.
+- **Run ids order by second only**: two runs in one second sort by their random suffix, so `latest` picks by the
+  recorded `started` time, and a test must pick a run by its content, not by position.
+- **`mask_by_map` says `(sensitive)`; specs want placeholders.** The spec renderer masks map-flagged leaves with the
+  registry placeholder (`mask_with_placeholders`) so a diff shows a secret changed; the schema mask and the key
+  denylist both leave a leaf that already is a placeholder alone (otherwise every real provider's sensitive
+  attribute, map- and schema-flagged by construction, lost its change signal); a sensitive leaf that is also
+  unknown stays `(known after apply)` under the map mask (never the HMAC of that constant), and a
+  schema-sensitive attribute that is also unknown renders `(sensitive)` (the schema mask wins: fail closed).
+- **`never_render.resources` entries are matched exactly first, then as globs**: to `fnmatch`, `[0]` and
+  `["prod"]` are character classes, so an indexed address could never match itself. Outputs are exact names.
+- **`! grep` under `bash -e` never fails a CI step** (errexit ignores an inverted pipeline, and a multi-line
+  `run:` exits with its last command's status). Every leak check is its own fatal `if grep -raq`.
+- **An editable install cannot catch a subpackage missing from the wheel**: setuptools finds packages under
+  `src/` and CI installs the built wheel into a scratch venv (`--no-cache-dir`: pip happily reuses a cached build
+  of the same version) and imports every subpackage from it.
 
 Terraform (1.14.7):
 - `show -json` (plan and state), `output -json`, plan files, the plan's `variables` block and `TF_LOG` all
@@ -83,9 +188,14 @@ Container (for the image phase):
 
 ## TODO (phases, from the design plan)
 
-1. Core, read-only: project-file model, DAG runner (sequential), Terraform adapter, policy floor + plan gate,
-   redaction pipeline + fixture, plan-spec renderer, `codeorca drift`, `codeorca doctor`.
+1. ~~Core, read-only~~ (done 2026-11-01: project-file model, DAG runner (sequential), Terraform adapter, policy
+   floor + plan gate, redaction pipeline + fixture, plan-spec renderer, `codeorca drift`, `codeorca doctor`).
+   Left for later phases from Phase 1: the SSM-backed redaction key (Phase 3), `terraform_state` specs
+   (`state_specs: true`; the renderer exists, the executor does not call `show_state` yet), the `resource_drift`
+   shape is assumed identical to `resource_changes` (plan §10, unverified), `--dry-run` is a no-op for the
+   read-only Terraform actions, and `required_env` is checked by the terraform step only.
 2. Ansible adapter + redacting stdout callback, inventory/handoff generation, host-spec renderer.
 3. Helpers (python/powershell/shell), gate with TTY + resume, apply bound to the plan sha256, backend bootstrap.
-4. Container image on `ghcr.io/git-cgallagher/ansible-runtime`.
+4. Container image on `ghcr.io/git-cgallagher/ansible-runtime`: the pyproject ranges (`pydantic`, `ruamel.yaml`,
+   `jinja2`) must be pinned exactly, with hashes, in `requirements/codeorca.txt` for the image; ranges are for pip users only.
 5. Reference project end to end in CI; consumer guide; v0.1.0.

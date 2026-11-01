@@ -1,0 +1,127 @@
+{
+  "format_version": "1.0",
+  "provider_schemas": {
+    "terraform.io/builtin/terraform": {
+      "data_source_schemas": {
+        "terraform_remote_state": {
+          "block": {
+            "attributes": {
+              "backend": {
+                "description": "The remote backend to use, e.g. `remote` or `http`.",
+                "description_kind": "markdown",
+                "required": true,
+                "type": "string"
+              },
+              "config": {
+                "description": "The configuration of the remote backend. Although this is optional, most backends require some configuration.\n\nThe object can use any arguments that would be valid in the equivalent `terraform { backend \"<TYPE>\" { ... } }` block.",
+                "description_kind": "markdown",
+                "optional": true,
+                "type": "dynamic"
+              },
+              "defaults": {
+                "description": "Default values for outputs, in case the state file is empty or lacks a required output.",
+                "description_kind": "markdown",
+                "optional": true,
+                "type": "dynamic"
+              },
+              "outputs": {
+                "computed": true,
+                "description": "An object containing every root-level output in the remote state.",
+                "description_kind": "markdown",
+                "type": "dynamic"
+              },
+              "workspace": {
+                "description": "The Terraform workspace to use, if the backend supports workspaces.",
+                "description_kind": "markdown",
+                "optional": true,
+                "type": "string"
+              }
+            },
+            "description_kind": "plain"
+          },
+          "version": 0
+        }
+      },
+      "functions": {
+        "decode_tfvars": {
+          "description": "A rarely-needed function which takes a string containing the content of a `.tfvars` file and returns an object describing the raw variable values it defines.",
+          "parameters": [
+            {
+              "name": "src",
+              "type": "string"
+            }
+          ],
+          "return_type": "dynamic",
+          "summary": "Parse a string containing syntax like that used in a `.tfvars` file"
+        },
+        "encode_expr": {
+          "description": "A rarely-needed function which takes any value and produces a string containing Terraform language expression syntax approximating that value.",
+          "parameters": [
+            {
+              "name": "value",
+              "type": "dynamic"
+            }
+          ],
+          "return_type": "string",
+          "summary": "Produce a string representation of an arbitrary value using Terraform expression syntax"
+        },
+        "encode_tfvars": {
+          "description": "A rarely-needed function which takes an object value and produces a string containing a description of that object using the same syntax as Terraform CLI would expect in a `.tfvars`.",
+          "parameters": [
+            {
+              "name": "value",
+              "type": "dynamic"
+            }
+          ],
+          "return_type": "string",
+          "summary": "Produce a string representation of an object using the same syntax as for `.tfvars` files"
+        }
+      },
+      "provider": {
+        "version": 0
+      },
+      "resource_identity_schemas": {
+        "terraform_data": {
+          "attributes": {
+            "id": {
+              "description": "The unique identifier for the data store.",
+              "required_for_import": true,
+              "type": "string"
+            }
+          },
+          "version": 0
+        }
+      },
+      "resource_schemas": {
+        "terraform_data": {
+          "block": {
+            "attributes": {
+              "id": {
+                "computed": true,
+                "description_kind": "plain",
+                "type": "string"
+              },
+              "input": {
+                "description_kind": "plain",
+                "optional": true,
+                "type": "dynamic"
+              },
+              "output": {
+                "computed": true,
+                "description_kind": "plain",
+                "type": "dynamic"
+              },
+              "triggers_replace": {
+                "description_kind": "plain",
+                "optional": true,
+                "type": "dynamic"
+              }
+            },
+            "description_kind": "plain"
+          },
+          "version": 0
+        }
+      }
+    }
+  }
+}

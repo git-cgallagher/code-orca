@@ -4,7 +4,9 @@ Design rules baked in here (see AGENTS.md):
 - ``extra='forbid'`` everywhere: an unknown key is an error, never silently ignored.
 - Step types are a discriminated union on ``type``.
 - The Terraform ``action`` enum is the deny floor: destroy, import, state surgery, -target and -auto-approve
-  are not expressible in a workflow file at all.
+  are not expressible in a ``terraform`` step at all. A helper (``shell`` today, ``python``/``powershell`` later)
+  is trusted code and may run any program; the ``shell`` executor still runs ``policy.check_argv`` over an argv
+  whose program is ``terraform``/``tofu``, so the literal ``run: [terraform, destroy]`` is refused too.
 - ``apply`` requires a ``plan_file``: a bare apply is denied.
 - Cross-step output references (``${{ steps.x.outputs.y }}``) must name a declared output of a step this step
   (transitively) needs, so a typo fails at validation instead of at run time under StrictUndefined.
@@ -24,11 +26,20 @@ STEP_REF = re.compile(r"steps\.([A-Za-z_][A-Za-z0-9_]*)\.outputs\.([A-Za-z_][A-Z
 YAML11_BOOL_KEYS = frozenset({"on", "off", "yes", "no", "y", "n", "true", "false"})
 
 
+class Backoff(BaseModel):
+    """``duration * factor ** (attempt - 1)``, capped at ``max_duration``; durations are Go strings or seconds."""
+
+    model_config = ConfigDict(extra="forbid")
+    duration: Duration | float = 0.0
+    factor: float = 1.0
+    max_duration: Duration | float | None = None
+
+
 class Retry(BaseModel):
     model_config = ConfigDict(extra="forbid")
     limit: int = 0
     policy: Literal["failure", "error", "transient"] = "failure"  # not `on`: YAML 1.1 reads that key as True
-    backoff: dict[str, str | float] = {}
+    backoff: Backoff = Backoff()
 
 
 class StepBase(BaseModel):
@@ -231,13 +242,26 @@ class Workflow(BaseModel):
     @model_validator(mode="after")
     def _dag_and_refs(self):
         ids = [s.id for s in self.steps]
-        if len(ids) != len(set(ids)):
-            raise ValueError("duplicate step id")
+        seen: set[str] = set()
+        for sid in [*ids, *(s.id for s in self.finally_)]:
+            if sid in seen:
+                raise ValueError(f"duplicate step id {sid!r}")
+            seen.add(sid)
         graph = self.graph()
         for s in self.steps:
             for n in s.needs:
                 if n not in ids:
                     raise ValueError(f"{s.id}: needs unknown step {n}")
+        for s in self.finally_:
+            if s.needs:
+                # finally steps always run after the main graph; their status functions describe the run
+                raise ValueError(f"finally step {s.id}: needs is not allowed on a finally step (they always run last)")
+        outputs_written: dict[str, str] = {}
+        for s in [*self.steps, *self.finally_]:
+            if s.type == "spec-render":
+                other = outputs_written.setdefault(s.output, s.id)
+                if other != s.id:
+                    raise ValueError(f"spec-render output {s.output!r} is written by steps {other} and {s.id}")
         try:
             tuple(graphlib.TopologicalSorter(graph).static_order())
         except graphlib.CycleError as e:

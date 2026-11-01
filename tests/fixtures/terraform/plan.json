@@ -1,0 +1,308 @@
+{
+  "applyable": true,
+  "complete": true,
+  "configuration": {
+    "provider_config": {
+      "terraform": {
+        "full_name": "terraform.io/builtin/terraform",
+        "name": "terraform"
+      }
+    },
+    "root_module": {
+      "outputs": {
+        "app_bucket": {
+          "expression": {
+            "constant_value": "example-app-123456789012"
+          }
+        },
+        "app_fqdn": {
+          "expression": {
+            "references": [
+              "var.environment"
+            ]
+          }
+        },
+        "app_host": {
+          "expression": {
+            "references": [
+              "local.app_host"
+            ]
+          }
+        },
+        "app_token": {
+          "expression": {
+            "references": [
+              "var.app_secret"
+            ]
+          },
+          "sensitive": true
+        }
+      },
+      "resources": [
+        {
+          "address": "terraform_data.app",
+          "expressions": {
+            "input": {
+              "references": [
+                "local.app_name",
+                "var.app_secret"
+              ]
+            },
+            "triggers_replace": {
+              "references": [
+                "var.environment"
+              ]
+            }
+          },
+          "mode": "managed",
+          "name": "app",
+          "provider_config_key": "terraform",
+          "schema_version": 0,
+          "type": "terraform_data"
+        },
+        {
+          "address": "terraform_data.app_secret",
+          "expressions": {
+            "input": {
+              "references": [
+                "var.app_secret"
+              ]
+            }
+          },
+          "mode": "managed",
+          "name": "app_secret",
+          "provider_config_key": "terraform",
+          "schema_version": 0,
+          "type": "terraform_data"
+        }
+      ],
+      "variables": {
+        "app_secret": {
+          "sensitive": true
+        },
+        "environment": {
+          "default": "dev"
+        }
+      }
+    }
+  },
+  "errored": false,
+  "format_version": "1.2",
+  "output_changes": {
+    "app_bucket": {
+      "actions": [
+        "create"
+      ],
+      "after": "example-app-123456789012",
+      "after_sensitive": false,
+      "after_unknown": false,
+      "before": null,
+      "before_sensitive": false
+    },
+    "app_fqdn": {
+      "actions": [
+        "create"
+      ],
+      "after": "app-dev.example.com",
+      "after_sensitive": false,
+      "after_unknown": false,
+      "before": null,
+      "before_sensitive": false
+    },
+    "app_host": {
+      "actions": [
+        "create"
+      ],
+      "after": "127.0.0.1",
+      "after_sensitive": false,
+      "after_unknown": false,
+      "before": null,
+      "before_sensitive": false
+    },
+    "app_token": {
+      "actions": [
+        "create"
+      ],
+      "after": "FIXTURE-SECRET-tf-input-001",
+      "after_sensitive": true,
+      "after_unknown": false,
+      "before": null,
+      "before_sensitive": true
+    }
+  },
+  "planned_values": {
+    "outputs": {
+      "app_bucket": {
+        "sensitive": false,
+        "type": "string",
+        "value": "example-app-123456789012"
+      },
+      "app_fqdn": {
+        "sensitive": false,
+        "type": "string",
+        "value": "app-dev.example.com"
+      },
+      "app_host": {
+        "sensitive": false,
+        "type": "string",
+        "value": "127.0.0.1"
+      },
+      "app_token": {
+        "sensitive": true,
+        "type": "string",
+        "value": "FIXTURE-SECRET-tf-input-001"
+      }
+    },
+    "root_module": {
+      "resources": [
+        {
+          "address": "terraform_data.app",
+          "mode": "managed",
+          "name": "app",
+          "provider_name": "terraform.io/builtin/terraform",
+          "schema_version": 0,
+          "sensitive_values": {
+            "input": {
+              "secret": true
+            },
+            "output": {},
+            "triggers_replace": [
+              false
+            ]
+          },
+          "type": "terraform_data",
+          "values": {
+            "input": {
+              "name": "example-app-dev",
+              "secret": "FIXTURE-SECRET-tf-input-001"
+            },
+            "triggers_replace": [
+              "dev"
+            ]
+          }
+        },
+        {
+          "address": "terraform_data.app_secret",
+          "mode": "managed",
+          "name": "app_secret",
+          "provider_name": "terraform.io/builtin/terraform",
+          "schema_version": 0,
+          "sensitive_values": {
+            "input": true
+          },
+          "type": "terraform_data",
+          "values": {
+            "input": "FIXTURE-SECRET-tf-input-001",
+            "triggers_replace": null
+          }
+        }
+      ]
+    }
+  },
+  "prior_state": {
+    "format_version": "1.0",
+    "terraform_version": "1.14.7",
+    "values": {
+      "outputs": {
+        "app_bucket": {
+          "sensitive": false,
+          "type": "string",
+          "value": "example-app-123456789012"
+        },
+        "app_fqdn": {
+          "sensitive": false,
+          "type": "string",
+          "value": "app-dev.example.com"
+        },
+        "app_host": {
+          "sensitive": false,
+          "type": "string",
+          "value": "127.0.0.1"
+        },
+        "app_token": {
+          "sensitive": true,
+          "type": "string",
+          "value": "FIXTURE-SECRET-tf-input-001"
+        }
+      },
+      "root_module": {}
+    }
+  },
+  "resource_changes": [
+    {
+      "address": "terraform_data.app",
+      "change": {
+        "actions": [
+          "create"
+        ],
+        "after": {
+          "input": {
+            "name": "example-app-dev",
+            "secret": "FIXTURE-SECRET-tf-input-001"
+          },
+          "triggers_replace": [
+            "dev"
+          ]
+        },
+        "after_sensitive": {
+          "input": {
+            "secret": true
+          },
+          "output": {},
+          "triggers_replace": [
+            false
+          ]
+        },
+        "after_unknown": {
+          "id": true,
+          "input": {},
+          "output": true,
+          "triggers_replace": [
+            false
+          ]
+        },
+        "before": null,
+        "before_sensitive": false
+      },
+      "mode": "managed",
+      "name": "app",
+      "provider_name": "terraform.io/builtin/terraform",
+      "type": "terraform_data"
+    },
+    {
+      "address": "terraform_data.app_secret",
+      "change": {
+        "actions": [
+          "create"
+        ],
+        "after": {
+          "input": "FIXTURE-SECRET-tf-input-001",
+          "triggers_replace": null
+        },
+        "after_sensitive": {
+          "input": true
+        },
+        "after_unknown": {
+          "id": true,
+          "output": true
+        },
+        "before": null,
+        "before_sensitive": false
+      },
+      "mode": "managed",
+      "name": "app_secret",
+      "provider_name": "terraform.io/builtin/terraform",
+      "type": "terraform_data"
+    }
+  ],
+  "terraform_version": "1.14.7",
+  "timestamp": "2026-11-01T17:46:53Z",
+  "variables": {
+    "app_secret": {
+      "value": "FIXTURE-SECRET-tf-input-001"
+    },
+    "environment": {
+      "value": "dev"
+    }
+  }
+}

@@ -1,0 +1,24 @@
+{"@level":"info","@message":"Terraform version: 1.14.7","@timestamp":"2026-11-01T11:02:05.104431-05:00"}
+{"@level":"debug","@message":"using github.com/hashicorp/go-tfe v1.94.0","@timestamp":"2026-11-01T11:02:05.104696-05:00"}
+{"@level":"debug","@message":"using github.com/hashicorp/hcl/v2 v2.24.0","@timestamp":"2026-11-01T11:02:05.104712-05:00"}
+{"@level":"debug","@message":"using github.com/hashicorp/terraform-svchost v0.1.1","@timestamp":"2026-11-01T11:02:05.104718-05:00"}
+{"@level":"debug","@message":"using github.com/zclconf/go-cty v1.16.3","@timestamp":"2026-11-01T11:02:05.104724-05:00"}
+{"@level":"info","@message":"Go runtime version: go1.25.8","@timestamp":"2026-11-01T11:02:05.104728-05:00"}
+{"@level":"info","@message":"CLI args: []string{\"terraform\", \"plan\", \"-refresh=false\", \"-no-color\"}","@timestamp":"2026-11-01T11:02:05.104734-05:00"}
+{"@level":"trace","@message":"Stdout is not a terminal","@timestamp":"2026-11-01T11:02:05.104741-05:00"}
+{"@level":"trace","@message":"Stderr is not a terminal","@timestamp":"2026-11-01T11:02:05.104746-05:00"}
+{"@level":"trace","@message":"Stdin is not a terminal","@timestamp":"2026-11-01T11:02:05.104752-05:00"}
+{"@level":"debug","@message":"File doesn't exist, but doesn't need to. Ignoring.","@timestamp":"2026-11-01T11:02:05.104772-05:00"}
+{"@level":"debug","@message":"ignoring non-existing provider search directory terraform.d/plugins","@timestamp":"2026-11-01T11:02:05.104893-05:00"}
+{"@level":"trace","@message":"terraform.contextPlugins: Schema for provider \"terraform.io/builtin/terraform\" is in the global cache","@timestamp":"2026-11-01T11:02:05.184323-05:00"}
+{"@level":"trace","@message":"terraform.contextPlugins: Schema for provider \"terraform.io/builtin/terraform\" is in the global cache","@timestamp":"2026-11-01T11:02:05.184347-05:00"}
+{"@level":"trace","@message":"readResourceInstanceState: reading state for terraform_data.eph","@timestamp":"2026-11-01T11:02:05.184352-05:00"}
+{"@level":"debug","@message":"UpgradeResourceState: ignoring dynamic block: map[string]interface {}{\"type\":[]interface {}{\"object\", map[string]interface {}{\"plain\":\"string\", \"pw\":\"string\"}}, \"value\":map[string]interface {}{\"plain\":\"hello\", \"pw\":\"FIXTURE-SECRET-abc123\"}}","@timestamp":"2026-11-01T11:02:05.184362-05:00"}
+{"@level":"debug","@message":"UpgradeResourceState: ignoring dynamic block: map[string]interface {}{\"type\":[]interface {}{\"object\", map[string]interface {}{\"plain\":\"string\", \"pw\":\"string\"}}, \"value\":map[string]interface {}{\"plain\":\"hello\", \"pw\":\"FIXTURE-SECRET-abc123\"}}","@timestamp":"2026-11-01T11:02:05.184381-05:00"}
+{"@level":"debug","@message":"UpgradeResourceState: ignoring dynamic block: map[string]interface {}{\"type\":\"string\", \"value\":\"x\"}","@timestamp":"2026-11-01T11:02:05.184387-05:00"}
+{"@level":"debug","@message":"UpgradeResourceState: ignoring dynamic block: map[string]interface {}{\"type\":\"string\", \"value\":\"x\"}","@timestamp":"2026-11-01T11:02:05.184397-05:00"}
+{"@level":"trace","@message":"terraform.contextPlugins: Schema for provider \"terraform.io/builtin/terraform\" is in the global cache","@timestamp":"2026-11-01T11:02:05.190899-05:00"}
+{"@level":"trace","@message":"LoadSchemas: retrieving schema for provisioner \"local-exec\"","@timestamp":"2026-11-01T11:02:05.190905-05:00"}
+{"@level":"trace","@message":"terraform.contextPlugins: Initializing provisioner \"local-exec\" to read its schema","@timestamp":"2026-11-01T11:02:05.190908-05:00"}
+{"@level":"trace","@message":"statemgr.Filesystem: removing lock metadata file .terraform.tfstate.lock.info","@timestamp":"2026-11-01T11:02:05.191219-05:00"}
+{"@level":"trace","@message":"statemgr.Filesystem: unlocking terraform.tfstate using fcntl flock","@timestamp":"2026-11-01T11:02:05.191302-05:00"}

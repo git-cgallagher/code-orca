@@ -1,0 +1,89 @@
+[0;34mansible-playbook [core 2.21.5][0m
+[0;34m  config file = None[0m
+[0;34m  configured module search path = ['/root/.ansible/plugins/modules', '/usr/share/ansible/plugins/modules'][0m
+[0;34m  ansible python module location = /usr/local/lib/python3.13/site-packages/ansible[0m
+[0;34m  ansible collection location = /root/.ansible/collections:/usr/share/ansible/collections[0m
+[0;34m  executable location = /usr/local/bin/ansible-playbook[0m
+[0;34m  python version = 3.13.18 (main, Oct 28 2026, 02:08:36) [GCC 14.2.0] (/usr/local/bin/python3.13)[0m
+[0;34m  jinja version = 3.1.6[0m
+[0;34m  pyyaml version = 6.0.3 (with libyaml v0.2.5)[0m
+[0;34mNo config file found; using defaults[0m
+[0;34mParsed localhost, inventory source with host_list plugin[0m
+[0;34mSkipping callback 'minimal', as we already have a stdout callback.[0m
+[0;34mSkipping callback 'oneline', as we already have a stdout callback.[0m
+
+PLAYBOOK: play.yml *************************************************************
+[0;34m1 plays in play.yml[0m
+
+PLAY [localhost] ***************************************************************
+
+TASK [nolog task] **************************************************************
+[1;30mtask path: /w/play.yml:6[0m
+[0;32mok: [localhost] => {[0m
+[0;32m    "censored": "the output has been hidden due to the fact that 'no_log: true' was specified for this result"[0m
+[0;32m}[0m
+
+TASK [logged task] *************************************************************
+[1;30mtask path: /w/play.yml:10[0m
+[0;32mok: [localhost] => {[0m
+[0;32m    "msg": "token is FIXTURE-SECRET-token-999"[0m
+[0;32m}[0m
+
+TASK [loop nolog] **************************************************************
+[1;30mtask path: /w/play.yml:13[0m
+[0;32mok: [localhost] => (item=(censored due to no_log)) => {[0m
+[0;32m    "censored": "the output has been hidden due to the fact that 'no_log: true' was specified for this result"[0m
+[0;32m}[0m
+
+TASK [shell with secret arg] ***************************************************
+[1;30mtask path: /w/play.yml:18[0m
+[1;35m[WARNING]: Host 'localhost' is using the discovered Python interpreter at '/usr/local/bin/python3.13', but future installation of another Python interpreter could cause a different interpreter to be discovered. See https://docs.ansible.com/ansible-core/2.21/reference_appendices/interpreter_discovery.html for more information.[0m
+[0;34m<localhost> ESTABLISH LOCAL CONNECTION FOR USER: root[0m
+[0;34m<localhost> EXEC /bin/sh -c 'echo ~root'[0m
+[0;34m<localhost> EXEC /bin/sh -c '( umask 77 && mkdir -p "` echo /root/.ansible/tmp `"&& mkdir "` echo /root/.ansible/tmp/ansible-tmp-1793548847.087658-28-60821937514935 `" && echo ansible-tmp-1793548847.087658-28-60821937514935="` echo /root/.ansible/tmp/ansible-tmp-1793548847.087658-28-60821937514935 `" )'[0m
+[0;34m<localhost> Attempting python interpreter discovery.[0m
+[0;34m<localhost> EXEC /bin/sh -c 'echo FOUND; command -v '"'"'python3.14'"'"'; command -v '"'"'python3.13'"'"'; command -v '"'"'python3.12'"'"'; command -v '"'"'python3.11'"'"'; command -v '"'"'python3.10'"'"'; command -v '"'"'python3.9'"'"'; command -v '"'"'/usr/bin/python3'"'"'; command -v '"'"'python3'"'"'; echo ENDFOUND'[0m
+[0;34mUsing module file /usr/local/lib/python3.13/site-packages/ansible/modules/command.py[0m
+[0;34m<localhost> PUT /root/.ansible/tmp/ansible-local-20012_3di_/tmpaf2m7lde TO /root/.ansible/tmp/ansible-tmp-1793548847.087658-28-60821937514935/AnsiballZ_command.py[0m
+[0;34m<localhost> EXEC /bin/sh -c 'chmod u+rwx /root/.ansible/tmp/ansible-tmp-1793548847.087658-28-60821937514935/ /root/.ansible/tmp/ansible-tmp-1793548847.087658-28-60821937514935/AnsiballZ_command.py'[0m
+[0;34m<localhost> EXEC /bin/sh -c '/usr/local/bin/python3.13 /root/.ansible/tmp/ansible-tmp-1793548847.087658-28-60821937514935/AnsiballZ_command.py'[0m
+[0;34m<localhost> EXEC /bin/sh -c 'rm -f -r /root/.ansible/tmp/ansible-tmp-1793548847.087658-28-60821937514935/ > /dev/null 2>&1'[0m
+[0;33mchanged: [localhost] => {[0m
+[0;33m    "censored": "the output has been hidden due to the fact that 'no_log: true' was specified for this result",[0m
+[0;33m    "changed": true[0m
+[0;33m}[0m
+
+TASK [vault tagged] ************************************************************
+[1;30mtask path: /w/play.yml:21[0m
+[0;32mok: [localhost] => {[0m
+[0;32m    "vaulted": "FIXTURE-SECRET-vaulted"[0m
+[0;32m}[0m
+
+TASK [tag info] ****************************************************************
+[1;30mtask path: /w/play.yml:24[0m
+[0;32mok: [localhost] => {[0m
+[0;32m    "msg": [[0m
+[0;32m        "Origin",[0m
+[0;32m        "VaultedValue"[0m
+[0;32m    ][0m
+[0;32m}[0m
+
+TASK [fail with secret in msg] *************************************************
+[1;30mtask path: /w/play.yml:28[0m
+[0;31m[ERROR]: Task failed: Action failed: boom FIXTURE-SECRET-token-999[0m
+[0;31mOrigin: /w/play.yml:28:7[0m
+[0;31m[0m
+[0;31m26         msg: "{{ vaulted | ansible._protomatter.tag_names }}"[0m
+[0;31m27       ignore_errors: true[0m
+[0;31m28     - name: fail with secret in msg[0m
+[0;31m         ^ column 7[0m
+[0;31m[0m
+[0;31mfatal: [localhost]: FAILED! => {[0m
+[0;31m    "censored": "the output has been hidden due to the fact that 'no_log: true' was specified for this result",[0m
+[0;31m    "changed": false[0m
+[0;31m}[0m
+[0;36m...ignoring[0m
+
+PLAY RECAP *********************************************************************
+[0;33mlocalhost[0m                  : [0;32mok=7   [0m [0;33mchanged=1   [0m unreachable=0    failed=0    skipped=0    rescued=0    [1;35mignored=1   [0m
+

@@ -1,0 +1,76 @@
+{
+  "_comment": "Hand-crafted for the plan-gate tests (no `terraform destroy` was run): a pure delete of a stateful aws_s3_bucket, a replacement of a resource tagged critical=true, a replacement of a non-stateful untagged resource, and an update. Shape follows show -json format 1.2 on Terraform 1.14.7; unused keys omitted.",
+  "format_version": "1.2",
+  "terraform_version": "1.14.7",
+  "applyable": true,
+  "complete": true,
+  "errored": false,
+  "resource_changes": [
+    {
+      "address": "aws_s3_bucket.state",
+      "mode": "managed",
+      "type": "aws_s3_bucket",
+      "name": "state",
+      "provider_name": "registry.terraform.io/hashicorp/aws",
+      "change": {
+        "actions": ["delete"],
+        "before": {"bucket": "example-tfstate-123456789012", "tags": {"project": "example"}},
+        "after": null,
+        "after_unknown": {},
+        "before_sensitive": {"tags": {}},
+        "after_sensitive": false
+      },
+      "action_reason": "delete_because_no_resource_config"
+    },
+    {
+      "address": "aws_instance.gateway",
+      "mode": "managed",
+      "type": "aws_instance",
+      "name": "gateway",
+      "provider_name": "registry.terraform.io/hashicorp/aws",
+      "change": {
+        "actions": ["delete", "create"],
+        "before": {"ami": "ami-00000000000000000", "tags": {"Name": "gateway", "critical": "true"}, "tags_all": {"Name": "gateway", "critical": "true"}},
+        "after": {"ami": "ami-11111111111111111", "tags": {"Name": "gateway", "critical": "true"}, "tags_all": {"Name": "gateway", "critical": "true"}},
+        "after_unknown": {"id": true},
+        "before_sensitive": {"tags": {}, "tags_all": {}},
+        "after_sensitive": {"tags": {}, "tags_all": {}},
+        "replace_paths": [["ami"]]
+      },
+      "action_reason": "replace_because_cannot_update"
+    },
+    {
+      "address": "terraform_data.app",
+      "mode": "managed",
+      "type": "terraform_data",
+      "name": "app",
+      "provider_name": "terraform.io/builtin/terraform",
+      "change": {
+        "actions": ["delete", "create"],
+        "before": {"input": {"name": "example-app-dev"}, "triggers_replace": ["dev"]},
+        "after": {"input": {"name": "example-app-prod"}, "triggers_replace": ["prod"]},
+        "after_unknown": {"id": true, "output": true},
+        "before_sensitive": {"input": {}, "triggers_replace": [false]},
+        "after_sensitive": {"input": {}, "triggers_replace": [false]},
+        "replace_paths": [["triggers_replace"]]
+      },
+      "action_reason": "replace_because_cannot_update"
+    },
+    {
+      "address": "aws_ssm_parameter.setting",
+      "mode": "managed",
+      "type": "aws_ssm_parameter",
+      "name": "setting",
+      "provider_name": "registry.terraform.io/hashicorp/aws",
+      "change": {
+        "actions": ["update"],
+        "before": {"name": "/example/setting", "value": "old"},
+        "after": {"name": "/example/setting", "value": "new"},
+        "after_unknown": {},
+        "before_sensitive": {"value": true},
+        "after_sensitive": {"value": true}
+      }
+    }
+  ],
+  "configuration": {"root_module": {}}
+}

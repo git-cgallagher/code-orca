@@ -1,0 +1,18 @@
+# Keeps the SHA-pinned actions in .github/workflows current (Dependabot updates the SHA and the version
+# comment together) and the package's Python ranges. Exact runtime versions are pinned in the container image.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      actions:
+        patterns: ['*']
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      python:
+        patterns: ['*']

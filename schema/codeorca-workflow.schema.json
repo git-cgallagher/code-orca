@@ -1,0 +1,1323 @@
+{
+  "$defs": {
+    "Ansible": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "pattern": "^[a-z][a-z0-9_]*$",
+          "title": "Id",
+          "type": "string"
+        },
+        "needs": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Needs",
+          "type": "array"
+        },
+        "when": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "When"
+        },
+        "timeout": {
+          "anyOf": [
+            {
+              "pattern": "^\\d+(ns|us|ms|s|m|h)(\\d+(ns|us|ms|s|m|h))*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Timeout"
+        },
+        "retry": {
+          "$ref": "#/$defs/Retry",
+          "default": {
+            "limit": 0,
+            "policy": "failure",
+            "backoff": {}
+          }
+        },
+        "on_failure": {
+          "default": "fail",
+          "enum": [
+            "fail",
+            "continue"
+          ],
+          "title": "On Failure",
+          "type": "string"
+        },
+        "for_each": {
+          "anyOf": [
+            {
+              "items": {},
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "For Each"
+        },
+        "outputs": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "title": "Outputs",
+          "type": "object"
+        },
+        "cache": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cache"
+        },
+        "type": {
+          "const": "ansible",
+          "title": "Type",
+          "type": "string"
+        },
+        "playbook": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Playbook"
+        },
+        "role": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Role"
+        },
+        "inventory": {
+          "$ref": "#/$defs/Inventory"
+        },
+        "extra_vars": {
+          "additionalProperties": true,
+          "default": {},
+          "title": "Extra Vars",
+          "type": "object"
+        },
+        "tags": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Tags",
+          "type": "array"
+        },
+        "skip_tags": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Skip Tags",
+          "type": "array"
+        },
+        "limit": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Limit"
+        },
+        "check_unsupported": {
+          "default": "warn",
+          "enum": [
+            "warn",
+            "fail",
+            "ignore"
+          ],
+          "title": "Check Unsupported",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "type",
+        "inventory"
+      ],
+      "title": "Ansible",
+      "type": "object"
+    },
+    "AnsibleSource": {
+      "additionalProperties": false,
+      "properties": {
+        "inventory": {
+          "title": "Inventory",
+          "type": "string"
+        },
+        "host": {
+          "title": "Host",
+          "type": "string"
+        },
+        "play_scope": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PlayScope"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "templates": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Templates",
+          "type": "array"
+        }
+      },
+      "required": [
+        "inventory",
+        "host"
+      ],
+      "title": "AnsibleSource",
+      "type": "object"
+    },
+    "Gate": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "pattern": "^[a-z][a-z0-9_]*$",
+          "title": "Id",
+          "type": "string"
+        },
+        "needs": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Needs",
+          "type": "array"
+        },
+        "when": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "When"
+        },
+        "timeout": {
+          "anyOf": [
+            {
+              "pattern": "^\\d+(ns|us|ms|s|m|h)(\\d+(ns|us|ms|s|m|h))*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Timeout"
+        },
+        "retry": {
+          "$ref": "#/$defs/Retry",
+          "default": {
+            "limit": 0,
+            "policy": "failure",
+            "backoff": {}
+          }
+        },
+        "on_failure": {
+          "default": "fail",
+          "enum": [
+            "fail",
+            "continue"
+          ],
+          "title": "On Failure",
+          "type": "string"
+        },
+        "for_each": {
+          "anyOf": [
+            {
+              "items": {},
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "For Each"
+        },
+        "outputs": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "title": "Outputs",
+          "type": "object"
+        },
+        "cache": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cache"
+        },
+        "type": {
+          "const": "gate",
+          "title": "Type",
+          "type": "string"
+        },
+        "message": {
+          "title": "Message",
+          "type": "string"
+        },
+        "on_timeout": {
+          "default": "fail",
+          "enum": [
+            "fail",
+            "cancel",
+            "warn"
+          ],
+          "title": "On Timeout",
+          "type": "string"
+        },
+        "non_interactive": {
+          "default": "wait",
+          "enum": [
+            "wait",
+            "fail"
+          ],
+          "title": "Non Interactive",
+          "type": "string"
+        },
+        "allow_delete_of": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Allow Delete Of",
+          "type": "array"
+        },
+        "fields": {
+          "additionalProperties": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "default": {},
+          "title": "Fields",
+          "type": "object"
+        }
+      },
+      "required": [
+        "id",
+        "type",
+        "message"
+      ],
+      "title": "Gate",
+      "type": "object"
+    },
+    "Input": {
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "enum": [
+            "string",
+            "int",
+            "bool",
+            "list",
+            "map"
+          ],
+          "title": "Type",
+          "type": "string"
+        },
+        "default": {
+          "default": null,
+          "title": "Default"
+        },
+        "enum": {
+          "anyOf": [
+            {
+              "items": {},
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Enum"
+        },
+        "required": {
+          "default": false,
+          "title": "Required",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "title": "Input",
+      "type": "object"
+    },
+    "Inventory": {
+      "additionalProperties": false,
+      "properties": {
+        "inline": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Inline"
+        },
+        "path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Path"
+        }
+      },
+      "title": "Inventory",
+      "type": "object"
+    },
+    "PlayScope": {
+      "additionalProperties": false,
+      "properties": {
+        "playbook": {
+          "title": "Playbook",
+          "type": "string"
+        },
+        "vars": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Vars",
+          "type": "array"
+        }
+      },
+      "required": [
+        "playbook",
+        "vars"
+      ],
+      "title": "PlayScope",
+      "type": "object"
+    },
+    "PowerShell": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "pattern": "^[a-z][a-z0-9_]*$",
+          "title": "Id",
+          "type": "string"
+        },
+        "needs": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Needs",
+          "type": "array"
+        },
+        "when": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "When"
+        },
+        "timeout": {
+          "anyOf": [
+            {
+              "pattern": "^\\d+(ns|us|ms|s|m|h)(\\d+(ns|us|ms|s|m|h))*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Timeout"
+        },
+        "retry": {
+          "$ref": "#/$defs/Retry",
+          "default": {
+            "limit": 0,
+            "policy": "failure",
+            "backoff": {}
+          }
+        },
+        "on_failure": {
+          "default": "fail",
+          "enum": [
+            "fail",
+            "continue"
+          ],
+          "title": "On Failure",
+          "type": "string"
+        },
+        "for_each": {
+          "anyOf": [
+            {
+              "items": {},
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "For Each"
+        },
+        "outputs": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "title": "Outputs",
+          "type": "object"
+        },
+        "cache": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cache"
+        },
+        "script": {
+          "title": "Script",
+          "type": "string"
+        },
+        "args": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Args",
+          "type": "array"
+        },
+        "env": {
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "$ref": "#/$defs/SecretRef"
+              }
+            ]
+          },
+          "default": {},
+          "title": "Env",
+          "type": "object"
+        },
+        "type": {
+          "const": "powershell",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "script",
+        "type"
+      ],
+      "title": "PowerShell",
+      "type": "object"
+    },
+    "Python": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "pattern": "^[a-z][a-z0-9_]*$",
+          "title": "Id",
+          "type": "string"
+        },
+        "needs": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Needs",
+          "type": "array"
+        },
+        "when": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "When"
+        },
+        "timeout": {
+          "anyOf": [
+            {
+              "pattern": "^\\d+(ns|us|ms|s|m|h)(\\d+(ns|us|ms|s|m|h))*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Timeout"
+        },
+        "retry": {
+          "$ref": "#/$defs/Retry",
+          "default": {
+            "limit": 0,
+            "policy": "failure",
+            "backoff": {}
+          }
+        },
+        "on_failure": {
+          "default": "fail",
+          "enum": [
+            "fail",
+            "continue"
+          ],
+          "title": "On Failure",
+          "type": "string"
+        },
+        "for_each": {
+          "anyOf": [
+            {
+              "items": {},
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "For Each"
+        },
+        "outputs": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "title": "Outputs",
+          "type": "object"
+        },
+        "cache": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cache"
+        },
+        "script": {
+          "title": "Script",
+          "type": "string"
+        },
+        "args": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Args",
+          "type": "array"
+        },
+        "env": {
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "$ref": "#/$defs/SecretRef"
+              }
+            ]
+          },
+          "default": {},
+          "title": "Env",
+          "type": "object"
+        },
+        "type": {
+          "const": "python",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "script",
+        "type"
+      ],
+      "title": "Python",
+      "type": "object"
+    },
+    "Retry": {
+      "additionalProperties": false,
+      "properties": {
+        "limit": {
+          "default": 0,
+          "title": "Limit",
+          "type": "integer"
+        },
+        "policy": {
+          "default": "failure",
+          "enum": [
+            "failure",
+            "error",
+            "transient"
+          ],
+          "title": "Policy",
+          "type": "string"
+        },
+        "backoff": {
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "number"
+              }
+            ]
+          },
+          "default": {},
+          "title": "Backoff",
+          "type": "object"
+        }
+      },
+      "title": "Retry",
+      "type": "object"
+    },
+    "SecretRef": {
+      "additionalProperties": false,
+      "properties": {
+        "secret": {
+          "pattern": "^ssm:/.+",
+          "title": "Secret",
+          "type": "string"
+        }
+      },
+      "required": [
+        "secret"
+      ],
+      "title": "SecretRef",
+      "type": "object"
+    },
+    "Shell": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "pattern": "^[a-z][a-z0-9_]*$",
+          "title": "Id",
+          "type": "string"
+        },
+        "needs": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Needs",
+          "type": "array"
+        },
+        "when": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "When"
+        },
+        "timeout": {
+          "anyOf": [
+            {
+              "pattern": "^\\d+(ns|us|ms|s|m|h)(\\d+(ns|us|ms|s|m|h))*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Timeout"
+        },
+        "retry": {
+          "$ref": "#/$defs/Retry",
+          "default": {
+            "limit": 0,
+            "policy": "failure",
+            "backoff": {}
+          }
+        },
+        "on_failure": {
+          "default": "fail",
+          "enum": [
+            "fail",
+            "continue"
+          ],
+          "title": "On Failure",
+          "type": "string"
+        },
+        "for_each": {
+          "anyOf": [
+            {
+              "items": {},
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "For Each"
+        },
+        "outputs": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "title": "Outputs",
+          "type": "object"
+        },
+        "cache": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cache"
+        },
+        "type": {
+          "const": "shell",
+          "title": "Type",
+          "type": "string"
+        },
+        "run": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Run",
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "type",
+        "run"
+      ],
+      "title": "Shell",
+      "type": "object"
+    },
+    "SpecRender": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "pattern": "^[a-z][a-z0-9_]*$",
+          "title": "Id",
+          "type": "string"
+        },
+        "needs": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Needs",
+          "type": "array"
+        },
+        "when": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "When"
+        },
+        "timeout": {
+          "anyOf": [
+            {
+              "pattern": "^\\d+(ns|us|ms|s|m|h)(\\d+(ns|us|ms|s|m|h))*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Timeout"
+        },
+        "retry": {
+          "$ref": "#/$defs/Retry",
+          "default": {
+            "limit": 0,
+            "policy": "failure",
+            "backoff": {}
+          }
+        },
+        "on_failure": {
+          "default": "fail",
+          "enum": [
+            "fail",
+            "continue"
+          ],
+          "title": "On Failure",
+          "type": "string"
+        },
+        "for_each": {
+          "anyOf": [
+            {
+              "items": {},
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "For Each"
+        },
+        "outputs": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "title": "Outputs",
+          "type": "object"
+        },
+        "cache": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cache"
+        },
+        "type": {
+          "const": "spec-render",
+          "title": "Type",
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/$defs/SpecSource"
+        },
+        "output": {
+          "title": "Output",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "type",
+        "source",
+        "output"
+      ],
+      "title": "SpecRender",
+      "type": "object"
+    },
+    "SpecSource": {
+      "additionalProperties": false,
+      "properties": {
+        "terraform_plan": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Terraform Plan"
+        },
+        "terraform_state": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Terraform State"
+        },
+        "ansible": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AnsibleSource"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "title": "SpecSource",
+      "type": "object"
+    },
+    "Terraform": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "pattern": "^[a-z][a-z0-9_]*$",
+          "title": "Id",
+          "type": "string"
+        },
+        "needs": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Needs",
+          "type": "array"
+        },
+        "when": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "When"
+        },
+        "timeout": {
+          "anyOf": [
+            {
+              "pattern": "^\\d+(ns|us|ms|s|m|h)(\\d+(ns|us|ms|s|m|h))*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Timeout"
+        },
+        "retry": {
+          "$ref": "#/$defs/Retry",
+          "default": {
+            "limit": 0,
+            "policy": "failure",
+            "backoff": {}
+          }
+        },
+        "on_failure": {
+          "default": "fail",
+          "enum": [
+            "fail",
+            "continue"
+          ],
+          "title": "On Failure",
+          "type": "string"
+        },
+        "for_each": {
+          "anyOf": [
+            {
+              "items": {},
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "For Each"
+        },
+        "outputs": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "title": "Outputs",
+          "type": "object"
+        },
+        "cache": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cache"
+        },
+        "type": {
+          "const": "terraform",
+          "title": "Type",
+          "type": "string"
+        },
+        "stack": {
+          "title": "Stack",
+          "type": "string"
+        },
+        "action": {
+          "default": "plan",
+          "enum": [
+            "plan",
+            "apply",
+            "output",
+            "validate",
+            "test",
+            "migrate_backend"
+          ],
+          "title": "Action",
+          "type": "string"
+        },
+        "plan_file": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Plan File"
+        },
+        "var_overrides": {
+          "additionalProperties": true,
+          "default": {},
+          "title": "Var Overrides",
+          "type": "object"
+        }
+      },
+      "required": [
+        "id",
+        "type",
+        "stack"
+      ],
+      "title": "Terraform",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "api": {
+      "const": "codeorca/v1",
+      "title": "Api",
+      "type": "string"
+    },
+    "kind": {
+      "const": "workflow",
+      "title": "Kind",
+      "type": "string"
+    },
+    "name": {
+      "title": "Name",
+      "type": "string"
+    },
+    "description": {
+      "default": "",
+      "title": "Description",
+      "type": "string"
+    },
+    "inputs": {
+      "additionalProperties": {
+        "$ref": "#/$defs/Input"
+      },
+      "default": {},
+      "title": "Inputs",
+      "type": "object"
+    },
+    "vars": {
+      "additionalProperties": true,
+      "default": {},
+      "title": "Vars",
+      "type": "object"
+    },
+    "fail_fast": {
+      "default": true,
+      "title": "Fail Fast",
+      "type": "boolean"
+    },
+    "steps": {
+      "items": {
+        "discriminator": {
+          "mapping": {
+            "ansible": "#/$defs/Ansible",
+            "gate": "#/$defs/Gate",
+            "powershell": "#/$defs/PowerShell",
+            "python": "#/$defs/Python",
+            "shell": "#/$defs/Shell",
+            "spec-render": "#/$defs/SpecRender",
+            "terraform": "#/$defs/Terraform"
+          },
+          "propertyName": "type"
+        },
+        "oneOf": [
+          {
+            "$ref": "#/$defs/Terraform"
+          },
+          {
+            "$ref": "#/$defs/Ansible"
+          },
+          {
+            "$ref": "#/$defs/Python"
+          },
+          {
+            "$ref": "#/$defs/PowerShell"
+          },
+          {
+            "$ref": "#/$defs/Shell"
+          },
+          {
+            "$ref": "#/$defs/Gate"
+          },
+          {
+            "$ref": "#/$defs/SpecRender"
+          }
+        ]
+      },
+      "title": "Steps",
+      "type": "array"
+    },
+    "finally": {
+      "default": [],
+      "items": {
+        "discriminator": {
+          "mapping": {
+            "ansible": "#/$defs/Ansible",
+            "gate": "#/$defs/Gate",
+            "powershell": "#/$defs/PowerShell",
+            "python": "#/$defs/Python",
+            "shell": "#/$defs/Shell",
+            "spec-render": "#/$defs/SpecRender",
+            "terraform": "#/$defs/Terraform"
+          },
+          "propertyName": "type"
+        },
+        "oneOf": [
+          {
+            "$ref": "#/$defs/Terraform"
+          },
+          {
+            "$ref": "#/$defs/Ansible"
+          },
+          {
+            "$ref": "#/$defs/Python"
+          },
+          {
+            "$ref": "#/$defs/PowerShell"
+          },
+          {
+            "$ref": "#/$defs/Shell"
+          },
+          {
+            "$ref": "#/$defs/Gate"
+          },
+          {
+            "$ref": "#/$defs/SpecRender"
+          }
+        ]
+      },
+      "title": "Finally",
+      "type": "array"
+    }
+  },
+  "required": [
+    "api",
+    "kind",
+    "name",
+    "steps"
+  ],
+  "title": "Workflow",
+  "type": "object",
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}

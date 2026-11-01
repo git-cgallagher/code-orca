@@ -1,0 +1,96 @@
+# yaml-language-server: $schema=../../../schema/codeorca-workflow.schema.json
+api: codeorca/v1
+kind: workflow
+name: demo-rollout
+description: Plan the app stack, render specs, approve, apply, configure a host with Ansible from the outputs.
+
+inputs:
+  env: { type: string, enum: [dev, prod], default: dev }
+
+steps:
+  - id: plan_app
+    type: terraform
+    stack: app
+    action: plan
+    var_overrides: { environment: "${{ inputs.env }}" }   # rendered into a temporary -var-file (last wins)
+    outputs:
+      changed: "${{ result.exit_code == 2 }}"
+      plan_file: "${{ result.files.plan_file }}"
+      plan_json: "${{ result.files.plan_json }}"           # piped + masked show -json, stored under the run dir only
+      prior_app_host: "${{ result.prior_outputs.app_host.value }}"   # from prior_state in the plan JSON (non-sensitive)
+
+  - id: plan_spec
+    type: spec-render
+    needs: [plan_app]
+    source: { terraform_plan: "${{ steps.plan_app.outputs.plan_json }}" }
+    output: specs/app/plan.yaml
+
+  - id: approve
+    type: gate
+    needs: [plan_spec]
+    when: "steps.plan_app.outputs.changed"
+    message: "Apply app changes for ${{ inputs.env }}? Review ${{ steps.plan_spec.outputs.path }}"
+    non_interactive: wait                                 # exit 3; `codeorca resume <run> --approve` on a TTY
+    allow_delete_of: []                                   # per-address waivers for plan-gate-flagged stateful deletes
+
+  - id: apply_app
+    type: terraform
+    needs: [approve]
+    when: "steps.plan_app.outputs.changed"
+    stack: app
+    action: apply
+    plan_file: "${{ steps.plan_app.outputs.plan_file }}"
+    retry: { limit: 2, policy: transient }                # lock acquisition only, before any change
+    outputs:
+      tf: "${{ result.tf_outputs }}"                      # sensitive entries kept as redacted references
+      tf_file: "${{ result.files.tf_outputs }}"           # redacted output -json under the run dir
+
+  - id: configure
+    type: ansible
+    needs: [apply_app]
+    when: "always() and steps.apply_app.status in ['succeeded', 'skipped']"
+    playbook: ansible/site.yml
+    inventory:
+      inline:
+        app:
+          hosts:
+            app-host:
+              ansible_host: "${{ steps.apply_app.outputs.tf.app_host.value | default(steps.plan_app.outputs.prior_app_host) }}"
+              ansible_connection: local                   # the reference project configures the container itself
+    extra_vars:
+      app_environment: "${{ inputs.env }}"
+      app_bucket: "${{ steps.apply_app.outputs.tf.app_bucket.value }}"
+    tags: [config]
+    outputs:
+      stats: "${{ result.stats }}"
+
+  - id: host_spec
+    type: spec-render
+    needs: [configure]
+    when: "always()"
+    source:
+      ansible:
+        inventory: "${{ steps.configure.outputs.inventory_path }}"
+        host: app-host
+        play_scope: { playbook: ansible/site.yml, vars: [app_listen_port, app_config_paths] }
+        templates: [ansible/roles/app_config/templates/app.conf.j2]
+    output: specs/app/hosts/app-host.yaml
+
+  - id: dns_check
+    type: python
+    needs: [apply_app]
+    script: helpers/check_dns.py
+    args: ["--name", "${{ steps.apply_app.outputs.tf.app_fqdn.value }}"]
+    env: { EXAMPLE_API_TOKEN: { secret: "ssm:/example/app/api-token" } }
+    outputs: { resolved: "${{ result.output.resolved }}" }
+
+  - id: config_audit
+    type: powershell                                      # exercises the step type: -WhatIf, exit codes, PSScriptAnalyzer-clean
+    needs: [host_spec]
+    script: helpers/Test-AppConfig.ps1
+    args: ["-Spec", "specs/app/hosts/app-host.yaml", "-TfOutputs", "${{ steps.apply_app.outputs.tf_file }}"]
+
+finally:
+  - id: summary
+    type: shell
+    run: ["codeorca", "summary", "${{ run.id }}"]

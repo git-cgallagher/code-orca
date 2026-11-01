@@ -1,0 +1,33 @@
+---
+argument_specs:
+  main:
+    short_description: Example application config (fixture role)
+    options:
+      app_config_listen:
+        type: str
+        required: true
+        description: Address and port the app listens on.
+      app_config_api_credential:
+        type: str
+        no_log: true
+        description: API credential handed to the app; never rendered.
+      app_port:
+        type: int
+        default: 8080
+        description: Port the app listens on.
+      app_config_extra:
+        type: dict
+        description: Extra settings; its nested token is secret.
+        options:
+          token:
+            type: str
+            no_log: true
+          region:
+            type: str
+  rotate:
+    short_description: A second entry point
+    options:
+      app_config_rotate_days:
+        type: int
+        default: 30
+        description: Days between credential rotations.

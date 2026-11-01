@@ -33,7 +33,7 @@ Repository = "https://github.com/git-cgallagher/code-orca"
 
 [tool.setuptools]
 package-dir = { "" = "src" }
-packages = ["codeorca", "codeorca.steps"]
+packages = ["codeorca", "codeorca.adapters", "codeorca.redact", "codeorca.specs", "codeorca.steps"]
 
 [tool.ruff]
 line-length = 120

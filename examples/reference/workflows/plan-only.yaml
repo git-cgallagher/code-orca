@@ -1,0 +1,41 @@
+# yaml-language-server: $schema=../../../schema/codeorca-workflow.schema.json
+# Runs end to end in Phase 1 (read-only): plan the app stack, render the plan spec, print its path.
+# `codeorca run plan-only -p examples/reference/codeorca.yaml` needs `terraform` on PATH and
+# CODEORCA_REDACTION_KEY in the environment (the HMAC key for placeholders; an SSM-backed key arrives in Phase 3).
+api: codeorca/v1
+kind: workflow
+name: plan-only
+description: Plan the app stack, render the redacted plan spec, print where it landed.
+
+inputs:
+  env: { type: string, enum: [dev, prod], default: dev }
+  # The stack's `app_secret` variable is sensitive and has no default (a default would re-enter plan JSON in
+  # clear). The value below is a PLACEHOLDER, not a secret: CI runs with it and asserts it never reaches a spec,
+  # a log or the run directory. An input whose name matches redaction.key_denylist is registered as a secret
+  # before anything is written.
+  app_secret: { type: string, default: FIXTURE-SECRET-reference-001 }
+
+steps:
+  - id: plan_app
+    type: terraform
+    stack: app
+    action: plan
+    var_overrides:                                        # rendered into a temporary 0600 -var-file (last wins)
+      environment: "${{ inputs.env }}"
+      app_secret: "${{ inputs.app_secret }}"             # registered in the redactor before terraform starts
+    outputs:
+      changed: "${{ result.exit_code == 2 }}"
+      plan_file: "${{ result.files.plan_file }}"
+      plan_json: "${{ result.files.plan_json }}"         # the redacted plan document under the run dir
+      gate_passed: "${{ result.gate.passed }}"
+
+  - id: plan_spec
+    type: spec-render
+    needs: [plan_app]
+    source: { terraform_plan: "${{ steps.plan_app.outputs.plan_json }}" }
+    output: specs/app/plan.yaml                           # relative to the project root; also staged under the run dir
+
+  - id: show_spec
+    type: shell
+    needs: [plan_spec]
+    run: ["echo", "spec written to ${{ steps.plan_spec.outputs.path }} (changed=${{ steps.plan_app.outputs.changed }})"]

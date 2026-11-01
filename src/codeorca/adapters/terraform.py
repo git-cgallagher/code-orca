@@ -285,6 +285,10 @@ class TerraformRunner:
                 shutil.rmtree(tmpdir, ignore_errors=True)
         return InitResult(**result.__dict__, messages=tfjson.parse_json_stream(result.stdout_lines))
 
+    def version(self) -> dict:
+        """``version -json``: ``{"terraform_version": "1.14.7", "platform": ..., "provider_selections": {...}}``."""
+        return self._json_document(["version", "-json"], "version")
+
     def validate(self) -> dict:
         """``validate -json``. Exit 1 means invalid and is reported in the document (``valid: false``)."""
         result = self._run(["validate", "-no-color", "-json"])

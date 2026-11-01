@@ -22,7 +22,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[2]
 STACK = ROOT / "examples" / "reference" / "terraform" / "app"
-SECRET = "FIXTURE-SECRET-tf-input-001"
+PLACEHOLDER = "FIXTURE-SECRET-tf-input-001"  # a documented test placeholder, never a real value
 
 sys.path.insert(0, str(ROOT / "src"))
 from codeorca.adapters.terraform import TerraformRunner, plan_file_sha256  # noqa: E402
@@ -40,16 +40,15 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="codeorca-fixtures-") as tmp:
         work = Path(tmp, "app")
         shutil.copytree(STACK, work)
-        env = {"PATH": os.environ["PATH"], "HOME": tmp}
+        # Variables travel as TF_VAR_* in the child environment (nothing is written to a tfvars file).
+        env = {"PATH": os.environ["PATH"], "HOME": tmp, "TF_VAR_app_secret": PLACEHOLDER, "TF_VAR_environment": "dev"}
         runner = TerraformRunner(work, env)
 
         init = runner.init()
         raw("init.jsonl", init.stdout_lines + init.stderr_lines)
         assert init.exit_code == 0, init.stderr
 
-        dev = Path(tmp, "dev.tfvars")
-        dev.write_text(f'app_secret = "{SECRET}"\nenvironment = "dev"\n', encoding="utf-8")
-        plan = runner.plan(Path(tmp, "plan.tfplan"), var_file=dev)
+        plan = runner.plan(Path(tmp, "plan.tfplan"))
         assert plan.exit_code == 2, (plan.exit_code, plan.stderr)
         dump("plan.json", runner.show_plan(plan.plan_file))
 
@@ -61,9 +60,8 @@ def main() -> int:
         dump("outputs.json", runner.output_json())
         dump("providers_schema.json", runner.providers_schema())
 
-        prod = Path(tmp, "prod.tfvars")
-        prod.write_text(f'app_secret = "{SECRET}"\nenvironment = "prod"\n', encoding="utf-8")
-        replace = runner.plan(Path(tmp, "replace.tfplan"), var_file=prod)
+        runner.env["TF_VAR_environment"] = "prod"  # the second plan replaces terraform_data.app
+        replace = runner.plan(Path(tmp, "replace.tfplan"))
         assert replace.exit_code == 2, (replace.exit_code, replace.stderr)
         dump("replace-plan.json", runner.show_plan(replace.plan_file))
 

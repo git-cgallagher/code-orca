@@ -414,14 +414,24 @@ class TerraformRunner:
         return document
 
     def plan(
-        self, out: str | os.PathLike[str], var_file: str | os.PathLike[str] | None = None, lock: bool | None = None
+        self,
+        out: str | os.PathLike[str],
+        var_file: str | os.PathLike[str] | None = None,
+        lock: bool | None = None,
+        *,
+        stream_stdout: bool = True,
     ) -> PlanResult:
-        """``plan -detailed-exitcode -out=<out>``: exit 0 none, 1 error, 2 changes. Exit 2 is success."""
+        """``plan -detailed-exitcode -out=<out>``: exit 0 none, 1 error, 2 changes. Exit 2 is success.
+
+        ``stream_stdout=False`` keeps the human-readable plan in ``stdout_lines`` only: it prints state-held
+        values that only ``show -json`` can identify as sensitive, so a caller that logs it should do so after
+        seeding its redactor from the plan JSON.
+        """
         out_path = Path(out)
         args = ["plan", "-no-color", "-input=false", *self._lock_flags(lock), "-detailed-exitcode", f"-out={out_path}"]
         if var_file is not None:
             args.append(f"-var-file={var_file}")
-        result = self._run(args)
+        result = self._run(args, stream_stdout=stream_stdout)
         if result.exit_code not in (0, 1, 2):
             raise TerraformError(f"plan exited {result.exit_code}: {result.stderr.strip()[:2000]}")
         if result.exit_code in (0, 2) and out_path.exists():

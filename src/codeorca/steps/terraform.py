@@ -24,16 +24,18 @@ What a step does, in order:
      sha256 binding; migrate_backend needs the backend bootstrap).
 
 Every Terraform stdout/stderr line goes through a ``StreamRedactor`` before it reaches ``stdout.log`` /
-``stderr.log`` (the ``-json`` documents the adapter parses in memory are never streamed at all); ``argv.json``
+``stderr.log`` (the ``-json`` documents the adapter parses in memory are never streamed at all, and the
+human-readable ``plan`` output is held back and written only after the registry was seeded from ``show -json``:
+it prints state-held values, such as a computed attribute echoing a secret, that nothing earlier could know);
+``argv.json``
 holds every argv the session ran and ``env-names.json`` the child env's names. The child never sees
 ``CODEORCA_REDACTION_KEY`` or ``TF_CLI_ARGS*``. ``var_overrides`` are rendered into a 0600 temporary
 ``.tfvars.json`` passed with ``-var-file`` (last wins) and deleted afterwards. The step's ``timeout`` is a
 deadline over the whole session (init included); expiry is ``StepTimeout``. Under ``--dry-run`` nothing
 changes: every action here is already read-only.
 
-Known gap: a denylist-named variable that is neither declared sensitive nor set through ``TF_VAR_``/overrides
-(a value from a committed tfvars only) is first seen in the plan JSON, after ``plan``'s human-readable stdout
-has streamed; plan.json and the spec are clean, stdout.log may not be.
+Known gap: ``plan``'s stderr (diagnostics) streams live; a diagnostic that quotes a value only the plan JSON
+would later flag is written as Terraform printed it.
 """
 
 from __future__ import annotations
@@ -246,6 +248,7 @@ class StackSession:
     runner: TerraformRunner
     flush: Callable[[], None]
     state_dir: Path
+    emit: Callable[[str, str], None] = lambda channel, line: None  # (channel, redacted line) -> the log sink
     durations: dict[str, float] = field(default_factory=dict)
     engine_version: str | None = None
 
@@ -335,7 +338,7 @@ def open_session(
         plugin_cache_dir=child_env.get("TF_PLUGIN_CACHE_DIR"),
         deadline=None if timeout is None else time.monotonic() + timeout,
     )
-    return StackSession(project, stack_name, stack, workdir, registry, step_dir, runner, flush, state_dir)
+    return StackSession(project, stack_name, stack, workdir, registry, step_dir, runner, flush, state_dir, emit)
 
 
 @dataclass
@@ -369,11 +372,20 @@ def plan_stack(
             var_file = Path(tmpdir, "overrides.tfvars.json")
             var_file.write_text(json.dumps(dict(var_overrides), sort_keys=True) + "\n", encoding="utf-8")
             var_file.chmod(0o600)
-        plan: PlanResult = session.timed("plan", lambda: session.runner.plan(out, var_file, lock=lock))
+        plan: PlanResult = session.timed(
+            "plan", lambda: session.runner.plan(out, var_file, lock=lock, stream_stdout=False)
+        )
     finally:
         if tmpdir:
             shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def log_plan_output() -> None:
+        # held back until now: the registry knows everything the plan JSON (or the failure) can tell it
+        for line in plan.stdout_lines:
+            session.emit("stdout", registry.redact(line))
+
     if plan.exit_code == 1:
+        log_plan_output()
         error = f"plan failed (exit 1){_tail(registry.redact(plan.stderr))}"
         result = {"exit_code": 1, "changed": False, "files": {"plan_file": None, "plan_json": None}}
         return PlanOutcome(1, False, "", "", {}, result, error)
@@ -387,6 +399,7 @@ def plan_stack(
     providers_schema = session.timed("providers_schema", session.runner.providers_schema)
     denylist = project_key_denylist(project)
     seed_registry(registry, plan_json, denylist)
+    log_plan_output()
     verdict = policy.plan_gate(
         plan_json,
         policy.Policy(

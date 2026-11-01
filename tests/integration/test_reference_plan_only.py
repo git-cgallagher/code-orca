@@ -8,7 +8,9 @@ default; the whole point of the test is that it never reaches a spec, a log or t
 from __future__ import annotations
 
 import json
+import os
 import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -90,6 +92,8 @@ def test_plan_only_end_to_end_redacted_deterministic(project: Path, capsys):
     assert result["gate"]["passed"] is True and result["registered_overrides"] == ["app_secret"]
     assert "app_token" not in result["prior_outputs"]
     assert read(run_dir / "steps" / "show_spec" / "stdout.log").startswith("spec written to ")
+    # the show -json / providers schema documents are consumed in memory: never a line of them in the log
+    assert "format_version" not in read(run_dir / "steps" / "plan_app" / "stdout.log")
 
     registry = registry_with_secret()
     assert scan_outputs(run_dir, registry) == []
@@ -165,3 +169,77 @@ def test_missing_redaction_key_fails_closed(project: Path, monkeypatch, capsys):
     assert cli.main(["run", "plan-only", "-p", str(project / "codeorca.yaml")]) == 1
     assert "CODEORCA_REDACTION_KEY" in capsys.readouterr().err
     assert not (project / ".codeorca").exists()
+
+
+OLD = "FIXTURE-OLD-00000000"
+NEW = "FIXTURE-NEW-11111111"
+GO_UNSAFE = "FIXTURE<&>-33333333"  # Go's encoding/json writes it as FIXTURE\u003c\u0026\u003e-33333333
+
+
+def terraform(stack: Path, *args: str, secret: str) -> None:
+    """Test setup only (never the adapter): a real init + apply so the stack has state holding ``secret``."""
+    env = {**os.environ, "TF_VAR_app_secret": secret, "TF_IN_AUTOMATION": "1", "TF_INPUT": "0"}
+    subprocess.run(["terraform", f"-chdir={stack}", *args], env=env, check=True, capture_output=True, text=True)
+
+
+def registry_with(*values: str) -> SecretRegistry:
+    r = SecretRegistry(KEY.encode(), "env:test")
+    for v in values:
+        r.add(v)
+    return r
+
+
+def test_applied_state_secrets_never_reach_the_run_dir(project: Path, capsys, monkeypatch):
+    """State-held, output and changed-variable values: everything Terraform discovers after it started, which
+    only the plan JSON can tell us about, must still be absent from every file the run writes."""
+    p = str(project / "codeorca.yaml")
+    stack = project / "terraform" / "app"
+    terraform(stack, "init", "-no-color", secret=OLD)
+    terraform(stack, "apply", "-auto-approve", "-no-color", secret=OLD)
+    runs_dir = project / ".codeorca" / "runs"
+
+    # drift with a rotated secret: before (state) = OLD, after = NEW, both must be scrubbed everywhere
+    monkeypatch.setenv("TF_VAR_app_secret", NEW)
+    assert cli.main(["drift", "-p", p]) == 2
+    out = capsys.readouterr().out
+    assert "app    drift" in out and OLD not in out and NEW not in out
+    run_dir = runs_dir / list_runs(runs_dir)[-1]
+    registry = registry_with(OLD, NEW)
+    assert scan_outputs(run_dir, registry) == []  # the run dir only: the stack dir holds a tfstate we never read
+    assert scan_outputs(project / "specs", registry) == []
+    log = read(run_dir / "steps" / "drift_app" / "stdout.log")
+    assert "format_version" not in log and OLD not in log and NEW not in log
+    spec = read(project / "specs" / "app" / "plan.yaml")
+    assert registry.placeholder(OLD) in spec and registry.placeholder(NEW) in spec  # a rotation is visible
+    assert OLD not in spec and NEW not in spec
+
+    # an output step on the applied state: app_token (sensitive) = OLD comes out of `output -json`
+    (project / "workflows" / "outputs.yaml").write_text(
+        "api: codeorca/v1\nkind: workflow\nname: outputs\nsteps:\n"
+        "  - id: out_app\n    type: terraform\n    stack: app\n    action: output\n"
+        '    outputs: { token: "${{ result.tf_outputs.app_token.value }}" }\n',
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("TF_VAR_app_secret")
+    assert cli.main(["run", "outputs", "-p", p]) == 0
+    assert OLD not in capsys.readouterr().out
+    run_dir = runs_dir / list_runs(runs_dir)[-1]
+    tf_outputs = json.loads(read(run_dir / "steps" / "out_app" / "tf-outputs.json"))
+    assert tf_outputs["app_token"] == {"value": registry.placeholder(OLD), "sensitive": True, "type": "string"}
+    assert tf_outputs["app_host"]["value"] == "127.0.0.1"
+    assert OLD not in read(run_dir / "steps" / "out_app" / "stdout.log")
+    assert scan_outputs(run_dir, registry) == []
+    record = json.loads(read(run_dir / "run.json"))
+    assert record["steps"]["out_app"]["outputs"]["token"] == registry.placeholder(OLD)
+    names = json.loads(read(run_dir / "steps" / "out_app" / "env-names.json"))
+    assert "CODEORCA_REDACTION_KEY" not in names
+
+    # a value Go escapes in every -json document: neither the raw nor the escaped form may survive
+    assert cli.main(["run", "plan-only", "-p", p, "--input", f"app_secret={GO_UNSAFE}"]) == 0
+    capsys.readouterr()
+    run_dir = runs_dir / list_runs(runs_dir)[-1]
+    registry = registry_with(OLD, GO_UNSAFE)
+    assert scan_outputs(run_dir, registry) == [] and scan_outputs(project / "specs", registry) == []
+    everything = "".join(f.read_bytes().decode("utf-8", "replace") for f in run_dir.rglob("*") if f.is_file())
+    assert GO_UNSAFE not in everything and "FIXTURE\\u003c\\u0026\\u003e-33333333" not in everything
+    assert registry.placeholder(GO_UNSAFE) in read(project / "specs" / "app" / "plan.yaml")

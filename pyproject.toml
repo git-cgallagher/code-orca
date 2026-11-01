@@ -33,7 +33,9 @@ Repository = "https://github.com/git-cgallagher/code-orca"
 
 [tool.setuptools]
 package-dir = { "" = "src" }
-packages = ["codeorca", "codeorca.adapters", "codeorca.redact", "codeorca.specs", "codeorca.steps"]
+
+[tool.setuptools.packages.find]
+where = ["src"]  # every subpackage under src/, so a new one cannot be left out of the wheel; CI imports them
 
 [tool.ruff]
 line-length = 120

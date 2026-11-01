@@ -296,7 +296,8 @@ def test_plan_warns_on_an_incomplete_plan_and_filters_prior_outputs(tmp_path, re
     assert result["prior_outputs"]["app_host"] == {"value": "127.0.0.1"}
     assert "FIXTURE-NOT-FLAGGED-token-value" not in (r.run_dir.steps_dir / "p" / "result.json").read_text()
     assert "FIXTURE-NOT-FLAGGED-token-value" not in (r.run_dir.steps_dir / "p" / "stdout.log").read_text()
-    assert "format_version" not in (r.run_dir.steps_dir / "p" / "stdout.log").read_text()  # show -json not logged
+    log = (r.run_dir.steps_dir / "p" / "stdout.log").read_text()
+    assert "format_version" not in log and "Plan: 0 to add." in log  # show -json never logged; the plan text is
     assert result["unprotected_overrides"] == []
 
 

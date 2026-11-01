@@ -96,6 +96,10 @@ Phase 1 integration (2026-11-01):
   redactor, which then knows only the pre-registered values (inputs, `TF_VAR_*` of sensitive or denylist-named
   variables, env tokens): a diagnostic from `init`/`validate`/`output` that quotes an undeclared secret is the
   residual.
+- **A `: ` inside an unquoted step `name:` breaks the whole workflow file.** GitHub then fails every run in 0 s
+  with "workflow file issue", a required check such as `test` never runs, and the PR is blocked with
+  'Required status check "test" is expected'. Quote step names that contain a colon; parse `ci.yml` with
+  ruamel before pushing (hit on the Phase 1 PR, 2026-11-01).
 - **The shell step's terraform check is a courtesy, not a boundary.** `run: [terraform, destroy]` is refused by
   basename; `env terraform …`, `sh -c`, or a renamed binary are not inspected. Helpers are bounded by the
   credentials they get and by review, not by argv inspection.

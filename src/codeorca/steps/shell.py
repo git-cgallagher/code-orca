@@ -6,7 +6,8 @@
   ``StepContext.stream`` is the hook integration uses to attach the redactor to every line before it is written.
 - ``timeout`` kills the process group and raises ``StepTimeout`` (the runner records ``errored``).
 - Contract shared with the helpers: ``CODEORCA_OUTPUT_FILE`` names a JSON file the script may write; it comes
-  back as ``result.output``. ``CODEORCA_DRY_RUN=1`` is set under ``--dry-run``. stdout is a log, never parsed.
+  back as ``result.output`` and the file is rewritten through the stream hook (the child wrote it unredacted).
+  ``CODEORCA_DRY_RUN=1`` is set under ``--dry-run``. stdout is a log, never parsed.
 - ``result`` = ``{exit_code, stdout_path, stderr_path, output}``; exit 0 is ``succeeded``, anything else ``failed``.
 """
 
@@ -77,10 +78,17 @@ def run_shell(step, ctx: StepContext) -> StepResult:
     output = None
     if output_file and os.path.exists(output_file):
         with open(output_file, encoding="utf-8") as fh:
-            try:
-                output = json.load(fh)
-            except json.JSONDecodeError as e:
-                raise StepError(f"step {step.id}: {output_file} is not JSON: {e}") from None
+            text = fh.read()
+        try:
+            output = json.loads(text)
+        except json.JSONDecodeError as e:
+            raise StepError(f"step {step.id}: {output_file} is not JSON: {e}") from None
+        line_filter = ctx.line_filter("stdout")
+        if line_filter is not None:
+            # the child wrote this file itself; rewrite it through the redactor so the run dir never keeps a
+            # value the hook would have scrubbed from a log line
+            with open(output_file, "w", encoding="utf-8") as fh:
+                fh.write(line_filter(text))
     result = {
         "exit_code": exit_code,
         "stdout_path": str(out_sink.path),

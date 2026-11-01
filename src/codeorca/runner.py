@@ -13,6 +13,10 @@ Step statuses and their propagation (the plan's step-semantics table):
 - ``waiting``: an executor (a gate) asked the run to stop; scheduling stops, the run is persisted, exit 3.
 - ``cached``: reserved for ``cache:`` (not implemented in this phase).
 
+``redact`` (optional) is applied to every record the runner persists: run.json (inputs, vars, step states),
+each ``result.json`` and ``outputs/<id>.json``. Integration passes the registry scrub so a secret handed in as
+an input or echoed by a step never reaches the run directory in clear.
+
 Outputs are evaluated from the executor's typed ``result`` only for ``succeeded`` steps; every other status
 leaves ``steps.<id>.outputs`` as ``None`` so a bare reference raises and ``| default()`` works (expr.py).
 
@@ -234,6 +238,7 @@ class Runner:
         *,
         env: Mapping[str, str] | None = None,
         stream: Callable[[str, str], str] | None = None,
+        redact: Callable[[Any], Any] | None = None,
         sleep: Callable[[float], None] = time.sleep,
         cwd: Path | None = None,
     ):
@@ -244,6 +249,7 @@ class Runner:
         self.dry_run = dry_run
         self.base_env = dict(env) if env is not None else dict(os.environ)
         self.stream = stream
+        self.redact = redact  # applied to every record the runner persists (run.json, result.json, outputs)
         self.sleep = sleep
         self.cwd = cwd
         self.inputs = resolve_inputs(workflow, inputs)
@@ -394,7 +400,9 @@ class Runner:
                 break
             self.sleep(self._backoff(step, attempt))
         assert result is not None
-        self.run_dir.write_result(step.id, {"status": result.status, "attempts": state["attempts"], **result.result})
+        self.run_dir.write_result(
+            step.id, self._scrub({"status": result.status, "attempts": state["attempts"], **result.result})
+        )
         outputs: dict[str, Any] | None = None
         status = result.status
         error = result.error
@@ -408,7 +416,7 @@ class Runner:
     def _finish(self, step, status: str, outputs, result, error: str | None) -> str:
         state = self.states[step.id]
         state.update({"status": status, "outputs": outputs, "error": error, "finished": _now()})
-        self.run_dir.write_outputs(step.id, outputs)
+        self.run_dir.write_outputs(step.id, self._scrub(outputs))
         self._after_step(step)
         return status
 
@@ -517,4 +525,7 @@ class Runner:
         }
 
     def persist(self, finished: bool = False) -> None:
-        self.run_dir.write_run(self.record(finished))
+        self.run_dir.write_run(self._scrub(self.record(finished)))
+
+    def _scrub(self, data: Any) -> Any:
+        return self.redact(data) if self.redact is not None else data

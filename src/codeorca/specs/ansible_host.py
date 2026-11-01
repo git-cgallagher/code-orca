@@ -61,10 +61,23 @@ class AnsibleVarsError(RuntimeError):
 
 
 def build_host_document(
-    vars_json: Mapping[str, Any], registry: SecretRegistry, key_denylist: Sequence[str] = ()
+    vars_json: Mapping[str, Any],
+    registry: SecretRegistry,
+    key_denylist: Sequence[str] = (),
+    *,
+    base_dir: str | os.PathLike[str] | None = None,
 ) -> dict[str, Any]:
-    """The redacted spec body from the subprocess document. Keys are sorted by the YAML writer later."""
+    """The redacted spec body from the subprocess document. Keys are sorted by the YAML writer later.
+
+    With ``base_dir`` (the project directory), ``inventory_source`` and the template keys are recorded relative
+    to it, so a regeneration from another checkout (a CI runner, another machine) diffs empty."""
     patterns = tuple(key_denylist)
+
+    def rel(path: str) -> str:
+        if base_dir is None or not os.path.isabs(path):
+            return path
+        return os.path.relpath(path, base_dir)
+
     variables: dict[str, Any] = {}
     for name, entry in (vars_json.get("vars") or {}).items():
         if not isinstance(entry, Mapping):
@@ -75,7 +88,7 @@ def build_host_document(
                 out[slot] = redact_tree(out[slot], registry, patterns)
         variables[str(name)] = redact_tree(out, registry)
     templates = {
-        str(path): (registry.redact(text) if isinstance(text, str) else text)
+        rel(str(path)): (registry.redact(text) if isinstance(text, str) else text)
         for path, text in (vars_json.get("templates") or {}).items()
     }
     errors = redact_tree(dict(vars_json.get("errors") or {}), registry)
@@ -83,7 +96,7 @@ def build_host_document(
     return {
         "kind": KIND,
         "host": registry.redact(str(vars_json.get("host", ""))),
-        "inventory_source": registry.redact(str(vars_json.get("inventory_source", ""))),
+        "inventory_source": registry.redact(rel(str(vars_json.get("inventory_source", "")))),
         "engine": redact_tree(engine, registry),
         "vars": variables,
         "templates": templates,

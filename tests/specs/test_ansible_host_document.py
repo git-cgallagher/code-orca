@@ -97,6 +97,15 @@ def test_document_is_redacted_and_keeps_every_var_name(registry):
     assert doc["errors"]["templates"] == {"bad.j2": "x"}
 
 
+def test_base_dir_makes_paths_project_relative(registry):
+    doc = build_host_document(vars_json(), registry, DENYLIST, base_dir="/work")
+    assert doc["inventory_source"] == "inventory/hosts.yml"
+    assert set(doc["templates"]) == {"templates/site.conf.j2", "bad.j2"}  # relative keys are left alone
+    absolute = dict(vars_json(), templates={"/work/templates/a.j2": "x"})
+    assert build_host_document(absolute, registry, base_dir="/work")["templates"] == {"templates/a.j2": "x"}
+    assert build_host_document(absolute, registry)["templates"] == {"/work/templates/a.j2": "x"}
+
+
 def test_document_renders_through_the_spec_writer_and_passes_the_gate(registry, tmp_path: Path):
     doc = build_host_document(vars_json(), registry, DENYLIST)
     header = header_for(doc, registry.key_id, "abc1234", workflow="rollout", stack="app")

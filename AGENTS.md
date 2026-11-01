@@ -196,5 +196,6 @@ Container (for the image phase):
    read-only Terraform actions, and `required_env` is checked by the terraform step only.
 2. Ansible adapter + redacting stdout callback, inventory/handoff generation, host-spec renderer.
 3. Helpers (python/powershell/shell), gate with TTY + resume, apply bound to the plan sha256, backend bootstrap.
-4. Container image on `ghcr.io/git-cgallagher/ansible-runtime`.
+4. Container image on `ghcr.io/git-cgallagher/ansible-runtime`: the pyproject ranges (`pydantic`, `ruamel.yaml`,
+   `jinja2`) must be pinned exactly, with hashes, in `requirements/codeorca.txt` for the image; ranges are for pip users only.
 5. Reference project end to end in CI; consumer guide; v0.1.0.

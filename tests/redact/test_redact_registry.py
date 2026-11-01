@@ -103,3 +103,40 @@ def test_pattern_cache_follows_growth(registry):
     assert registry.max_len() >= len("FIXTURE-SECRET-much-longer-than-the-key-text-is")
     registry.add("FIXTURE-SECRET-much-longer-than-the-key-text-is")  # duplicate: no growth
     assert registry.generation == g0 + 1
+
+
+def test_add_reports_whether_the_value_was_accepted(registry):
+    assert registry.add("FIXTURE-SECRET-accepted") is True
+    assert registry.add("FIXTURE-SECRET-accepted") is False  # already known
+    assert registry.add("short") is False  # below min_length: nothing protects it, the caller must know
+    assert registry.add(None) is False
+
+
+def test_multiline_value_registers_each_line_too(registry):
+    pem = (
+        "-----BEGIN FIXTURE PRIVATE KEY-----\nFIXTUREAAAAB3NzaC1yc2E\nFIXTURECCCCB3NzaC1yc2E\n"
+        "-----END FIXTURE PRIVATE KEY-----"
+    )
+    assert registry.add(pem) is True
+    # the whole value is one placeholder; a single line printed on its own (a line-by-line log) is matched as well
+    assert redact_text(pem, registry) == registry.placeholder(pem)
+    assert "FIXTUREAAAA" not in redact_text("FIXTUREAAAAB3NzaC1yc2E\n", registry)
+    assert redact_text("-----END FIXTURE PRIVATE KEY-----", registry) == registry.placeholder(
+        "-----END FIXTURE PRIVATE KEY-----"
+    )
+    assert "FIXTURE" not in "\n".join(redact_text(line, registry) for line in pem.splitlines())
+
+
+def test_go_html_safe_json_escaping_is_an_encoding(registry):
+    """Terraform's -json output (Go encoding/json) escapes <, > and & as \\u003c, \\u003e, \\u0026."""
+    value = 'FIXTURE<&>"-33333333'
+    registry.add(value)
+    go = '{"value":"FIXTURE\\u003c\\u0026\\u003e\\"-33333333"}'
+    assert go.count("\\u003c") == 1 and value not in go
+    ph = registry.placeholder(value)
+    assert redact_text(go, registry) == f'{{"value":"{ph}"}}'
+    assert registry.count_matches(go) == 1  # the gate sees the Go form too
+    from codeorca.redact import StreamRedactor
+
+    s = StreamRedactor(registry)
+    assert s.feed(go + "\n") + s.flush() == f'{{"value":"{ph}"}}\n'

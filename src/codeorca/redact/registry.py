@@ -24,15 +24,21 @@ from collections.abc import Iterator
 PLACEHOLDER_RE = re.compile(r"<redacted:(hmac|sha256):[0-9a-f]{8}>")
 
 
+def _go_escape(js: str) -> str:
+    """Go's ``encoding/json`` (Terraform's ``-json`` output) escapes ``<``, ``>`` and ``&`` in strings."""
+    return js.replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
+
+
 def _encodings(value: str) -> Iterator[str]:
     """Every textual form a registered value may take in a log, a JSON document or an env dump."""
+    seen = {value}
     yield value
     js = json.dumps(value)[1:-1]  # JSON-escaped, non-ASCII as \\uXXXX
-    if js != value:
-        yield js
     js_raw = json.dumps(value, ensure_ascii=False)[1:-1]  # JSON-escaped, UTF-8 kept (Terraform's style)
-    if js_raw != value and js_raw != js:
-        yield js_raw
+    for enc in (js, js_raw, _go_escape(js), _go_escape(js_raw)):
+        if enc not in seen:
+            seen.add(enc)
+            yield enc
     uq = urllib.parse.quote(value, safe="")
     if uq != value:
         yield uq
@@ -78,19 +84,28 @@ class SecretRegistry:
     def _normalize(value: str) -> str:
         return value.strip()
 
-    def add(self, value: str | None) -> None:
-        """Register ``value``. ``None`` is ignored; containers are refused (register each leaf instead)."""
+    def add(self, value: str | None) -> bool:
+        """Register ``value``; returns ``True`` when it is newly protected. ``None`` is ignored; containers are
+        refused (register each leaf instead); a value shorter than ``min_length`` is NOT registered and the caller
+        gets ``False`` (nothing scrubs it). A multi-line value also registers each of its lines that is long
+        enough, so a line-by-line log that prints one line of a key (a PEM body) is still matched."""
         if value is None:
-            return
+            return False
         if isinstance(value, bool | dict | list | tuple | set | frozenset | bytes):
             raise TypeError(f"SecretRegistry.add takes a str, not {type(value).__name__}")
         if not isinstance(value, str):
             value = str(value)  # int/float leaves of a sensitive map
         s = self._normalize(value)
         if len(s) < self._min_length or s in self._values:
-            return
+            return False
         self._values.add(s)
+        if "\n" in s:
+            for line in s.splitlines():
+                line = self._normalize(line)
+                if len(line) >= self._min_length:
+                    self._values.add(line)
         self._generation += 1
+        return True
 
     @property
     def size(self) -> int:

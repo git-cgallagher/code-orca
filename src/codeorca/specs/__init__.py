@@ -11,14 +11,17 @@ Determinism rules: keys sorted, block style, no run id, timestamp, duration or p
 in the ``<name>.meta.yaml`` sidecar. The header carries what a reader needs to trust the document: pipeline
 versions, stack, engine version, git SHA, the redaction key id and the gate verdict.
 
-The final gate: after writing, every file is scanned with the run's registry; a hit removes the files and
-raises ``SpecGateError`` (path and count only, never a value).
+The final gate: the rendered spec text and the sidecar text are scanned with the run's registry **before**
+anything is written; a hit raises ``SpecGateError`` (path and count only, never a value) and the destination,
+typically a committed spec, is left exactly as it was. Writes go through a temp file in the same directory and
+``os.replace``, so a spec is replaced whole or not at all.
 """
 
 from __future__ import annotations
 
 import io
 import os
+import tempfile
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
@@ -106,8 +109,12 @@ def render_spec_yaml(document: Mapping[str, Any], header: Mapping[str, Any]) -> 
 
 
 def meta_path(path: str | os.PathLike[str]) -> Path:
+    """``plan.yaml`` -> ``plan.meta.yaml``, ``plan.yml`` -> ``plan.meta.yml``; any other name keeps its full name
+    (``plan.json`` -> ``plan.json.meta.yaml``), so two specs that differ only in suffix never share a sidecar."""
     p = Path(path)
-    return p.with_name(f"{p.stem}.meta.yaml")
+    if p.suffix in (".yaml", ".yml"):
+        return p.with_name(f"{p.stem}.meta{p.suffix}")
+    return p.with_name(f"{p.name}.meta.yaml")
 
 
 def write_spec(
@@ -117,14 +124,13 @@ def write_spec(
     meta: Mapping[str, Any] | None,
     registry: SecretRegistry | None = None,
 ) -> tuple[Path, Path]:
-    """Write ``path`` and its ``<stem>.meta.yaml`` sidecar; returns both paths.
+    """Write ``path`` and its ``.meta.yaml`` sidecar (``meta_path``); returns both paths.
 
     The sidecar carries the generation metadata (run id, timestamp, plan sha256, durations, registry size) and
-    the entropy warning count of the written spec. With a ``registry`` the written files are scanned and a hit
-    removes them and raises ``SpecGateError``.
+    the entropy warning count of the written spec. With a ``registry`` both texts are scanned in memory first; a
+    hit raises ``SpecGateError`` and nothing on disk changes. Each file is written atomically.
     """
     spec_path = Path(path)
-    spec_path.parent.mkdir(parents=True, exist_ok=True)
     text = render_spec_yaml(document, header)
     side = dict(document.get(META_KEY) or {})
     side.update(meta or {})
@@ -132,16 +138,29 @@ def write_spec(
     side["entropy_warnings"] = len(entropy_warnings(text))
     side["spec"] = spec_path.name
     sidecar = meta_path(spec_path)
-    spec_path.write_text(text, encoding="utf-8")
-    sidecar.write_text(_dump(sort_tree(side)), encoding="utf-8")
+    side_text = _dump(sort_tree(side))
     if registry is not None:
-        hits = scan_files([spec_path, sidecar], registry)
+        hits = [(str(p), n) for p, t in ((spec_path, text), (sidecar, side_text)) if (n := registry.count_matches(t))]
         if hits:
-            for p in (spec_path, sidecar):
-                p.unlink(missing_ok=True)
             report = ", ".join(f"{p} ({n})" for p, n in hits)
-            raise SpecGateError(f"redaction gate: registered value found in written spec files: {report}")
+            raise SpecGateError(f"redaction gate: registered value found in rendered spec; not written: {report}")
+    spec_path.parent.mkdir(parents=True, exist_ok=True)
+    _replace(spec_path, text)
+    _replace(sidecar, side_text)
     return spec_path, sidecar
+
+
+def _replace(path: Path, text: str) -> None:
+    """Atomic write: a temp file beside the target, then ``os.replace`` (a crash leaves the old file intact)."""
+    fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.chmod(tmp, 0o644)  # a spec is meant to be committed and read
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
 
 
 def scan_files(paths: list[Path], registry: SecretRegistry) -> list[tuple[str, int]]:

@@ -9,13 +9,16 @@ nothing to flag, nested dicts/lists mirroring the value. ``after`` omits unknown
 sensitive input is unmarked), which is why the value scrub in :mod:`codeorca.redact.text` runs last.
 
 Order of use: ``merge_unknown`` first (it needs the raw shape), then ``mask_by_map``/``mask_by_schema``,
-then ``redact_tree`` over the whole document.
+then ``redact_tree`` over the whole document. ``mask_by_schema`` leaves a leaf that already carries a registry
+placeholder alone (the spec renderer masks map-flagged leaves with placeholders first).
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterable, Iterator
 from typing import Any
+
+from codeorca.redact.registry import PLACEHOLDER_RE
 
 SENSITIVE = "(sensitive)"
 UNKNOWN = "(known after apply)"
@@ -188,7 +191,10 @@ def _mask_paths(values: Any, paths: set[tuple[str, ...]], at: tuple[str, ...]) -
         for k, v in values.items():
             p = (*at, k)
             if p in paths:
-                out[k] = None if v is None else SENSITIVE
+                # a value already masked by the map (a stable placeholder) keeps its change signal; a marker
+                # such as ``(known after apply)`` still collapses to ``(sensitive)`` (fail closed)
+                already = isinstance(v, str) and PLACEHOLDER_RE.fullmatch(v) is not None
+                out[k] = v if already else (None if v is None else SENSITIVE)
             else:
                 out[k] = _mask_paths(v, paths, p)
         return out

@@ -162,10 +162,16 @@ def previous_outputs(plan_json: dict) -> dict[str, object]:
 def state_outputs(state_json: dict, include_sensitive: bool = False) -> dict[str, object]:
     """``{name: value}`` from a ``show -json`` state or an ``output -json`` document; sensitive dropped by default.
 
-    A state document has ``values.outputs``; an ``output -json`` document *is* the outputs map.
+    A state document has a string ``format_version`` and ``values.outputs``; an ``output -json`` document *is*
+    the outputs map, whose entries are ``{sensitive, type, value}`` whatever their names (an output may well be
+    called ``values`` or ``format_version``).
     """
-    if "values" in state_json or "format_version" in state_json:
-        outputs = (state_json.get("values") or {}).get("outputs") or {}
+    values = state_json.get("values")
+    looks_like_state = isinstance(state_json.get("format_version"), str) or (
+        isinstance(values, dict) and "value" not in values and ("outputs" in values or "root_module" in values)
+    )
+    if looks_like_state:
+        outputs = (values or {}).get("outputs") or {} if isinstance(values, dict) else {}
     else:
         outputs = state_json
     if not isinstance(outputs, dict):

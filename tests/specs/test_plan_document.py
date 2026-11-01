@@ -282,13 +282,117 @@ def test_write_spec_sidecar_and_gate(tmp_path, registry):
     assert "run_id: 20260101T000000Z-abcdef" in side and "generated_at:" in side and "entropy_warnings: 0" in side
     assert "plan_sha256: " + "f" * 64 in side and "durations_s:" in side
     assert scan_outputs(tmp_path, registry) == []
-    # the gate: a leaked value in the document removes both files and raises
+    # the gate: a leaked value in the document raises BEFORE anything touches the disk, so the previously
+    # written (committed) spec and sidecar stay exactly as they were and no temp file is left behind
+    good_spec, good_side = spec.read_text(encoding="utf-8"), sidecar.read_text(encoding="utf-8")
     leaked = dict(doc)
     leaked["summary"] = dict(doc["summary"], note=SECRET)
     with pytest.raises(SpecGateError) as e:
         write_spec(tmp_path / "specs" / "app" / "plan.yaml", leaked, header, None, registry)
     assert SECRET not in str(e.value)
-    assert not spec.exists() and not sidecar.exists()
+    assert spec.read_text(encoding="utf-8") == good_spec and sidecar.read_text(encoding="utf-8") == good_side
+    assert sorted(p.name for p in spec.parent.iterdir()) == ["plan.meta.yaml", "plan.yaml"]
+    assert scan_outputs(tmp_path, registry) == []
+
+
+def test_meta_path_follows_the_full_file_name():
+    assert meta_path("specs/plan.yaml").name == "plan.meta.yaml"
+    assert meta_path("specs/plan.yml").name == "plan.meta.yml"
+    assert meta_path("specs/plan.json").name == "plan.json.meta.yaml"
+    assert meta_path("specs/app.plan.yaml").name == "app.plan.meta.yaml"
+
+
+def test_never_render_resources_match_indexed_addresses_exactly_and_still_glob(registry):
+    plan = {
+        "format_version": "1.2",
+        "resource_changes": [
+            {
+                "address": address,
+                "type": "aws_instance",
+                "mode": "managed",
+                "change": {"actions": ["update"], "before": {"x": 1}, "after": {"x": 2}},
+            }
+            for address in ("aws_instance.db[0]", 'aws_secretsmanager_secret_version.db["prod"]', "aws_instance.web")
+        ],
+        "configuration": {"root_module": {}},
+    }
+    never = {"resources": ["aws_instance.db[0]", 'aws_secretsmanager_secret_version.db["prod"]', "aws_instance.w*"]}
+    doc = build(plan, registry, never_render=never)
+    for address in ("aws_instance.db[0]", 'aws_secretsmanager_secret_version.db["prod"]', "aws_instance.web"):
+        assert by_address(doc, address).get("rendered") == NEVER_RENDERED, address
+        assert "after" not in by_address(doc, address)
+
+
+def test_deposed_objects_are_distinguishable(registry):
+    plan = {
+        "format_version": "1.2",
+        "resource_changes": [
+            {
+                "address": "aws_instance.web",
+                "type": "aws_instance",
+                "mode": "managed",
+                "deposed": "abc123",
+                "change": {"actions": ["delete"], "before": {"id": "old"}, "after": None},
+            },
+            {
+                "address": "aws_instance.web",
+                "type": "aws_instance",
+                "mode": "managed",
+                "change": {"actions": ["update"], "before": {"id": "cur"}, "after": {"id": "cur"}},
+            },
+        ],
+        "configuration": {"root_module": {}},
+    }
+    doc = build(plan, registry)
+    entries = [(e["address"], e["deposed"], e["actions"]) for e in doc["resource_changes"]]
+    assert entries == [("aws_instance.web", None, ["update"]), ("aws_instance.web", "abc123", ["delete"])]
+
+
+def test_map_flagged_schema_sensitive_attribute_keeps_its_placeholder(registry):
+    """A sensitive attribute of a real provider resource is flagged by the map AND the schema: the stable
+    placeholder must survive the schema mask so a diff shows the secret changed."""
+    schema = load("providers-schema.json", REDACT_FIXTURES)
+    plan = {
+        "format_version": "1.2",
+        "resource_changes": [
+            {
+                "address": "random_password.pw",
+                "type": "random_password",
+                "mode": "managed",
+                "change": {
+                    "actions": ["update"],
+                    "before": {"result": "FIXTURE-SECRET-rotated-before", "length": 12},
+                    "before_sensitive": {"result": True},
+                    "after": {"result": "FIXTURE-SECRET-rotated-after", "length": 12},
+                    "after_sensitive": {"result": True},
+                    "after_unknown": {"bcrypt_hash": True},
+                },
+            },
+            {
+                "address": "terraform_data.t",
+                "type": "terraform_data",
+                "mode": "managed",
+                "change": {
+                    "actions": ["create"],
+                    "before": None,
+                    "after": {"input": "x"},
+                    "after_sensitive": {"output": True},
+                    "after_unknown": {"output": True, "id": True},
+                },
+            },
+        ],
+        "configuration": {"root_module": {}},
+    }
+    doc = build(plan, registry, providers_schema=schema)
+    pw = by_address(doc, "random_password.pw")
+    assert pw["before"]["result"] == registry.placeholder("FIXTURE-SECRET-rotated-before")
+    assert pw["after"]["result"] == registry.placeholder("FIXTURE-SECRET-rotated-after")
+    assert pw["before"]["result"] != pw["after"]["result"]
+    assert pw["after"]["bcrypt_hash"] == "(sensitive)"  # unknown AND schema-sensitive: the schema mask still wins
+    t = by_address(doc, "terraform_data.t")
+    assert t["after"]["output"] == "(known after apply)"  # sensitive+unknown, no schema: the marker, not its HMAC
+    assert t["after"]["id"] == "(known after apply)"
+    assert registry.placeholder("(known after apply)") not in json.dumps(doc)
 
 
 def test_seed_registry_also_registers_denylist_named_variables(registry):

@@ -179,6 +179,14 @@ def test_state_outputs_from_state_and_output_documents():
     assert "app_token" not in tfjson.state_outputs(load("outputs.json"))
     assert tfjson.state_outputs(load("outputs.json"), include_sensitive=True)["app_token"] == SECRET
     assert tfjson.state_outputs({"format_version": "1.0"}) == {}
+    # an `output -json` map whose outputs happen to be named like state-document keys is still an outputs map
+    tricky = {
+        "values": {"sensitive": False, "type": "string", "value": "v"},
+        "format_version": {"sensitive": False, "type": "string", "value": "f"},
+        "other": {"sensitive": True, "type": "string", "value": "s"},
+    }
+    assert tfjson.state_outputs(tricky) == {"values": "v", "format_version": "f"}
+    assert tfjson.state_outputs({"format_version": "1.0", "values": {"root_module": {}}}) == {}
 
 
 def test_fixtures_hold_the_placeholder_in_plain_text():

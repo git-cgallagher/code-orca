@@ -171,9 +171,11 @@ def placeholder_for(registry: SecretRegistry, value: Any) -> Any:
 
 
 def mask_with_placeholders(values: Any, sensitive_map: Any, registry: SecretRegistry) -> Any:
-    """``mask_by_map`` whose masked leaves are the registry placeholders instead of ``(sensitive)``."""
+    """``mask_by_map`` whose masked leaves are the registry placeholders instead of ``(sensitive)``. A leaf that is
+    already a marker (``(known after apply)`` from ``merge_unknown``) stays a marker: its HMAC would be one shared
+    placeholder for every unknown sensitive attribute everywhere, looking like a secret and changing after apply."""
     if sensitive_map is True:
-        return placeholder_for(registry, values)
+        return values if _is_marker(values) else placeholder_for(registry, values)
     if not isinstance(sensitive_map, dict | list) or not sensitive_map:
         return values
     if isinstance(sensitive_map, dict):
@@ -228,7 +230,15 @@ def _value_tree(
 
 
 def _never_rendered_resource(address: str, patterns: Iterable[str]) -> bool:
-    return any(fnmatch.fnmatchcase(address, p) or fnmatch.fnmatchcase(_config_address(address), p) for p in patterns)
+    """Exact match on the full or configuration address first (``[0]`` / ``["prod"]`` would be a character class
+    to fnmatch), then fnmatch globs."""
+    config_address = _config_address(address)
+    for p in patterns:
+        if address == p or config_address == p:
+            return True
+        if fnmatch.fnmatchcase(address, p) or fnmatch.fnmatchcase(config_address, p):
+            return True
+    return False
 
 
 def _resource_entry(
@@ -246,6 +256,7 @@ def _resource_entry(
         "address": address,
         "type": rtype,
         "mode": rc.get("mode"),
+        "deposed": rc.get("deposed"),  # a deposed object shares its address with the current instance
         "actions": list(change.get("actions") or []),
         "action_reason": rc.get("action_reason"),
         "replace_paths": [list(p) for p in (change.get("replace_paths") or [])],
@@ -267,6 +278,10 @@ def _resource_entry(
     )
     entry["provenance"] = provenance(config.get(_config_address(address)))
     return entry
+
+
+def _entry_key(entry: Mapping[str, Any]) -> tuple[str, str]:
+    return str(entry["address"]), str(entry.get("deposed") or "")
 
 
 def _output_value(change: Mapping[str, Any], side: str, registry: SecretRegistry, key_denylist: Sequence[str]) -> Any:
@@ -332,13 +347,13 @@ def build_plan_document(
         for rc in (plan_json.get("resource_changes") or [])
         if isinstance(rc, dict)
     ]
-    resource_changes.sort(key=lambda e: e["address"])
+    resource_changes.sort(key=_entry_key)
     drift = [
         _resource_entry(rc, config, schema_paths, registry, key_denylist, never_resources)
         for rc in (plan_json.get("resource_drift") or [])
         if isinstance(rc, dict)
     ]
-    drift.sort(key=lambda e: e["address"])
+    drift.sort(key=_entry_key)
 
     config_outputs = (((plan_json.get("configuration") or {}).get("root_module") or {}).get("outputs")) or {}
     output_changes: dict[str, Any] = {}

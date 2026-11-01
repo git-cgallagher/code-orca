@@ -23,6 +23,7 @@ from codeorca.runner import (
     StepContext,
     StepResult,
     parse_duration,
+    resolve_inputs,
 )
 from codeorca.steps import default_executors, lookup, register
 
@@ -527,3 +528,64 @@ def test_exit_code_zero_when_every_step_skipped_or_succeeded(tmp_path):
     wf = workflow([shell("a", OK, when="1 == 2"), shell("b", OK, needs=["a"])])
     rc, r = run(wf, tmp_path)
     assert rc == EXIT_OK and statuses(r) == {"a": "skipped", "b": "omitted"}
+
+
+# --- hardening: resolve twice, vars, unexpected exceptions, interrupts ------------------------------------------
+
+
+def test_resolve_inputs_is_idempotent_for_an_optional_input_without_default(tmp_path):
+    wf = inputs_workflow(note={"type": "string"}, n={"type": "int"})
+    once = resolve_inputs(wf, {})
+    assert once == {"note": None, "n": None}
+    assert resolve_inputs(wf, once) == once  # the CLI resolves, then Runner resolves again
+    rc, r = run(wf, tmp_path, once)
+    assert rc == EXIT_OK and r.inputs == once
+
+
+def test_vars_are_rendered_once_from_inputs_and_persisted_resolved(tmp_path):
+    wf = workflow(
+        [shell("a", py("import sys; assert sys.argv[1] == 'name=prod-app', sys.argv") + ["name=${{ vars.name }}"])],
+        inputs={"env": {"type": "string", "default": "prod"}},
+        vars={"name": "${{ inputs.env }}-app", "plain": 1},
+    )
+    rc, r = run(wf, tmp_path)
+    assert rc == EXIT_OK
+    assert r.vars == {"name": "prod-app", "plain": 1}
+    assert r.run_dir.read_run()["vars"] == {"name": "prod-app", "plain": 1}
+
+
+def test_vars_cannot_reference_steps(tmp_path):
+    wf = workflow([shell("a", OK)], vars={"x": "${{ steps.a.status }}"})
+    with pytest.raises(RunError, match="vars"):
+        Runner(PROJECT, wf, {}, RunDir(tmp_path), default_executors())
+
+
+@pytest.mark.parametrize(
+    "step",
+    [
+        shell("a", ["echo", "${{ 100 / inputs.count }}"]),
+        shell("a", OK, when="100 / inputs.count > 1"),
+        shell("a", OK, outputs={"x": "${{ 100 / inputs.count }}"}),
+    ],
+)
+def test_non_jinja_exception_in_an_expression_errors_the_step(tmp_path, step):
+    wf = workflow([step], inputs={"count": {"type": "int", "default": 0}})
+    rc, r = run(wf, tmp_path)
+    assert rc == EXIT_FAILED
+    assert r.states["a"]["status"] == "errored" and "ZeroDivisionError" in r.states["a"]["error"]
+    assert r.run_dir.read_run()["status"] == "failed"
+
+
+def test_interrupt_finalises_the_run_record_before_propagating(tmp_path):
+    def interrupted(step, ctx):
+        raise KeyboardInterrupt
+
+    wf = workflow([shell("a", OK), shell("b", OK, needs=["a"])], **{"finally": [shell("f", OK)]})
+    rd = RunDir(tmp_path)
+    r = Runner(PROJECT, wf, {}, rd, {**default_executors(), "shell": interrupted})
+    with pytest.raises(KeyboardInterrupt):
+        r.run()
+    record = rd.read_run()
+    assert record["status"] == "failed" and record["exit_code"] == EXIT_FAILED and record["finished"]
+    assert record["steps"]["a"]["status"] == "cancelled" and "interrupted" in record["steps"]["a"]["error"]
+    assert record["steps"]["b"]["status"] == "cancelled" and record["steps"]["f"]["status"] == "cancelled"

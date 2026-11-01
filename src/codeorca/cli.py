@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import sys
 from collections.abc import Mapping
 from contextlib import ExitStack
@@ -173,6 +174,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             cwd=project.root,
         )
     except RunError as e:
+        shutil.rmtree(run_dir.path, ignore_errors=True)  # nothing ran and no run.json exists: leave no empty run
         raise CliError(str(e)) from None
     print(f"run {run_dir.run_id}: {workflow.name} ({path}){' [dry-run]' if args.dry_run else ''}")
     try:

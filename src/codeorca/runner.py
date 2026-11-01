@@ -215,7 +215,8 @@ def resolve_inputs(workflow: Workflow, given: Mapping[str, Any]) -> dict[str, An
         raise InputError(f"unknown input(s): {', '.join(unknown)}")
     resolved: dict[str, Any] = {}
     for name, spec in workflow.inputs.items():
-        if name in given:
+        # ``None`` for an optional input is what a previous resolve produced: resolving twice is idempotent
+        if name in given and given[name] is not None:
             resolved[name] = coerce_input(name, spec, given[name])
         elif spec.default is not None:
             resolved[name] = coerce_input(name, spec, spec.default)
@@ -265,7 +266,17 @@ class Runner:
         self.exit_code: int | None = None
         self.transient = [re.compile(p) for p in (project.policy.transient_errors if project else [])]
         self.git_sha = _git_sha(cwd)
+        self.vars = self._render_vars()  # once, over the inputs only: run.json carries RESOLVED vars
         self.persist()  # the run exists on disk as soon as it is created
+
+    def _render_vars(self) -> dict[str, Any]:
+        """Workflow ``vars`` rendered over ``inputs``/``run``/``project`` (never ``steps``: a var is fixed for the
+        whole run). A reference the context cannot satisfy is a ``RunError`` before anything runs."""
+        ctx = self.context(with_steps=False)
+        try:
+            return render_tree(dict(self.workflow.vars), ctx)
+        except ExpressionError as e:
+            raise RunError(f"vars: {e}") from None
 
     # --- preconditions ---------------------------------------------------------------------------------------
     def _check_supported(self) -> None:
@@ -280,11 +291,9 @@ class Runner:
             raise NotImplementedInPhase("max_parallel > 1 is not implemented in this phase")
 
     # --- context ---------------------------------------------------------------------------------------------
-    def context(self, extra: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    def context(self, extra: Mapping[str, Any] | None = None, *, with_steps: bool = True) -> dict[str, Any]:
         ctx: dict[str, Any] = {
             "inputs": dict(self.inputs),
-            "vars": dict(self.workflow.vars),
-            "steps": {sid: {"status": st["status"], "outputs": st["outputs"]} for sid, st in self.states.items()},
             "run": {
                 "id": self.run_dir.run_id,
                 "status": self.status,
@@ -293,12 +302,37 @@ class Runner:
             },
             "project": self.project.project if self.project else None,
         }
+        if with_steps:
+            ctx["vars"] = dict(self.vars)
+            ctx["steps"] = {sid: {"status": st["status"], "outputs": st["outputs"]} for sid, st in self.states.items()}
         if extra:
             ctx.update(extra)
         return ctx
 
     # --- the run ---------------------------------------------------------------------------------------------
     def run(self) -> int:
+        """Run the workflow. Whatever escapes the scheduling loop (an interrupt, an executor raising something
+        that is not an ``Exception``, a bug) still leaves run.json finished: status ``failed``, the step that was
+        running ``cancelled`` with the reason, every step that never ran ``cancelled`` too."""
+        try:
+            return self._run()
+        except BaseException as e:
+            self._abort(e)
+            raise
+
+    def _abort(self, exc: BaseException) -> None:
+        reason = "interrupted" if isinstance(exc, KeyboardInterrupt) else f"{type(exc).__name__}: {exc}"
+        for state in self.states.values():
+            if state["status"] is None:
+                state["status"] = "cancelled"
+                if state.get("started") and not state.get("finished"):
+                    state["error"] = reason
+                    state["finished"] = _now()
+        self.status = "failed"
+        self.exit_code = EXIT_FAILED
+        self.persist(finished=True)
+
+    def _run(self) -> int:
         self.persist()
         sorter = TopologicalSorter(self.workflow.graph())
         sorter.prepare()
@@ -516,7 +550,7 @@ class Runner:
             "git_sha": self.git_sha,
             "dry_run": self.dry_run,
             "inputs": self.inputs,
-            "vars": self.workflow.vars,
+            "vars": self.vars,
             "status": self.status,
             "exit_code": self.exit_code,
             "started": self.started,

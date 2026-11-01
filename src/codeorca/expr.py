@@ -25,8 +25,7 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 import jinja2
-from jinja2 import StrictUndefined, TemplateSyntaxError, UndefinedError
-from jinja2.exceptions import SecurityError
+from jinja2 import StrictUndefined, UndefinedError
 from jinja2.sandbox import ImmutableSandboxedEnvironment
 
 VAR_START = "${{"
@@ -81,7 +80,7 @@ def render(template: str, ctx: Mapping[str, Any]) -> str:
         return template
     try:
         return ENV.from_string(template).render(dict(ctx))
-    except (TemplateSyntaxError, UndefinedError, SecurityError, TypeError) as e:
+    except Exception as e:  # noqa: BLE001 - ZeroDivisionError, a filter's ValueError: the step's error, not a crash
         raise ExpressionError(f"{template!r}: {type(e).__name__}: {e}") from None
 
 
@@ -90,7 +89,7 @@ def evaluate(expression: str, ctx: Mapping[str, Any]) -> Any:
     try:
         compiled = ENV.compile_expression(expression, undefined_to_none=False)
         value = compiled(**dict(ctx))
-    except (TemplateSyntaxError, UndefinedError, SecurityError, TypeError) as e:
+    except Exception as e:  # noqa: BLE001 - any failure while evaluating is the expression's error
         raise ExpressionError(f"{expression!r}: {type(e).__name__}: {e}") from None
     return _check_defined(value, repr(expression))
 

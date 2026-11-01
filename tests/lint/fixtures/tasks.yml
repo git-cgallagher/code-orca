@@ -1,0 +1,13 @@
+# A role task file (a bare task list), with a vaulted value in it.
+- name: vaulted value to a plain parameter        # secret-to-plain-param
+  ansible.builtin.lineinfile:
+    line: "{{ vault_db_password }}"
+    path: /tmp/example-not-secret
+  vars:
+    vault_db_password: !vault |
+      $ANSIBLE_VAULT;1.1;AES256
+      6162636465666768696a6b6c6d6e6f70
+- name: clean task
+  ansible.builtin.file:
+    path: /tmp/example
+    state: touch

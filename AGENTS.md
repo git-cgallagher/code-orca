@@ -20,6 +20,10 @@ Consumers keep their own `codeorca.yaml`, `workflows/`, `specs/` in their own (u
 | `src/codeorca/secrets.py` | run-wide redaction wiring: `build_registry` (HMAC key from `CODEORCA_REDACTION_KEY` in this phase, fail-closed; seeds from `AWS_SECRET_ACCESS_KEY`/`AWS_SESSION_TOKEN` + every stack's `secrets:`/`required_env` values), `seed_inputs` (inputs whose name matches the key denylist), `line_hook` for `Runner(stream=)`, `record_filter` for `Runner(redact=)`, `terraform_stream` (a `StreamRedactor` per channel) for `TerraformRunner(stream=)` |
 | `src/codeorca/doctor.py` | `codeorca doctor`: tiny dependency-free version matcher (`exact`, `>=,<`, `7.6.*`, `*`), injectable probes, table / `--json` / `--lock` output |
 | `src/codeorca/specs/` | spec rendering: `__init__.py` (`render_spec_yaml`, `write_spec` + `.meta.yaml` sidecar + the post-write gate, `build_header`, `NEVER_RENDERED`), `terraform_plan.py` (`seed_registry`, `build_plan_document`: merge_unknown -> placeholder mask -> schema mask -> value scrub + key denylist on value trees only, provenance from `configuration.*.expressions`, `never_render`) |
+| `src/codeorca/specs/ansible_vars.py` | the Ansible host spec's **inventory scope**, run as a subprocess (`python -m codeorca.specs.ansible_vars --inventory … --host … [--roles-path] [--lookup-denylist] [--key-denylist] [--template]`): one JSON document on stdout (fd 1 is parked, ansible's own output goes to stderr), `declared`/`resolved`/`source` per var templated key by key, `<secret: declared>` from `meta/argument_specs.yml` (`no_log`, nested too), `<skipped: key matches denylist>`, `<vault>` (never decrypted), `<skipped: lookup <fqcn> is a secret source>` (lookup denylist by raw name and FQCN, denylist-named arguments, non-literal plugin names), argument-spec enrichment, `--template` files rendered with the markers in place; provenance derived from the `group_vars`/`host_vars` files |
+| `src/codeorca/specs/ansible_host.py` | pure side of the host spec: `run_vars_subprocess` (stdout in memory, stderr to a callback, no redaction key in the child), `build_host_document` (registry scrub + key denylist over value trees only), `header_for`, `render_play_scope_playbook` (**play scope**: check-mode play with `import_role` + `when: false` per role, `template` + `copy content: to_nice_json` of an allow list, markers carried as play vars via `marker_vars`), `parse_play_scope_events` over the adapter's JSONL |
+| `src/codeorca/lint/` | `lint_playbooks(paths, key_denylist, lookup_denylist)` -> `{file, line, rule, level, message}`: `no-hostvars-dump`, `debug-secret-name`, `secret-to-plain-param` (module `no_log` from DOCUMENTATION plus a source scan of `argument_spec`; `resolve_module` injectable), `unknown-module` (info), `redundant-task-no-log` (info) |
+| `tests/specs/test_ansible_host*.py`, `tests/lint/`, `tests/fixtures/ansible_host/` | host spec and lint tests; the fixture inventory (2 hosts, templated/int/vaulted/lookup/password-named vars, `roles/app_config` with an argument spec and a template; the vault password is the placeholder `vault-pass.txt`); the subprocess and installed-module tests skip without ansible-core (`pip install -e '.[ansible]'`) |
 | `src/codeorca/steps/terraform.py` | the `terraform` executor (`make_executor(registry)`): stack resolution, per-stack flock, non-secret backend config, pre-plan registration of sensitive `var_overrides` / `TF_VAR_*`, `init` (`-lockfile=readonly` under `CI`), `validate`/`plan`/`output`/`test`; `apply` and `migrate_backend` fail with the Phase 3 message; `open_session` + `plan_stack` are what `codeorca drift` reuses |
 | `src/codeorca/steps/spec_render.py` | the `spec-render` executor (`terraform_plan` source only this phase) and `render_run` behind `codeorca render` |
 | `tests/specs/`, `tests/steps/`, `tests/cli/`, `tests/integration/` | plan document + YAML writer over the fixtures; executors without a terraform binary; doctor with injected probes; the reference project end to end through the CLI (skipped without `terraform`) |
@@ -193,6 +197,22 @@ Ansible (core 2.21.5):
 - **`ruamel.yaml`'s `add_representer` is a classmethod on a shared dict**: calling it on `yaml.representer` to
   quote strings changed every later dump in the process (the spec renderer's output broke two tests). Subclass
   `SafeRepresenter` and assign `yaml.Representer`.
+- **Host spec, learned building it (2026-11-01):** `lookup_loader`/`module_loader` resolve an FQCN
+  (`ansible.builtin.env`, `ansible.builtin.copy`) only after `ansible.plugins.loader.init_plugin_loader()`; before
+  it, only short names resolve. ansible needs a **writable `HOME`** (`~/.ansible/tmp`) even to template, so a
+  child env of `{PATH}` alone fails with "Unable to create local directories". Pass the inventory **file**
+  (`inventory/hosts.yml`), not its directory: a directory source makes ansible try to parse every subfolder as an
+  inventory (`files/` warns). Group `vars` on inventory `Group` objects are empty for file-based `group_vars`,
+  so provenance is derived by loading `group_vars`/`host_vars` ourselves in precedence order. A static
+  `ansible.builtin.import_role` with `when: false` exposes the role's defaults and vars to the play while every
+  task is skipped (the play-scope spec play's way to see role defaults without running the role). Play `vars`
+  outrank inventory vars and role defaults but not role `vars/` or `set_fact`: the inventory-scope markers are
+  carried into the play as `vars`, a secret defined in a role's `vars/` still renders and is the redactor's job.
+- **Builtin module DOCUMENTATION almost never carries `no_log`** (at 2.21.5 only `expect` does; `user.password`,
+  `uri.url_password`, `copy.content` are `no_log` in the code's `argument_spec` only): the lint reads the docs
+  *and* scans the module source (`name=dict(... no_log=True)` at the entry's own level), so a lint that trusted
+  the docs alone would flag `user: password:` on every real playbook. `copy.content` **is** `no_log`, which is
+  what makes the play-scope vars dump safe in results.
 
 Container (for the image phase):
 - The base image is Debian 13 trixie: Microsoft's legacy `microsoft.asc` key fails under trixie's apt,

@@ -9,6 +9,13 @@
   `ansible` executor (playbook or `role:`, handoff files that live only while the play runs, redacted
   `inventory.yml` kept for the host spec, `events.jsonl` through the stream redactor, `--check --diff` under
   `--dry-run`, `check_unsupported` warn/fail/ignore); `pip install 'code-orca[ansible]'` pins ansible-core 2.21.
+- Ansible host spec (Phase 2): `specs/ansible_vars.py` (inventory scope as a subprocess: `declared`/`resolved`/
+  `source` per var, key-by-key templating, `<secret: declared>` from role argument specs, `<vault>`, key and
+  lookup denylists, template rendering with markers in place), `specs/ansible_host.py` (`run_vars_subprocess`,
+  `build_host_document`, the check-mode play-scope play generator with `import_role` + `when: false` and
+  `marker_vars`, the JSONL events parser) and the playbook lint `codeorca.lint` (`no-hostvars-dump`,
+  `debug-secret-name`, `secret-to-plain-param`, `unknown-module`, `redundant-task-no-log`), with a fixture
+  inventory under `tests/fixtures/ansible_host/`.
 - Phase 1 review fixes (secrets): Terraform's `-json` documents are parsed in memory and never streamed to
   `stdout.log`, and the human `plan` output is written only after the registry was seeded from the plan JSON;
   every `TF_VAR_<name>` whose variable is declared sensitive or denylist-named is registered before Terraform

@@ -19,7 +19,7 @@ steps:
     outputs:
       changed: "${{ result.exit_code == 2 }}"
       plan_file: "${{ result.files.plan_file }}"
-      plan_json: "${{ result.files.plan_json }}"           # piped + masked show -json, stored under the run dir only
+      plan_json: "${{ result.files.plan_json }}"           # the redacted plan document (not raw show -json), under the run dir only
       prior_app_host: "${{ result.prior_outputs.app_host.value }}"   # from prior_state in the plan JSON (non-sensitive)
 
   - id: plan_spec

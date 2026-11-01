@@ -81,13 +81,15 @@ def _registry(project: Project, env: Mapping[str, str]):
 
 
 def _executors(registry) -> dict:
-    from codeorca.steps import default_executors
+    from codeorca.steps import default_executors, register
     from codeorca.steps import spec_render as spec_render_step
     from codeorca.steps import terraform as terraform_step
 
     executors = default_executors()
     executors["terraform"] = terraform_step.make_executor(registry)
     executors["spec-render"] = spec_render_step.make_executor(registry)
+    for step_type in ("terraform", "spec-render"):
+        register(step_type, executors[step_type])  # lookup()/registered() see the real executors for this run
     return executors
 
 
@@ -195,6 +197,8 @@ def _status_table(record: Mapping[str, Any], registry=None) -> str:
 
 
 def cmd_drift(args: argparse.Namespace) -> int:
+    from codeorca.adapters.terraform import TerraformError
+    from codeorca.policy import PolicyError
     from codeorca.rundir import RunDir
     from codeorca.runner import StepError, _git_sha
     from codeorca.steps.spec_render import render_plan_spec
@@ -252,7 +256,8 @@ def cmd_drift(args: argparse.Namespace) -> int:
                 detail = ", ".join(f"{k} {v}" for k, v in counts.items() if v) or "no changes"
                 if not outcome.result["gate"]["passed"]:
                     detail += "; gate blocked"
-        except (StepError, OSError) as e:
+        except (StepError, TerraformError, PolicyError, OSError, ValueError) as e:
+            # engine missing, init/show failure, a credential-looking backend key, a locked stack: a verdict row
             detail = registry.redact(str(e)).splitlines()[0]
         code = {"clean": 0, "drift": EXIT_DRIFT, "error": 1}[verdict]
         worst = 1 if 1 in (worst, code) else max(worst, code)

@@ -73,9 +73,11 @@ Phase 1 integration (2026-11-01):
   files (plus the key denylist on the variable name) and registers `var_overrides` and `TF_VAR_<name>` values first;
   `seed_registry` over the plan JSON is the authoritative second pass.
 - **Whatever a child process writes is unredacted**: `CODEORCA_OUTPUT_FILE` is rewritten through the hook after it
-  is read, `plan.tfplan` is a deflate-compressed zip (the secret is not byte-visible; 0600, never copied), and
-  `run.json`/`result.json`/`outputs/*.json` go through `Runner(redact=)`. Nothing else under the run dir is written by
-  anyone but the orchestrator.
+  is read, and `run.json`/`result.json`/`outputs/*.json` go through `Runner(redact=)`. `plan.tfplan` holds the
+  sensitive variable values in clear inside a zip; on the reference stack the entries are deflated so the value is not
+  byte-visible (observed, not guaranteed: deflate may emit stored blocks), which is why the file is 0600, never copied
+  out of the run dir, and `scan_outputs` over the whole run dir is part of the integration test. Nothing else under the
+  run dir is written by anyone but the orchestrator.
 - **Run ids order by second only**: two runs in one second sort by their random suffix, so `latest` picks by the
   recorded `started` time, and a test must pick a run by its content, not by position.
 - **`mask_by_map` says `(sensitive)`; specs want placeholders.** The spec renderer masks map-flagged leaves with the

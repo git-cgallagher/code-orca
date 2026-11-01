@@ -65,7 +65,12 @@ def render_plan_spec(
     header = header_for(document, registry.key_id, git_sha, workflow=workflow, backend_key=backend_key)
     meta = dict(document.get(META_KEY) or {})
     meta.setdefault("run_id", run_dir.run_id)
-    meta["source"] = str(source)
+    try:
+        meta["source"] = (
+            source.resolve().relative_to(run_dir.path.resolve()).as_posix()
+        )  # no workstation path in a committed file
+    except ValueError:
+        meta["source"] = source.name
     try:
         spec_path, sidecar = write_spec(output, document, header, meta, registry)
     except SpecGateError as e:

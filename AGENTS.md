@@ -18,8 +18,10 @@ Consumers keep their own `codeorca.yaml`, `workflows/`, `specs/` in their own (u
 | `src/codeorca/config.py` | YAML 1.2 loader (ruamel, pure) |
 | `src/codeorca/cli.py` | `codeorca validate`, `codeorca schema export [--check]` |
 | `schema/` | exported JSON Schema; CI fails if it differs from the models (`schema export --check`) |
+| `src/codeorca/redact/` | redaction pipeline (plan §5.7): `registry.py` (`SecretRegistry`, HMAC placeholders, encodings), `text.py` (`redact_tree`/`redact_text`, key denylist), `terraform.py` (`mask_by_map`, `merge_unknown`, `schema_sensitive_paths`, `mask_by_schema`), `stream.py` (`StreamRedactor`), `gate.py` (`scan_outputs`), `entropy.py` (`entropy_warnings`); residual risk in the package docstring |
 | `examples/reference/` | the offline reference project: project config, a provider-free Terraform stack, a localhost playbook, workflows |
 | `tests/` | pytest; `tests/negative/` holds workflow files that must fail validation, each for a named reason |
+| `tests/redact/` | redaction tests (no terraform/ansible binary needed); `fixtures/` holds a hand-scrubbed plan/state/output JSON, a providers-schema excerpt and two log captures, all with `FIXTURE-SECRET-*` placeholders; regeneration recipe in `conftest.py` |
 
 ## Conventions
 

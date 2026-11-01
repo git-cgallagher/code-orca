@@ -1,0 +1,17 @@
+{
+  "plain": {
+    "sensitive": false,
+    "type": "string",
+    "value": "hello"
+  },
+  "pw_nonsensitive": {
+    "sensitive": false,
+    "type": "string",
+    "value": "FIXTURE-SECRET-abc123"
+  },
+  "pw_out": {
+    "sensitive": true,
+    "type": "string",
+    "value": "FIXTURE-SECRET-abc123"
+  }
+}

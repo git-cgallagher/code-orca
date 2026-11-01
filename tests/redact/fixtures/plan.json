@@ -1,0 +1,350 @@
+{
+  "applyable": true,
+  "complete": true,
+  "configuration": {
+    "provider_config": {
+      "random": {
+        "full_name": "registry.terraform.io/hashicorp/random",
+        "name": "random",
+        "version_constraint": "~> 3.7"
+      },
+      "terraform": {
+        "full_name": "terraform.io/builtin/terraform",
+        "name": "terraform"
+      }
+    },
+    "root_module": {
+      "outputs": {
+        "plain": {
+          "expression": {
+            "constant_value": "hello"
+          }
+        },
+        "pw_nonsensitive": {
+          "expression": {
+            "references": [
+              "var.db_password"
+            ]
+          }
+        },
+        "pw_out": {
+          "expression": {
+            "references": [
+              "var.db_password"
+            ]
+          },
+          "sensitive": true
+        }
+      },
+      "resources": [
+        {
+          "address": "random_password.pw",
+          "expressions": {
+            "length": {
+              "constant_value": 12
+            }
+          },
+          "mode": "managed",
+          "name": "pw",
+          "provider_config_key": "random",
+          "schema_version": 3,
+          "type": "random_password"
+        },
+        {
+          "address": "terraform_data.eph",
+          "expressions": {
+            "input": {
+              "constant_value": "x"
+            }
+          },
+          "mode": "managed",
+          "name": "eph",
+          "provider_config_key": "terraform",
+          "provisioners": [
+            {
+              "expressions": {
+                "command": {
+                  "references": [
+                    "var.eph_token"
+                  ]
+                }
+              },
+              "type": "local-exec"
+            }
+          ],
+          "schema_version": 0,
+          "type": "terraform_data"
+        },
+        {
+          "address": "terraform_data.t",
+          "expressions": {
+            "input": {
+              "references": [
+                "var.db_password"
+              ]
+            }
+          },
+          "mode": "managed",
+          "name": "t",
+          "provider_config_key": "terraform",
+          "schema_version": 0,
+          "type": "terraform_data"
+        }
+      ],
+      "variables": {
+        "db_password": {
+          "default": "FIXTURE-SECRET-abc123",
+          "sensitive": true
+        },
+        "eph_token": {
+          "default": "FIXTURE-EPHEMERAL-xyz"
+        }
+      }
+    }
+  },
+  "errored": false,
+  "format_version": "1.2",
+  "output_changes": {
+    "plain": {
+      "actions": [
+        "create"
+      ],
+      "after": "hello",
+      "after_sensitive": false,
+      "after_unknown": false,
+      "before": null,
+      "before_sensitive": false
+    },
+    "pw_nonsensitive": {
+      "actions": [
+        "create"
+      ],
+      "after": "FIXTURE-SECRET-abc123",
+      "after_sensitive": false,
+      "after_unknown": false,
+      "before": null,
+      "before_sensitive": false
+    },
+    "pw_out": {
+      "actions": [
+        "create"
+      ],
+      "after": "FIXTURE-SECRET-abc123",
+      "after_sensitive": true,
+      "after_unknown": false,
+      "before": null,
+      "before_sensitive": true
+    }
+  },
+  "planned_values": {
+    "outputs": {
+      "plain": {
+        "sensitive": false,
+        "type": "string",
+        "value": "hello"
+      },
+      "pw_nonsensitive": {
+        "sensitive": false,
+        "type": "string",
+        "value": "FIXTURE-SECRET-abc123"
+      },
+      "pw_out": {
+        "sensitive": true,
+        "type": "string",
+        "value": "FIXTURE-SECRET-abc123"
+      }
+    },
+    "root_module": {
+      "resources": [
+        {
+          "address": "random_password.pw",
+          "mode": "managed",
+          "name": "pw",
+          "provider_name": "registry.terraform.io/hashicorp/random",
+          "schema_version": 3,
+          "sensitive_values": {
+            "bcrypt_hash": true,
+            "result": true
+          },
+          "type": "random_password",
+          "values": {
+            "keepers": null,
+            "length": 12,
+            "lower": true,
+            "min_lower": 0,
+            "min_numeric": 0,
+            "min_special": 0,
+            "min_upper": 0,
+            "number": true,
+            "numeric": true,
+            "override_special": null,
+            "special": true,
+            "upper": true
+          }
+        },
+        {
+          "address": "terraform_data.eph",
+          "mode": "managed",
+          "name": "eph",
+          "provider_name": "terraform.io/builtin/terraform",
+          "schema_version": 0,
+          "sensitive_values": {},
+          "type": "terraform_data",
+          "values": {
+            "input": "x",
+            "triggers_replace": null
+          }
+        },
+        {
+          "address": "terraform_data.t",
+          "mode": "managed",
+          "name": "t",
+          "provider_name": "terraform.io/builtin/terraform",
+          "schema_version": 0,
+          "sensitive_values": {
+            "input": {
+              "pw": true
+            },
+            "output": {}
+          },
+          "type": "terraform_data",
+          "values": {
+            "input": {
+              "plain": "hello",
+              "pw": "FIXTURE-SECRET-abc123"
+            },
+            "triggers_replace": null
+          }
+        }
+      ]
+    }
+  },
+  "prior_state": {
+    "format_version": "1.0",
+    "terraform_version": "1.14.7",
+    "values": {
+      "outputs": {
+        "plain": {
+          "sensitive": false,
+          "type": "string",
+          "value": "hello"
+        },
+        "pw_nonsensitive": {
+          "sensitive": false,
+          "type": "string",
+          "value": "FIXTURE-SECRET-abc123"
+        },
+        "pw_out": {
+          "sensitive": true,
+          "type": "string",
+          "value": "FIXTURE-SECRET-abc123"
+        }
+      },
+      "root_module": {}
+    }
+  },
+  "resource_changes": [
+    {
+      "address": "random_password.pw",
+      "change": {
+        "actions": [
+          "create"
+        ],
+        "after": {
+          "keepers": null,
+          "length": 12,
+          "lower": true,
+          "min_lower": 0,
+          "min_numeric": 0,
+          "min_special": 0,
+          "min_upper": 0,
+          "number": true,
+          "numeric": true,
+          "override_special": null,
+          "special": true,
+          "upper": true
+        },
+        "after_sensitive": {
+          "bcrypt_hash": true,
+          "result": true
+        },
+        "after_unknown": {
+          "bcrypt_hash": true,
+          "id": true,
+          "result": true
+        },
+        "before": null,
+        "before_sensitive": false
+      },
+      "mode": "managed",
+      "name": "pw",
+      "provider_name": "registry.terraform.io/hashicorp/random",
+      "type": "random_password"
+    },
+    {
+      "address": "terraform_data.eph",
+      "change": {
+        "actions": [
+          "create"
+        ],
+        "after": {
+          "input": "x",
+          "triggers_replace": null
+        },
+        "after_sensitive": {},
+        "after_unknown": {
+          "id": true,
+          "output": true
+        },
+        "before": null,
+        "before_sensitive": false
+      },
+      "mode": "managed",
+      "name": "eph",
+      "provider_name": "terraform.io/builtin/terraform",
+      "type": "terraform_data"
+    },
+    {
+      "address": "terraform_data.t",
+      "change": {
+        "actions": [
+          "create"
+        ],
+        "after": {
+          "input": {
+            "plain": "hello",
+            "pw": "FIXTURE-SECRET-abc123"
+          },
+          "triggers_replace": null
+        },
+        "after_sensitive": {
+          "input": {
+            "pw": true
+          },
+          "output": {}
+        },
+        "after_unknown": {
+          "id": true,
+          "input": {},
+          "output": true
+        },
+        "before": null,
+        "before_sensitive": false
+      },
+      "mode": "managed",
+      "name": "t",
+      "provider_name": "terraform.io/builtin/terraform",
+      "type": "terraform_data"
+    }
+  ],
+  "terraform_version": "1.14.7",
+  "timestamp": "2026-11-01T17:46:36Z",
+  "variables": {
+    "db_password": {
+      "value": "FIXTURE-SECRET-abc123"
+    },
+    "eph_token": {
+      "value": "FIXTURE-EPHEMERAL-xyz"
+    }
+  }
+}

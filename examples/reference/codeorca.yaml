@@ -1,0 +1,62 @@
+# Reference project config. Every value is a placeholder; copy this tree into a consumer repo and edit.
+# The project-file model is not implemented yet (Phase 1); this file documents the intended shape.
+api: codeorca/v1
+project: example
+runtime:                         # the expected execution environment; `codeorca doctor` fails closed on any mismatch
+  image: ghcr.io/git-cgallagher/code-orca-runtime:0.1.0
+  terraform: "1.14.7"            # exact
+  ansible_core: "2.21.5"         # exact
+  python: ">=3.13,<3.14"
+  pwsh: "7.6.*"
+  collections: {}                # exact pins; `codeorca doctor --lock` can fill this in
+state_dir: .codeorca/runs
+specs_dir: specs
+max_parallel: 1
+backend:                         # created by the bootstrap-backend workflow
+  type: s3
+  account_id: "123456789012"
+  bucket: example-tfstate-123456789012
+  region: us-east-1
+  encryption: aes256
+  locking: lockfile
+  noncurrent_version_expiry_days: 90
+stacks:
+  app:
+    dir: terraform/app
+    key: example/app/terraform.tfstate
+    aws_profile: example-terraform
+    tfvars_committed: true
+    state_specs: false
+    never_render:
+      outputs: [app_token]
+      resources: []
+policy:
+  stateful_types: [aws_dynamodb_table, aws_kms_key, aws_s3_bucket, aws_db_instance, aws_cognito_user_pool,
+                   aws_ssm_parameter, aws_iam_access_key, aws_secretsmanager_secret]
+  critical_tag: critical=true
+  transient_errors: ["Error acquiring the state lock", "RequestLimitExceeded", "Throttling", "429"]
+redaction:
+  placeholder: hmac
+  hmac_key: ssm:/codeorca/redaction-key
+  key_denylist: ["(?i)password", "(?i)secret", "(?i)token", "(?i)api_key", "(?i)access_key", "(?i)private_key", "_wo$"]
+  lookup_denylist:
+    - "amazon.aws.aws_ssm"
+    - "amazon.aws.ssm_parameter"
+    - "amazon.aws.secretsmanager_secret"
+    - "amazon.aws.aws_secret"
+    - "community.hashi_vault.*"
+    - "community.general.onepassword*"
+    - "community.general.bitwarden*"
+    - "community.general.passwordstore"
+    - "community.general.lastpass"
+    - "community.general.keyring"
+    - "community.general.cyberark*"
+    - "community.general.tss"
+    - "ansible.builtin.unvault"
+    - "ansible.builtin.password"
+    - "ansible.builtin.env"
+ansible:
+  env: { ANSIBLE_NOCOLOR: "1", ANSIBLE_HOST_KEY_CHECKING: "True", ANSIBLE_RETRY_FILES_ENABLED: "False" }
+gate:
+  max_age: 24h
+workflows_dir: workflows

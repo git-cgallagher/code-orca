@@ -16,13 +16,41 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: "3.13"
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e  # v4.0.1
+        with:
+          terraform_version: 1.14.7
+          terraform_wrapper: false   # the wrapper would swallow plan's -detailed-exitcode 2
       - name: Install
         run: python -m pip install -e '.[dev]'
       - name: Lint
         run: ruff check . && ruff format --check .
-      - name: Schema is current
+      - name: Schemas are current
         run: codeorca schema export schema --check
-      - name: Validate the reference workflow
+      - name: Validate the reference workflows
         run: codeorca validate examples/reference/workflows/*.yaml
       - name: Tests
         run: pytest -q
+      # The reference project end to end. The redaction key and the stack's sensitive input are PLACEHOLDERS
+      # (the value is committed in the workflow file); the assertions below prove they never reach a spec, a log
+      # or the run directory.
+      - name: Run the plan-only workflow
+        env:
+          CODEORCA_REDACTION_KEY: example-not-secret-ci-key
+        run: codeorca run plan-only -p examples/reference/codeorca.yaml
+      - name: Drift over every stack (expects 2: a fresh local state always has changes)
+        env:
+          CODEORCA_REDACTION_KEY: example-not-secret-ci-key
+          TF_VAR_app_secret: FIXTURE-SECRET-reference-001   # drift carries no workflow inputs; the sensitive variable comes from the env
+        run: |
+          set +e
+          codeorca drift -p examples/reference/codeorca.yaml
+          rc=$?
+          set -e
+          test "$rc" -eq 2 || { echo "expected drift exit 2, got $rc"; exit 1; }
+      - name: No placeholder secret anywhere in the produced files
+        run: |
+          ls examples/reference/specs/app/plan.yaml examples/reference/specs/app/plan.meta.yaml
+          ! grep -r FIXTURE-SECRET examples/reference/specs examples/reference/.codeorca
+          ! grep -r example-not-secret-ci-key examples/reference/specs examples/reference/.codeorca
+      - name: Produced files are not tracked
+        run: test -z "$(git status --porcelain examples/reference)"

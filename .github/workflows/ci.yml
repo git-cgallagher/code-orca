@@ -46,7 +46,7 @@ jobs:
         env:
           CODEORCA_REDACTION_KEY: example-not-secret-ci-key
         run: codeorca run plan-only -p examples/reference/codeorca.yaml
-      - name: Drift over every stack (expects 2: a fresh local state always has changes)
+      - name: "Drift over every stack (exit 2 expected: a fresh local state always has changes)"
         env:
           CODEORCA_REDACTION_KEY: example-not-secret-ci-key
           TF_VAR_app_secret: FIXTURE-SECRET-reference-001   # drift carries no workflow inputs; the sensitive variable comes from the env

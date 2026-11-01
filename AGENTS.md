@@ -44,7 +44,19 @@ Consumers keep their own `codeorca.yaml`, `workflows/`, `specs/` in their own (u
 
 - **Deny floor in code.** The Terraform `action` enum and the `apply` -> `plan_file` rule live in the
   models. A workflow file can only narrow policy, never widen it. Do not add `destroy`, `import`,
-  `state`, `taint` or an auto-approve flag to the enum.
+  `state`, `taint` or an auto-approve flag to the enum. The floor covers the `terraform` step type; helpers
+  (`shell` today, `python`/`powershell` later) are trusted code, but the `shell` executor still runs
+  `policy.check_argv` over an argv whose program is `terraform`/`tofu`, so `run: [terraform, destroy]` is
+  refused too. The adapter drops `TF_CLI_ARGS*` from every child environment (the one other way onto the
+  command line).
+- **Model rules with a negative test each** (`tests/test_models.py`): duplicate step ids across `steps` and
+  `finally`; `needs` on a finally step is refused (finally steps always run last; their status functions
+  describe the run); `retry` + `on_failure: continue`; references to unknown or non-ancestor steps; unknown
+  keys; `retry.backoff` is a typed `Backoff` (`duration`/`max_duration` as Go durations or seconds, `factor`);
+  two `spec-render` steps may not share an `output`; `policy.critical_tag` must be `key=value` (the key is
+  compared exactly, the value case-folded).
+- **Workflow `vars` are rendered once at run start** over `inputs`/`run`/`project` (never `steps`) and
+  `run.json` carries the resolved values.
 - **Every new model field is validated fail-closed** (`extra='forbid'`), gets a negative test when it
   carries a rule, and the committed schema is regenerated in the same PR (`codeorca schema export schema`).
 - **Expressions use `${{ … }}`**, never `{{ … }}`, so Ansible's own templating passes through untouched.
@@ -70,10 +82,41 @@ Phase 1 integration (2026-11-01):
   appears in a log either.
 - **A sensitive variable's value must be registered before Terraform starts**, and the plan JSON that says which
   variables are sensitive only exists after it ran: the executor reads `sensitive = true` out of the stack's `*.tf`
-  files (plus the key denylist on the variable name) and registers `var_overrides` and `TF_VAR_<name>` values first;
-  `seed_registry` over the plan JSON is the authoritative second pass.
-- **Whatever a child process writes is unredacted**: `CODEORCA_OUTPUT_FILE` is rewritten through the hook after it
-  is read, and `run.json`/`result.json`/`outputs/*.json` go through `Runner(redact=)`. `plan.tfplan` holds the
+  / `*.tf.json` files (`#`, `//`, `/* */` comments tolerated) and registers `var_overrides` and **every**
+  `TF_VAR_<name>` whose variable is declared sensitive or whose name matches the key denylist first;
+  `seed_registry` over the plan JSON (sensitive flags plus denylist-named variables) is the authoritative second
+  pass. A value shorter than the registry's `min_length` (8) is never registered: the step result lists it under
+  `unprotected_overrides` and a warning, by name only.
+- **Terraform's `-json` documents are never streamed, and the human `plan` output is held back.** `show -json`,
+  `output -json`, `providers schema`, `version` and `validate` stdout is parsed in memory only (their stderr still
+  streams). `plan`'s stdout prints state-held values that nothing can flag before `show -json` ran (a computed
+  attribute echoing a secret: `~ output = "<the secret>" -> (known after apply)`), so the step buffers it and
+  writes it through the registry only after `seed_registry`. Proven by the applied-state integration test. The
+  remaining live stream is `plan`'s stderr (diagnostics).
+- **Go's `encoding/json` escapes `<`, `>`, `&` as `\u003c`, `\u003e`, `\u0026`** in every `-json` document and
+  stream; Python's `json.dumps` does not. The registry's encodings include both Go-escaped JSON forms, so a
+  password with `&` in it is matched by the stream redactor and seen by the gate.
+- **A multi-line registered value also registers each of its lines** (`SecretRegistry.add`): the shell step's
+  hook is per line, so a PEM body line printed on its own is still matched; the whole value still collapses to
+  one placeholder.
+- **`timeout:` on a terraform step is a deadline over the whole session** (init included): on expiry the engine
+  gets SIGINT (so it releases the state lock), `interrupt_grace` (10 s) to unwind, then SIGKILL, and the step is
+  `errored` with `timeout:` (`retry.policy: error` applies). The adapter does NOT start Terraform in its own
+  session: a terminal's Ctrl-C reaches it directly. The shell step's timeout bounds the pipe drain too (a
+  background child holding stdout open cannot keep the step alive), and an interrupt kills its process group
+  before propagating; the runner finalises `run.json` (status `failed`, the in-flight step `cancelled`) on any
+  escape, Ctrl-C included.
+- **`terraform test` run blocks default to apply**, Terraform also loads `*.tftest.hcl` / `*.tftest.json` from
+  the root module directory, and the `-json` stream never says which mode a run block used: the `test` action
+  refuses the whole test unless every run block says `command = plan` explicitly (textual scan with a
+  whole-file cross-check; `python-hcl2` would be the real parse).
+- **Whatever a child process writes is unredacted**: `CODEORCA_OUTPUT_FILE` is rewritten through the hook
+  whenever it exists, before it is parsed and whatever the exit (bad JSON and a timeout included), and unlinked
+  before every attempt so a failed attempt's file is never a retry's output; shell `argv.json` goes through the
+  hook too; `run.json`/`result.json`/`outputs/*.json` go through `Runner(redact=)`; `plan.json`,
+  `tf-outputs.json` and a spec are scanned in memory and only then written (0600 for the run-dir files, atomic
+  temp + `os.replace` for a spec, so a gate hit leaves the committed spec untouched). No child ever sees
+  `CODEORCA_REDACTION_KEY`. `plan.tfplan` holds the
   sensitive variable values in clear inside a zip; on the reference stack the entries are deflated so the value is not
   byte-visible (observed, not guaranteed: deflate may emit stored blocks), which is why the file is 0600, never copied
   out of the run dir, and `scan_outputs` over the whole run dir is part of the integration test. Nothing else under the
@@ -81,9 +124,18 @@ Phase 1 integration (2026-11-01):
 - **Run ids order by second only**: two runs in one second sort by their random suffix, so `latest` picks by the
   recorded `started` time, and a test must pick a run by its content, not by position.
 - **`mask_by_map` says `(sensitive)`; specs want placeholders.** The spec renderer masks map-flagged leaves with the
-  registry placeholder (`mask_with_placeholders`) so a diff shows a secret changed, and the key denylist leaves a
-  leaf that is already a placeholder or a Terraform marker alone (`redact_values`); a schema-sensitive attribute
-  that is also unknown renders `(sensitive)` (the schema mask wins: fail closed).
+  registry placeholder (`mask_with_placeholders`) so a diff shows a secret changed; the schema mask and the key
+  denylist both leave a leaf that already is a placeholder alone (otherwise every real provider's sensitive
+  attribute, map- and schema-flagged by construction, lost its change signal); a sensitive leaf that is also
+  unknown stays `(known after apply)` under the map mask (never the HMAC of that constant), and a
+  schema-sensitive attribute that is also unknown renders `(sensitive)` (the schema mask wins: fail closed).
+- **`never_render.resources` entries are matched exactly first, then as globs**: to `fnmatch`, `[0]` and
+  `["prod"]` are character classes, so an indexed address could never match itself. Outputs are exact names.
+- **`! grep` under `bash -e` never fails a CI step** (errexit ignores an inverted pipeline, and a multi-line
+  `run:` exits with its last command's status). Every leak check is its own fatal `if grep -raq`.
+- **An editable install cannot catch a subpackage missing from the wheel**: setuptools finds packages under
+  `src/` and CI installs the built wheel into a scratch venv (`--no-cache-dir`: pip happily reuses a cached build
+  of the same version) and imports every subpackage from it.
 
 Terraform (1.14.7):
 - `show -json` (plan and state), `output -json`, plan files, the plan's `variables` block and `TF_LOG` all

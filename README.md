@@ -46,7 +46,9 @@ codeorca runs gc --keep 20 -p examples/reference/codeorca.yaml
 - The reference stack's `app_secret` variable is sensitive and has **no default**: `plan-only` passes it as a
   workflow input (default `FIXTURE-SECRET-reference-001`, a placeholder CI asserts never leaks) through
   `var_overrides`; `drift` carries no inputs, so it takes the variable from `TF_VAR_app_secret` (the executor
-  registers `TF_VAR_<name>` of every sensitive-declared variable before Terraform starts).
+  registers every `TF_VAR_<name>` whose variable is declared sensitive **or** whose name matches
+  `redaction.key_denylist` before Terraform starts; a value too short for the registry is listed under
+  `unprotected_overrides` in the step result, never scrubbed).
 - `drift` writes `<specs_dir>/<stack>/plan.yaml` + `plan.meta.yaml` for every stack in `depends_on` order and
   prints a verdict table. Consumers commit `specs/`; the reference project's are generated and gitignored.
 - A spec body is deterministic (sorted keys, no run id, timestamp, duration or plan sha256: those live in the

@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Phase 2 integration: `codeorca run` registers the `ansible` executor; `spec-render` takes `source.ansible`
+  (`codeorca.steps.host_spec`): inventory scope via the vars subprocess, optional play scope as a check-mode play
+  through `AnsibleRunner` with markers handed over in a 0600 `-e @` file, a staged inventory that merges the
+  producing step's redacted extra vars and copies playbook-adjacent `group_vars`, `scope: inventory`/`play` per
+  var, `host-vars.json` for `codeorca render` (which re-renders host specs without running anything). The ansible
+  step keeps a redacted `extra-vars.json`; specs render multi-line strings as literal blocks; the play-scope
+  parser ignores `task_start` events. Reference project: role `app_config` (argument spec with a `no_log` token),
+  `group_vars/app.yml` with a denied lookup, `workflows/configure-local.yaml` (run in CI with its host spec
+  checked for the placeholder token). New `codeorca lint ansible <paths…> [-p]`. CI installs `.[dev,ansible]`,
+  imports the Phase 2 modules from the wheel and lints the reference playbooks.
 - Ansible step (Phase 2): the `codeorca_jsonl` stdout callback (one JSON event per line, no default-callback line
   ever reaches stdout, `no_log` censoring kept, check-mode-unsupported detection), `adapters/ansible.py`
   (`AnsibleRunner`: argv subprocess, hardened child env, tolerant JSONL parsing, stats/failed/unreachable hosts,

@@ -16,7 +16,7 @@ Consumers keep their own `codeorca.yaml`, `workflows/`, `specs/` in their own (u
 |---|---|
 | `src/codeorca/models.py` | Pydantic v2 models: the single source of truth for workflow files and the JSON Schema |
 | `src/codeorca/config.py` | YAML 1.2 loader (ruamel, pure) |
-| `src/codeorca/cli.py` | `codeorca validate`, `schema export [--check]` (workflow + project schemas), `run`, `drift`, `doctor`, `render`, `summary`, `runs gc`; every project command takes `-p` |
+| `src/codeorca/cli.py` | `codeorca validate`, `schema export [--check]` (workflow + project schemas), `run` (registers the terraform, ansible and spec-render executors), `drift`, `doctor`, `render`, `summary`, `runs gc`, `lint ansible` (`-p` optional there); every project command takes `-p` |
 | `src/codeorca/secrets.py` | run-wide redaction wiring: `build_registry` (HMAC key from `CODEORCA_REDACTION_KEY` in this phase, fail-closed; seeds from `AWS_SECRET_ACCESS_KEY`/`AWS_SESSION_TOKEN` + every stack's `secrets:`/`required_env` values), `seed_inputs` (inputs whose name matches the key denylist), `line_hook` for `Runner(stream=)`, `record_filter` for `Runner(redact=)`, `terraform_stream` (a `StreamRedactor` per channel) for `TerraformRunner(stream=)` |
 | `src/codeorca/doctor.py` | `codeorca doctor`: tiny dependency-free version matcher (`exact`, `>=,<`, `7.6.*`, `*`), injectable probes, table / `--json` / `--lock` output |
 | `src/codeorca/specs/` | spec rendering: `__init__.py` (`render_spec_yaml`, `write_spec` + `.meta.yaml` sidecar + the post-write gate, `build_header`, `NEVER_RENDERED`), `terraform_plan.py` (`seed_registry`, `build_plan_document`: merge_unknown -> placeholder mask -> schema mask -> value scrub + key denylist on value trees only, provenance from `configuration.*.expressions`, `never_render`) |
@@ -25,7 +25,8 @@ Consumers keep their own `codeorca.yaml`, `workflows/`, `specs/` in their own (u
 | `src/codeorca/lint/` | `lint_playbooks(paths, key_denylist, lookup_denylist)` -> `{file, line, rule, level, message}`: `no-hostvars-dump`, `debug-secret-name`, `secret-to-plain-param` (module `no_log` from DOCUMENTATION plus a source scan of `argument_spec`; `resolve_module` injectable), `unknown-module` (info), `redundant-task-no-log` (info) |
 | `tests/specs/test_ansible_host*.py`, `tests/lint/`, `tests/fixtures/ansible_host/` | host spec and lint tests; the fixture inventory (2 hosts, templated/int/vaulted/lookup/password-named vars, `roles/app_config` with an argument spec and a template; the vault password is the placeholder `vault-pass.txt`); the subprocess and installed-module tests skip without ansible-core (`pip install -e '.[ansible]'`) |
 | `src/codeorca/steps/terraform.py` | the `terraform` executor (`make_executor(registry)`): stack resolution, per-stack flock, non-secret backend config, pre-plan registration of sensitive `var_overrides` / `TF_VAR_*`, `init` (`-lockfile=readonly` under `CI`), `validate`/`plan`/`output`/`test`; `apply` and `migrate_backend` fail with the Phase 3 message; `open_session` + `plan_stack` are what `codeorca drift` reuses |
-| `src/codeorca/steps/spec_render.py` | the `spec-render` executor (`terraform_plan` source only this phase) and `render_run` behind `codeorca render` |
+| `src/codeorca/steps/spec_render.py` | the `spec-render` executor (`terraform_plan` and `ansible` sources; `terraform_state` is not implemented) and `render_run` behind `codeorca render` (plan specs from `plan.json`, host specs from `host-vars.json`, nothing re-run) |
+| `src/codeorca/steps/host_spec.py` | `spec-render` with `source.ansible`: staged inventory (producer's kept `extra-vars.json` merged into the host entry, playbook-adjacent `group_vars`/`host_vars` copied) in the 0700 handoff dir, inventory scope via `run_vars_subprocess`, play scope via `AnsibleRunner` (`--check --diff`, markers in a 0600 `-e @` file, output held until clear values are registered), `merge_play_scope` (`scope: inventory`/`play`), `host-vars.json` (0600) + `write_spec` |
 | `tests/specs/`, `tests/steps/`, `tests/cli/`, `tests/integration/` | plan document + YAML writer over the fixtures; executors without a terraform binary; doctor with injected probes; the reference project end to end through the CLI (skipped without `terraform`) |
 | `src/codeorca/policy.py` | Terraform deny floor as code (`DENY_FLOOR`, `check_argv`), the `Policy` model (narrow-only, `extra='forbid'`) and the plan gate (`plan_gate` -> `GateVerdict`) |
 | `src/codeorca/tfjson.py` | pure parsers for `-json` streams (tolerant of non-JSON lines) and `show -json` plan/state documents: summary, sensitive variables/outputs, prior and previous outputs |
@@ -34,6 +35,7 @@ Consumers keep their own `codeorca.yaml`, `workflows/`, `specs/` in their own (u
 | `src/codeorca/ansible_plugins/` | plugins handed to `ansible-playbook` by path: `callback/codeorca_jsonl.py` is the **stdout** callback (one JSON object per line for every event, nothing else; schema in its docstring; imports only stdlib + `ansible`, never `codeorca`) |
 | `src/codeorca/adapters/ansible.py` | `AnsibleRunner`: `ansible-playbook` as an argv subprocess with the callback forced in (`ANSIBLE_STDOUT_CALLBACK`/`ANSIBLE_CALLBACK_PLUGINS`), `CODEORCA_REDACTION_KEY`/`ANSIBLE_DEBUG`/`ANSIBLE_LOG_PATH`/`ANSIBLE_VERBOSITY` dropped, JSONL parsed tolerantly, `(line, channel)` stream callback where redaction attaches, bitmask exit codes, tree kill on timeout; `generate_inventory`, `generate_role_playbook`, `write_handoff` |
 | `src/codeorca/steps/ansible.py` | the `ansible` executor (`make_executor(registry)`): playbook or generated `import_role` play, 0600 inventory + extra-vars handoff files deleted after the run, `<step dir>/inventory.yml` kept redacted for the host-spec renderer, pre-run registration of denylist-named `extra_vars`/inventory values, `events.jsonl` through the stream redactor, `--check --diff` under `--dry-run`, `check_unsupported` policy (stricter of project and step) |
+| `tests/steps/test_spec_render_ansible.py`, `tests/integration/test_reference_configure_local.py`, `tests/cli/test_lint_cli.py` | host-spec step (pure helpers without ansible; live runs over the host-spec fixture with and without play scope, and the failing-subprocess path), the reference `configure-local` workflow end to end (determinism, `codeorca render` with ansible patched out, `scan_outputs`), `lint ansible` output and exit codes |
 | `tests/ansible/`, `tests/fixtures/ansible/` | callback, adapter and step tests over an offline `connection: local` fixture playbook (ok/changed/skipped/failed/no_log/loop/check-unsupported tasks), a `sleep` playbook for timeouts and a role with `meta/argument_specs.yml`; they need `ansible-playbook` on PATH or next to the test interpreter (`pip install -e '.[dev,ansible]'`) and skip otherwise |
 | `tests/fixtures/terraform/` | 1.14.7 captures from the reference stack via `regenerate.py` (plan, replace plan, state, outputs, providers schema, init/apply streams) + hand-made `delete-plan.json` and `init-mixed.jsonl`; the placeholder secret is in them on purpose |
 | `src/codeorca/project.py` | Pydantic models for the project file `codeorca.yaml` (`load_project`, `project_json_schema`): s3 backend needs bucket/region/account_id, stack `depends_on` DAG, `max_parallel` must be 1 |
@@ -44,7 +46,7 @@ Consumers keep their own `codeorca.yaml`, `workflows/`, `specs/` in their own (u
 | `tests/core/` | project model, expressions, run directory and runner tests (shell-step workflows on `sys.executable`) |
 | `schema/` | exported JSON Schema; CI fails if it differs from the models (`schema export --check`) |
 | `src/codeorca/redact/` | redaction pipeline (plan §5.7): `registry.py` (`SecretRegistry`, HMAC placeholders, encodings), `text.py` (`redact_tree`/`redact_text`, key denylist), `terraform.py` (`mask_by_map`, `merge_unknown`, `schema_sensitive_paths`, `mask_by_schema`), `stream.py` (`StreamRedactor`), `gate.py` (`scan_outputs`), `entropy.py` (`entropy_warnings`); residual risk in the package docstring |
-| `examples/reference/` | the offline reference project: project config, a provider-free Terraform stack, a localhost playbook, workflows |
+| `examples/reference/` | the offline reference project: project config, a provider-free Terraform stack, `ansible/` (role `app_config` with an argument spec incl. a `no_log` token, playbook-adjacent `group_vars/app.yml` with a denied env lookup, `site.yml`), workflows `plan-only` + `configure-local` (run in CI) and `demo-rollout` (validates only) |
 | `tests/` | pytest; `tests/negative/` holds workflow files that must fail validation, each for a named reason |
 | `tests/redact/` | redaction tests (no terraform/ansible binary needed); `fixtures/` holds a hand-scrubbed plan/state/output JSON, a providers-schema excerpt and two log captures, all with `FIXTURE-SECRET-*` placeholders; regeneration recipe in `conftest.py` |
 
@@ -155,6 +157,31 @@ Phase 1 integration (2026-11-01):
   `src/` and CI installs the built wheel into a scratch venv (`--no-cache-dir`: pip happily reuses a cached build
   of the same version) and imports every subpackage from it.
 
+Phase 2 integration (2026-11-01):
+- **`codeorca_jsonl` emits a `task_start` event with the same `task` name as the task's `runner` result.** The
+  play-scope parser matched by name only, so every task first looked like a result without a diff and was
+  reported as an error; `parse_play_scope_events` now ignores the non-result event types.
+- **The ansible step's kept inventory has no `group_vars`.** It lives in `<run>/steps/<id>/`, so neither the
+  inventory-scope subprocess (`group_vars` next to the inventory) nor a spec play generated in the step dir
+  (playbook-adjacent `group_vars`) sees `ansible/group_vars/*`; the host-spec step stages the inventory with a
+  **copy** of those trees. Not a symlink: `ansible_vars` labels provenance with `path.resolve().relative_to(
+  inventory_dir)`, a symlink resolves outside it and the label became an absolute run-dir path (run id in a
+  committed body). When the inventory has `group_vars` of its own, the playbook's are not merged in (residual).
+- **The extra-vars handoff is deleted with the play**, so the host spec could not see `app_environment` & co.:
+  the ansible step keeps a redacted 0600 `extra-vars.json` next to its inventory copy and the host-spec step
+  merges it into the host entry (`source: extra_vars (step <id>)`). Markers ride in the play scope's `-e` file,
+  not play `vars`: `-e` outranks role `vars/` and `set_fact`, play vars do not.
+- **A literal secret in a playbook's own `vars:` was copied into the kept `play-scope.yml`** (caught by
+  `scan_outputs` in the step test): a play var that gets a marker is now left out of the generated play.
+- **Role defaults are invisible to the inventory scope**, so a role template fails there (`AnsibleUndefinedVariable`)
+  and only the play scope renders it; the merge lets the play-scope template replace the inventory attempt and
+  drops its error. A group var that references a role default has the same problem: keep reference group vars
+  resolvable from inventory + extra vars.
+- **`from x import f` defeats `monkeypatch.setattr("x.f", …)`**: `steps/host_spec.py` imports
+  `run_vars_subprocess` by name, so a test that must prove no subprocess ran patches `codeorca.steps.host_spec`.
+- **Specs render multi-line strings as literal blocks** (`|`, a `SafeRepresenter` subclass in `specs/__init__.py`,
+  per the `add_representer` gotcha below), so a rendered template diffs line by line.
+
 Terraform (1.14.7):
 - `show -json` (plan and state), `output -json`, plan files, the plan's `variables` block and `TF_LOG` all
   hold sensitive values in **plain text**; only sibling flag maps mark them, and the flags do **not**
@@ -233,9 +260,12 @@ Container (for the image phase):
    (`state_specs: true`; the renderer exists, the executor does not call `show_state` yet), the `resource_drift`
    shape is assumed identical to `resource_changes` (plan §10, unverified), `--dry-run` is a no-op for the
    read-only Terraform actions, and `required_env` is checked by the terraform step only.
-2. Ansible adapter + redacting stdout callback, inventory/handoff generation, host-spec renderer. (Adapter, callback and
-   step landed 2026-11-01; `vault_password_file` is not a step field yet, Windows/psrp targets are deferred, and the
-   executor is registered by the integration step.)
+2. ~~Ansible adapter + redacting stdout callback, inventory/handoff generation, host-spec renderer~~ (done 2026-11-01:
+   adapter, callback, step, host spec with play scope, `codeorca lint ansible`, reference `configure-local` in CI).
+   Left from Phase 2: `vault_password_file` is not a step field yet; Windows/psrp targets are deferred; a project
+   that omits `redaction.lookup_denylist` gets an empty one (env/password lookups run in the host spec); play
+   scope reads every play of `play_scope.playbook` regardless of its `hosts:` pattern and scans only roles vendored
+   under a roles dir for denied lookups; playbook-adjacent `group_vars` are not merged with an inventory's own.
 3. Helpers (python/powershell/shell), gate with TTY + resume, apply bound to the plan sha256, backend bootstrap.
 4. Container image on `ghcr.io/git-cgallagher/ansible-runtime`: the pyproject ranges (`pydantic`, `ruamel.yaml`,
    `jinja2`) must be pinned exactly, with hashes, in `requirements/codeorca.txt` for the image; ranges are for pip users only.

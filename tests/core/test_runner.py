@@ -434,7 +434,8 @@ def test_stream_hook_redacts_before_the_log_is_written(tmp_path):
     rc, r = run(wf, tmp_path, stream=hook)
     assert rc == EXIT_OK
     assert (r.run_dir.steps_dir / "a" / "stdout.log").read_text() == "token=***\n"
-    assert seen == [("stdout", "token=FIXTURE-SECRET-value")]
+    assert ("stdout", "token=FIXTURE-SECRET-value") in seen
+    assert "FIXTURE-SECRET-value" not in (r.run_dir.steps_dir / "a" / "argv.json").read_text()  # argv goes through too
 
 
 def test_dry_run_sets_env_flag(tmp_path):

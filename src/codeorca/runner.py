@@ -486,6 +486,8 @@ class Runner:
         )
         if self.dry_run:
             env["CODEORCA_DRY_RUN"] = "1"
+        # one output file per attempt: what a failed attempt wrote must not become a later attempt's output
+        Path(env["CODEORCA_OUTPUT_FILE"]).unlink(missing_ok=True)
         ctx = StepContext(
             step=rendered,
             run_dir=self.run_dir,

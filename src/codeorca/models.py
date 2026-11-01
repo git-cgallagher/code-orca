@@ -4,7 +4,9 @@ Design rules baked in here (see AGENTS.md):
 - ``extra='forbid'`` everywhere: an unknown key is an error, never silently ignored.
 - Step types are a discriminated union on ``type``.
 - The Terraform ``action`` enum is the deny floor: destroy, import, state surgery, -target and -auto-approve
-  are not expressible in a workflow file at all.
+  are not expressible in a ``terraform`` step at all. A helper (``shell`` today, ``python``/``powershell`` later)
+  is trusted code and may run any program; the ``shell`` executor still runs ``policy.check_argv`` over an argv
+  whose program is ``terraform``/``tofu``, so the literal ``run: [terraform, destroy]`` is refused too.
 - ``apply`` requires a ``plan_file``: a bare apply is denied.
 - Cross-step output references (``${{ steps.x.outputs.y }}``) must name a declared output of a step this step
   (transitively) needs, so a typo fails at validation instead of at run time under StrictUndefined.

@@ -81,15 +81,14 @@ def _registry(project: Project, env: Mapping[str, str]):
 
 
 def _executors(registry) -> dict:
-    from codeorca.steps import default_executors, register
+    from codeorca.steps import default_executors
     from codeorca.steps import spec_render as spec_render_step
     from codeorca.steps import terraform as terraform_step
 
     executors = default_executors()
     executors["terraform"] = terraform_step.make_executor(registry)
     executors["spec-render"] = spec_render_step.make_executor(registry)
-    for step_type in ("terraform", "spec-render"):
-        register(step_type, executors[step_type])  # lookup()/registered() see the real executors for this run
+    # passed to Runner explicitly, never register()ed process-wide: the executors close over this run's registry
     return executors
 
 

@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+.pytest_cache/
+.ruff_cache/
+.coverage
+
+# code-orca run state (per consumer repo; never committed)
+.codeorca/
+
+# Terraform working files in the reference project
+**/.terraform/
+*.tfplan
+*.tfstate
+*.tfstate.*
+crash.log
+
+# Ansible
+*.retry
+.ansible/
+
+# Agent worktrees inside a checkout (see ~/Code/AGENTS.md)
+.claude/worktrees/
+
+# Secrets never live here
+.env
+*.pem
+*.key

@@ -13,7 +13,8 @@ What a step does, in order:
 3. write the inline inventory (``generate_inventory``) and the extra vars (``write_handoff``) as 0600 files under
    ``<run dir>/handoff/<step id>/`` (0700), and the inventory copy the host-spec renderer needs later as
    ``<step dir>/inventory.yml`` (values redacted through the registry and the key denylist before it is written;
-   ``inventory.path`` steps keep the path as given);
+   ``inventory.path`` steps keep the path as given), plus ``<step dir>/extra-vars.json`` (0600, redacted the same
+   way) so a ``spec-render`` step can show the handed-over values with ``source: extra_vars``;
 4. run ``ansible-playbook`` from the project root (``--check --diff`` under ``--dry-run``; the step's ``timeout``
    kills the whole process group); every stdout JSONL line goes through the stream redactor into
    ``<step dir>/events.jsonl``, everything else into ``stderr.log``; ``argv.json`` and ``env-names.json`` are recorded;
@@ -28,8 +29,8 @@ default to ``warn`` and an explicit step value cannot be told from the default, 
 ``warn`` adds a warning to the result, ``fail`` fails the step, ``ignore`` only lists them.
 
 ``result`` = ``{rc, status_text, stats, failed_hosts, unreachable_hosts, check_unsupported, events_path,
-stderr_path, inventory_path, playbook, duration_s, registered_vars, unprotected_vars, warnings}``. The implicit
-output is ``inventory_path`` only (``models.IMPLICIT_OUTPUTS``).
+stderr_path, inventory_path, extra_vars_path, playbook, duration_s, registered_vars, unprotected_vars, warnings}``.
+The implicit output is ``inventory_path`` only (``models.IMPLICIT_OUTPUTS``).
 """
 
 from __future__ import annotations
@@ -188,6 +189,7 @@ def execute(step, ctx: StepContext, registry: SecretRegistry) -> StepResult:
             step, root, inline, handoff_dir, step_dir, registry, denylist
         )
         extra_vars_file = write_handoff(handoff_dir, EXTRA_VARS_FILE, extra_vars) if extra_vars else None
+        kept_extra_vars = _keep_extra_vars(step_dir, extra_vars, registry, denylist)
         outcome: AnsibleResult | None = None
         error: str | None = None
         try:
@@ -234,6 +236,7 @@ def execute(step, ctx: StepContext, registry: SecretRegistry) -> StepResult:
         "events_path": str(events_path),
         "stderr_path": str(step_dir / STDERR_FILE),
         "inventory_path": str(kept_inventory),
+        "extra_vars_path": str(kept_extra_vars) if kept_extra_vars else None,
         "playbook": str(playbook),
         "duration_s": outcome.duration_s,
         "registered_vars": registered,
@@ -246,6 +249,19 @@ def execute(step, ctx: StepContext, registry: SecretRegistry) -> StepResult:
     if error is not None:
         return StepResult("failed", outputs=outputs, result=result, error=error[:_ERROR_LIMIT])
     return StepResult("succeeded", outputs=outputs, result=result)
+
+
+def _keep_extra_vars(
+    step_dir: Path, extra_vars: Mapping[str, Any], registry: SecretRegistry, denylist: tuple[str, ...]
+) -> Path | None:
+    """``<step dir>/extra-vars.json`` (0600): the extra vars with registered values scrubbed and denylist-named keys
+    replaced by ``<redacted:key>``, for the host-spec renderer. A stale copy from an earlier attempt is removed."""
+    path = step_dir / EXTRA_VARS_FILE
+    path.unlink(missing_ok=True)
+    if not extra_vars:
+        return None
+    kept = redact_tree(json.loads(json.dumps(dict(extra_vars), default=str)), registry, denylist)
+    return write_private(path, json.dumps(kept, indent=2, sort_keys=True) + "\n")
 
 
 def _prepare_inventory(

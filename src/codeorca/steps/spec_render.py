@@ -3,10 +3,12 @@
 ``source.terraform_plan`` names the **redacted** plan document a ``terraform`` plan step wrote (``plan.json`` under
 its step dir). It is rendered to ``output`` (relative to the project root) with its ``.meta.yaml`` sidecar, and a
 copy of both is staged under ``<run_dir>/specs/``. The implicit output ``path`` is the written spec's path.
-``terraform_state`` and ``ansible`` sources arrive in later phases.
+``source.ansible`` renders an Ansible host spec (``codeorca.steps.host_spec``: inventory scope, optional play scope,
+``<step dir>/host-vars.json`` kept for re-rendering). ``terraform_state`` arrives in a later phase.
 
 ``codeorca render <run-id>`` re-renders every spec-render step of a run from the run directory with
-``render_run``, which is the same function the executor uses.
+``render_run``, which is the same function the executor uses for plans; a host spec is re-rendered from the
+step's ``host-vars.json`` (nothing is re-run).
 """
 
 from __future__ import annotations
@@ -98,9 +100,14 @@ def _output_path(project: Project | None, output: str) -> Path:
 
 def execute(step, ctx: StepContext, registry: SecretRegistry) -> StepResult:
     source = step.source
+    if source.ansible is not None:
+        from codeorca.steps import host_spec
+
+        return host_spec.execute(step, ctx, registry)
     if source.terraform_plan is None:
-        kind = "terraform_state" if source.terraform_state is not None else "ansible"
-        raise NotImplementedInPhase(f"step {step.id}: spec-render source {kind!r} is not implemented in this phase")
+        raise NotImplementedInPhase(
+            f"step {step.id}: spec-render source 'terraform_state' is not implemented in this phase"
+        )
     run = ctx.run_dir.read_run() or {}
     result = render_plan_spec(
         Path(str(source.terraform_plan)),
@@ -138,7 +145,12 @@ def render_run(
     }
     rendered: list[dict[str, Any]] = []
     for step in workflow.steps:
-        if step.type != "spec-render" or step.source.terraform_plan is None:
+        if step.type != "spec-render":
+            continue
+        if step.source.ansible is not None:
+            rendered.append(_rerender_host_spec(step, project, run_dir, registry, run))
+            continue
+        if step.source.terraform_plan is None:
             continue
         try:
             source = render_value(step.source.terraform_plan, context)
@@ -159,3 +171,23 @@ def render_run(
         )
         rendered.append({"step": step.id, **result})
     return rendered
+
+
+def _rerender_host_spec(step, project: Project, run_dir: RunDir, registry: SecretRegistry, run: dict) -> dict[str, Any]:
+    """A host spec from the step's saved ``host-vars.json``: no inventory, no subprocess, no playbook."""
+    from codeorca.steps import host_spec
+
+    document = host_spec.read_host_document(run_dir, step.id)
+    if document is None:
+        return {"step": step.id, "skipped": f"no {host_spec.HOST_VARS_FILE} for this step in the run"}
+    result = host_spec.write_host_spec(
+        document,
+        _output_path(project, step.output),
+        run_dir,
+        step.id,
+        registry,
+        git_sha=run.get("git_sha"),
+        workflow=run.get("workflow"),
+        save=False,
+    )
+    return {"step": step.id, **result}

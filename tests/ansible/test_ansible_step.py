@@ -113,6 +113,9 @@ def test_handoff_files_are_private_while_the_play_runs_and_gone_afterwards(proje
     kept = step_dir / "inventory.yml"
     assert kept.is_file() and stat.S_IMODE(kept.stat().st_mode) == 0o600
     assert "app-host" in kept.read_text() and "ansible_connection" in kept.read_text()
+    kept_vars = step_dir / "extra-vars.json"
+    assert stat.S_IMODE(kept_vars.stat().st_mode) == 0o600
+    assert json.loads(kept_vars.read_text()) == {"scratch_dir": str(tmp_path), "echo_value": "plain"}
     assert r.states["cfg"]["outputs"] == {"inventory_path": str(kept)}
     result = json.loads((step_dir / "result.json").read_text())
     assert result["rc"] == 0 and result["stats"]["app-host"]["ok"] >= 6 and result["failed_hosts"] == []
@@ -176,6 +179,9 @@ def test_secret_named_extra_vars_are_registered_by_the_step_itself(project_root,
     result = json.loads((r.run_dir.steps_dir / "cfg" / "result.json").read_text())
     assert result["registered_vars"] == ["app_password"] and result["unprotected_vars"] == []
     assert SECRET not in (r.run_dir.steps_dir / "cfg" / "events.jsonl").read_text()
+    kept_vars = json.loads((r.run_dir.steps_dir / "cfg" / "extra-vars.json").read_text())
+    assert kept_vars["app_password"] == "<redacted:key>" and SECRET not in json.dumps(kept_vars)
+    assert result["extra_vars_path"] == str(r.run_dir.steps_dir / "cfg" / "extra-vars.json")
 
 
 @requires_ansible

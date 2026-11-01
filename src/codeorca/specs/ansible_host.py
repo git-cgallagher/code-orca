@@ -47,6 +47,23 @@ TEMPLATE_TASK_PREFIX = "codeorca:template:"
 VARS_TASK_NAME = "codeorca:vars"
 ROLE_TASK_PREFIX = "codeorca:role:"
 UNDEFINED = "<undefined>"
+# codeorca_jsonl event types that never carry a task result: a ``task_start`` shares the task name with its
+# ``runner`` event and must not count as a result without a diff.
+NON_RESULT_EVENTS = frozenset(
+    {
+        "playbook_start",
+        "play_start",
+        "task_start",
+        "handler_start",
+        "retry",
+        "notify",
+        "include",
+        "no_hosts_matched",
+        "no_hosts_remaining",
+        "stats",
+        "log",
+    }
+)
 FORBIDDEN_VARS = frozenset({"hostvars", "vars", "groups", "omit", "ansible_facts", "environment"})
 IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 # Environment never handed to the subprocess: the redaction key (no child sees it) and the no_log bypass.
@@ -310,7 +327,7 @@ def parse_play_scope_events(events: Iterable[Mapping[str, Any]], host: str | Non
     templates: dict[str, str] = {}
     errors: dict[str, str] = {}
     for event in events:
-        if not isinstance(event, Mapping):
+        if not isinstance(event, Mapping) or event.get("type") in NON_RESULT_EVENTS:
             continue
         task = str(event.get("task") or "")
         if host is not None and event.get("host") not in (None, host):

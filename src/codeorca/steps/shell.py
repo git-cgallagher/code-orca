@@ -13,8 +13,11 @@
   back as ``result.output``. The child wrote it unredacted, so it is rewritten through the stream hook whenever it
   exists, before it is parsed and whatever the exit status (bad JSON and a timeout included).
   ``CODEORCA_DRY_RUN=1`` is set under ``--dry-run``. stdout is a log, never parsed.
-- An argv whose program is ``terraform``/``tofu`` goes through the Terraform deny floor (``policy.check_argv``):
-  the workflow model cannot express ``destroy``, so a helper must not either.
+- An argv whose program's basename is ``terraform``/``tofu`` goes through the Terraform deny floor
+  (``policy.check_argv``), so the obvious ``run: [terraform, destroy]`` fails validation-style. This is a
+  courtesy check, not a boundary: a wrapper (``env terraform ...``, ``sh -c "terraform destroy"``, a copied
+  binary) is not inspected. The real boundary for helpers is the credentials and the review of what a
+  workflow runs, as the plan says.
 - ``result`` = ``{exit_code, stdout_path, stderr_path, output}``; exit 0 is ``succeeded``, anything else ``failed``.
   The error text ends with this attempt's stderr tail (the log file is appended across attempts; the tail is not).
 """

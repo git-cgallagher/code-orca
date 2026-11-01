@@ -91,8 +91,14 @@ Phase 1 integration (2026-11-01):
   `output -json`, `providers schema`, `version` and `validate` stdout is parsed in memory only (their stderr still
   streams). `plan`'s stdout prints state-held values that nothing can flag before `show -json` ran (a computed
   attribute echoing a secret: `~ output = "<the secret>" -> (known after apply)`), so the step buffers it and
-  writes it through the registry only after `seed_registry`. Proven by the applied-state integration test. The
-  remaining live stream is `plan`'s stderr (diagnostics).
+  writes it through the registry only after `seed_registry`, and holds `plan`'s stderr (diagnostics) the same
+  way. Proven by the applied-state integration test. Every other command's stderr streams live through the
+  redactor, which then knows only the pre-registered values (inputs, `TF_VAR_*` of sensitive or denylist-named
+  variables, env tokens): a diagnostic from `init`/`validate`/`output` that quotes an undeclared secret is the
+  residual.
+- **The shell step's terraform check is a courtesy, not a boundary.** `run: [terraform, destroy]` is refused by
+  basename; `env terraform …`, `sh -c`, or a renamed binary are not inspected. Helpers are bounded by the
+  credentials they get and by review, not by argv inspection.
 - **Go's `encoding/json` escapes `<`, `>`, `&` as `\u003c`, `\u003e`, `\u0026`** in every `-json` document and
   stream; Python's `json.dumps` does not. The registry's encodings include both Go-escaped JSON forms, so a
   password with `&` in it is matched by the stream redactor and seen by the gate.

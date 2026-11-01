@@ -323,3 +323,15 @@ def test_locked_stack_is_an_errored_step(tmp_path, registry, project, fake_engin
         r = run(workflow([tf("v", "validate")]), tmp_path, registry, project, env)
     assert r.states["v"]["status"] == "errored" and "stack 'app' is locked" in r.states["v"]["error"]
     assert not (r.run_dir.steps_dir / "v" / "argv.json").exists()  # nothing ran
+
+
+@pytest.mark.skipif(shutil.which("terraform") is None, reason="terraform not on PATH")
+def test_plan_diagnostics_are_held_and_still_logged_through_the_registry(tmp_path, registry, project):
+    """``plan``'s stderr is held back until the registry is seeded, then written redacted: a failed plan
+    (``app_secret`` has no default and no override) still leaves its diagnostic in ``stderr.log``."""
+    env = {k: v for k, v in dict(__import__("os").environ).items() if not k.startswith("TF_VAR_")}
+    r = run(workflow([tf("p", "plan")]), tmp_path, registry, project, env)
+    assert r.states["p"]["status"] == "failed"
+    stderr = (r.run_dir.steps_dir / "p" / "stderr.log").read_text(encoding="utf-8")
+    assert "app_secret" in stderr and "No value for required variable" in stderr
+    assert r.states["p"]["error"].startswith("plan failed (exit 1)")

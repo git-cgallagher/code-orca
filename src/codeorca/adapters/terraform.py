@@ -288,9 +288,17 @@ class TerraformRunner:
     def _remaining(self) -> float | None:
         return None if self.deadline is None else self.deadline - time.monotonic()
 
-    def _run(self, args: list[str], *, allow_migrate_state: bool = False, stream_stdout: bool = True) -> CommandResult:
+    def _run(
+        self,
+        args: list[str],
+        *,
+        allow_migrate_state: bool = False,
+        stream_stdout: bool = True,
+        stream_stderr: bool = True,
+    ) -> CommandResult:
         """The single subprocess boundary: policy check, then line-pumped execution, then a recorded result.
-        ``stream_stdout=False`` keeps a command's stdout in memory only (documents that hold secrets)."""
+        ``stream_stdout=False`` / ``stream_stderr=False`` keep that channel in memory only (text that may hold
+        secrets the caller can only identify later)."""
         argv = [self.engine, *args]
         policy.check_argv(argv, allow_migrate_state=allow_migrate_state)
         remaining = self._remaining()
@@ -313,7 +321,7 @@ class TerraformRunner:
         err: list[str] = []
         threads = [
             threading.Thread(target=self._pump, args=(proc.stdout, "stdout", out, stream_stdout), daemon=True),
-            threading.Thread(target=self._pump, args=(proc.stderr, "stderr", err, True), daemon=True),
+            threading.Thread(target=self._pump, args=(proc.stderr, "stderr", err, stream_stderr), daemon=True),
         ]
         for t in threads:
             t.start()
@@ -420,18 +428,20 @@ class TerraformRunner:
         lock: bool | None = None,
         *,
         stream_stdout: bool = True,
+        stream_stderr: bool = True,
     ) -> PlanResult:
         """``plan -detailed-exitcode -out=<out>``: exit 0 none, 1 error, 2 changes. Exit 2 is success.
 
         ``stream_stdout=False`` keeps the human-readable plan in ``stdout_lines`` only: it prints state-held
         values that only ``show -json`` can identify as sensitive, so a caller that logs it should do so after
-        seeding its redactor from the plan JSON.
+        seeding its redactor from the plan JSON. ``stream_stderr=False`` does the same for the diagnostics
+        (a diagnostic can quote such a value too).
         """
         out_path = Path(out)
         args = ["plan", "-no-color", "-input=false", *self._lock_flags(lock), "-detailed-exitcode", f"-out={out_path}"]
         if var_file is not None:
             args.append(f"-var-file={var_file}")
-        result = self._run(args, stream_stdout=stream_stdout)
+        result = self._run(args, stream_stdout=stream_stdout, stream_stderr=stream_stderr)
         if result.exit_code not in (0, 1, 2):
             raise TerraformError(f"plan exited {result.exit_code}: {result.stderr.strip()[:2000]}")
         if result.exit_code in (0, 2) and out_path.exists():

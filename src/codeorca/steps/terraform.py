@@ -34,8 +34,9 @@ holds every argv the session ran and ``env-names.json`` the child env's names. T
 deadline over the whole session (init included); expiry is ``StepTimeout``. Under ``--dry-run`` nothing
 changes: every action here is already read-only.
 
-Known gap: ``plan``'s stderr (diagnostics) streams live; a diagnostic that quotes a value only the plan JSON
-would later flag is written as Terraform printed it.
+``plan``'s stderr (diagnostics) is held back the same way: a diagnostic can quote a state-held value too.
+Every other command's stderr streams live through the redactor, which at that point knows the pre-registered
+values only (inputs, ``TF_VAR_*`` of sensitive or denylist-named variables, env tokens).
 """
 
 from __future__ import annotations
@@ -373,7 +374,7 @@ def plan_stack(
             var_file.write_text(json.dumps(dict(var_overrides), sort_keys=True) + "\n", encoding="utf-8")
             var_file.chmod(0o600)
         plan: PlanResult = session.timed(
-            "plan", lambda: session.runner.plan(out, var_file, lock=lock, stream_stdout=False)
+            "plan", lambda: session.runner.plan(out, var_file, lock=lock, stream_stdout=False, stream_stderr=False)
         )
     finally:
         if tmpdir:
@@ -383,6 +384,8 @@ def plan_stack(
         # held back until now: the registry knows everything the plan JSON (or the failure) can tell it
         for line in plan.stdout_lines:
             session.emit("stdout", registry.redact(line))
+        for line in plan.stderr_lines:
+            session.emit("stderr", registry.redact(line))
 
     if plan.exit_code == 1:
         log_plan_output()

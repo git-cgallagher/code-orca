@@ -394,10 +394,15 @@ def test_json_documents_are_consumed_in_memory_and_never_streamed_on_stdout(tmp_
     assert runner.validate()["valid"] is True
     assert [ch for ch, _ in seen] == ["stderr"] * 5
     assert all(line == "diag\n" for _, line in seen)
-    # the plan's human-readable stdout IS streamed (it is where redaction attaches)
+    # the plan's human-readable stdout IS streamed by default (it is where redaction attaches)
     seen.clear()
     runner.plan(tmp_path / "p.tfplan")
     assert ("stdout", '{"a":"FIXTURE-SECRET-in-document","valid":true}\n') in seen
+    # and both channels can be held back: nothing reaches the stream, everything is in the result
+    seen.clear()
+    held = runner.plan(tmp_path / "p.tfplan", stream_stdout=False, stream_stderr=False)
+    assert seen == []
+    assert held.stdout_lines == ['{"a":"FIXTURE-SECRET-in-document","valid":true}'] and held.stderr_lines == ["diag"]
 
 
 def test_tf_cli_args_never_reach_the_child(tmp_path):

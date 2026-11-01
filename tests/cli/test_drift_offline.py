@@ -32,3 +32,15 @@ def test_run_uses_the_real_terraform_executor_without_touching_the_global_regist
     out = capsys.readouterr().out
     assert "not found on PATH" in out and "not implemented in this phase" not in out  # the real executor ran
     assert lookup("terraform").__name__.startswith("not_implemented")  # the process-wide defaults are untouched
+
+
+def test_locked_stack_is_an_error_row(tmp_path: Path, monkeypatch, capsys):
+    from codeorca.rundir import stack_lock
+
+    root = tmp_path / "reference"
+    shutil.copytree(REFERENCE, root, ignore=shutil.ignore_patterns(".codeorca", "specs"))
+    monkeypatch.setenv("CODEORCA_REDACTION_KEY", "example-not-secret-key")
+    with stack_lock(root / ".codeorca" / "runs", "app"):
+        assert cli.main(["drift", "-p", str(root / "codeorca.yaml")]) == 1
+    out = capsys.readouterr().out
+    assert "app    error" in out and "stack 'app' is locked" in out

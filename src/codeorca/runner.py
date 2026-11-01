@@ -61,6 +61,9 @@ EXIT_OK = 0
 EXIT_FAILED = 1
 EXIT_WAITING = 3
 
+# The HMAC redaction key: stripped from every child environment (secrets.py owns the name; no import cycle here).
+REDACTION_KEY_ENV_VAR = "CODEORCA_REDACTION_KEY"
+
 # Control fields the runner owns; everything else on a step is type-specific and rendered before execution.
 CONTROL_FIELDS = frozenset(
     {"id", "type", "needs", "when", "timeout", "retry", "on_failure", "for_each", "outputs", "cache"}
@@ -474,7 +477,7 @@ class Runner:
 
     def _execute(self, rendered, timeout: float | None, attempt: int) -> StepResult:
         step_dir = self.run_dir.step_dir(rendered.id)
-        env = dict(self.base_env)
+        env = {k: v for k, v in self.base_env.items() if k != REDACTION_KEY_ENV_VAR}  # no child needs the key
         env.update(
             {
                 "CODEORCA_RUN_ID": self.run_dir.run_id,

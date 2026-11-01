@@ -257,6 +257,8 @@ def cmd_drift(args: argparse.Namespace) -> int:
                 detail = ", ".join(f"{k} {v}" for k, v in counts.items() if v) or "no changes"
                 if not outcome.result["gate"]["passed"]:
                     detail += "; gate blocked"
+                if outcome.result.get("warnings"):
+                    detail += "; " + "; ".join(w.split(":", 1)[0] for w in outcome.result["warnings"])
         except (StepError, TerraformError, PolicyError, OSError, ValueError) as e:
             # engine missing, init/show failure, a credential-looking backend key, a locked stack: a verdict row
             detail = registry.redact(str(e)).splitlines()[0]

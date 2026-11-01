@@ -52,12 +52,16 @@ _INSTANCE_KEY = re.compile(r"\[[^\]]*\]")
 # ------------------------------------------------------------------------------------------------- seeding
 
 
-def seed_registry(registry: SecretRegistry, plan_json: Mapping[str, Any]) -> int:
-    """Register every value the plan marks sensitive. Returns the registry growth."""
+def seed_registry(registry: SecretRegistry, plan_json: Mapping[str, Any], key_denylist: Sequence[str] = ()) -> int:
+    """Register every value the plan marks sensitive, plus the value of every variable whose NAME matches
+    ``key_denylist`` (the project treats it as a secret even when the stack forgot ``sensitive = true``; once
+    registered it renders as its placeholder under ``variables`` and cannot survive in an attribute that echoes
+    it). Returns the registry growth."""
     before = registry.size
     sensitive_vars = set(tfjson.sensitive_variables(plan_json))
+    patterns = compile_key_denylist(key_denylist)
     for name, spec in (plan_json.get("variables") or {}).items():
-        if name in sensitive_vars and isinstance(spec, dict):
+        if isinstance(spec, dict) and (name in sensitive_vars or any(p.search(name) for p in patterns)):
             _add_leaves(registry, spec.get("value"))
     for change in (plan_json.get("output_changes") or {}).values():
         if not isinstance(change, dict):

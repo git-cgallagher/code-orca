@@ -289,3 +289,31 @@ def test_write_spec_sidecar_and_gate(tmp_path, registry):
         write_spec(tmp_path / "specs" / "app" / "plan.yaml", leaked, header, None, registry)
     assert SECRET not in str(e.value)
     assert not spec.exists() and not sidecar.exists()
+
+
+def test_seed_registry_also_registers_denylist_named_variables(registry):
+    """A variable the stack forgot to flag but whose NAME the project denylists is a secret: the document hides
+    it under ``variables`` and an attribute that echoes the value must not show it either."""
+    plan = load("plan.json", REDACT_FIXTURES)  # eph_token: not sensitive, matches (?i)token
+    plan["resource_changes"].append(
+        {
+            "address": "terraform_data.echo",
+            "type": "terraform_data",
+            "mode": "managed",
+            "change": {
+                "actions": ["create"],
+                "before": None,
+                "after": {"input": "FIXTURE-EPHEMERAL-xyz", "plain": "x"},
+                "after_sensitive": {},
+                "after_unknown": {"id": True, "output": True},
+            },
+        }
+    )
+    grown = seed_registry(registry, plan, DENYLIST)
+    assert grown >= 1 and "FIXTURE-EPHEMERAL-xyz" not in registry.redact("FIXTURE-EPHEMERAL-xyz")
+    doc = build_plan_document(plan, load("providers_schema.json"), registry, "app", None, DENYLIST)
+    echo = by_address(doc, "terraform_data.echo")
+    assert echo["after"]["input"] == registry.placeholder("FIXTURE-EPHEMERAL-xyz")
+    # registered, so the variable shows the stable placeholder (a diff shows it changed) instead of <redacted:key>
+    assert doc["variables"]["eph_token"]["value"] == registry.placeholder("FIXTURE-EPHEMERAL-xyz")
+    assert "FIXTURE-EPHEMERAL-xyz" not in json.dumps(doc)

@@ -7,9 +7,10 @@ What a step does, in order:
 3. build the child environment (the runner's env, ``TF_PLUGIN_CACHE_DIR`` honoured when set) and the non-secret
    backend configuration (``local``: none; ``s3``: bucket, key, region, ``use_lockfile``, ``encrypt``);
 4. check every ``required_env`` name is set (names only in the message), then register, **before** any
-   Terraform process starts, the values of ``var_overrides`` and of ``TF_VAR_<name>`` for variables the stack
-   declares ``sensitive = true`` (found by reading the ``*.tf`` files: the plan JSON that knows for sure only
-   exists after Terraform ran) or whose name matches the key denylist;
+   Terraform process starts, the values of ``var_overrides`` and of every ``TF_VAR_<name>`` in the environment
+   whose variable the stack declares ``sensitive = true`` (found by reading the ``*.tf`` / ``*.tf.json`` files:
+   the plan JSON that knows for sure only exists after Terraform ran) or whose name matches the key denylist.
+   A value too short for the registry (``min_length``) is reported under ``unprotected_overrides``;
 5. ``init -json`` (``-lockfile=readonly`` when ``CI`` is set), then the action:
 
    - ``validate`` -> ``{valid, diagnostics}``; ``valid: false`` is a failed step, not an error;
@@ -23,9 +24,16 @@ What a step does, in order:
      sha256 binding; migrate_backend needs the backend bootstrap).
 
 Every Terraform stdout/stderr line goes through a ``StreamRedactor`` before it reaches ``stdout.log`` /
-``stderr.log``; ``argv.json`` holds every argv the session ran and ``env-names.json`` the child env's names.
-``var_overrides`` are rendered into a 0600 temporary ``.tfvars.json`` passed with ``-var-file`` (last wins) and
-deleted afterwards. Under ``--dry-run`` nothing changes: every action here is already read-only.
+``stderr.log`` (the ``-json`` documents the adapter parses in memory are never streamed at all); ``argv.json``
+holds every argv the session ran and ``env-names.json`` the child env's names. The child never sees
+``CODEORCA_REDACTION_KEY`` or ``TF_CLI_ARGS*``. ``var_overrides`` are rendered into a 0600 temporary
+``.tfvars.json`` passed with ``-var-file`` (last wins) and deleted afterwards. The step's ``timeout`` is a
+deadline over the whole session (init included); expiry is ``StepTimeout``. Under ``--dry-run`` nothing
+changes: every action here is already read-only.
+
+Known gap: a denylist-named variable that is neither declared sensitive nor set through ``TF_VAR_``/overrides
+(a value from a committed tfvars only) is first seen in the plan JSON, after ``plan``'s human-readable stdout
+has streamed; plan.json and the spec are clean, stdout.log may not be.
 """
 
 from __future__ import annotations
@@ -43,14 +51,20 @@ from pathlib import Path
 from typing import Any
 
 from codeorca import policy, tfjson
-from codeorca.adapters.terraform import PlanResult, TerraformError, TerraformRunner, plan_file_sha256
+from codeorca.adapters.terraform import (
+    PlanResult,
+    TerraformError,
+    TerraformRunner,
+    TerraformTimeout,
+    plan_file_sha256,
+)
 from codeorca.project import Project, Stack
 from codeorca.redact import SecretRegistry, compile_key_denylist, redact_tree
 from codeorca.rundir import RunDir, StackLocked, stack_lock
-from codeorca.runner import Executor, StepContext, StepError, StepResult
+from codeorca.runner import Executor, StepContext, StepError, StepResult, StepTimeout
+from codeorca.secrets import KEY_ENV_VAR, terraform_stream
 from codeorca.secrets import key_denylist as project_key_denylist
-from codeorca.secrets import terraform_stream
-from codeorca.specs import META_KEY, scan_files
+from codeorca.specs import META_KEY
 from codeorca.specs.terraform_plan import build_plan_document, seed_registry
 
 PLAN_FILE = "plan.tfplan"
@@ -60,7 +74,9 @@ PHASE3_APPLY = "apply needs the gate (Phase 3): the apply step binds to an appro
 PHASE3_MIGRATE = "migrate_backend needs the backend bootstrap (Phase 3) and is not wired yet"
 
 _VARIABLE_BLOCK = re.compile(r'variable\s+"([^"]+)"\s*\{', re.MULTILINE)
-_SENSITIVE_TRUE = re.compile(r"^\s*sensitive\s*=\s*true\s*(#.*)?$", re.MULTILINE)
+_SENSITIVE_TRUE = re.compile(r"^\s*sensitive\s*=\s*true\s*(#.*|//.*)?$", re.MULTILINE)
+_BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.DOTALL)
+TF_VAR_PREFIX = "TF_VAR_"
 
 
 class UnknownStack(StepError):
@@ -94,15 +110,27 @@ def backend_config(project: Project, stack: Stack) -> dict[str, object]:
 
 
 def declared_sensitive_variables(workdir: Path) -> set[str]:
-    """Variable names whose ``variable`` block in ``*.tf`` says ``sensitive = true`` (a textual pre-plan read;
-    the plan JSON confirms it after the fact)."""
+    """Variable names whose ``variable`` block in ``*.tf`` / ``*.tf.json`` says ``sensitive = true`` (a textual
+    pre-plan read, ``#``, ``//`` and ``/* */`` comments tolerated; the plan JSON confirms it after the fact)."""
     found: set[str] = set()
     for tf in sorted(workdir.glob("*.tf")):
-        text = tf.read_text(encoding="utf-8", errors="replace")
+        text = _BLOCK_COMMENT.sub("", tf.read_text(encoding="utf-8", errors="replace"))
         for m in _VARIABLE_BLOCK.finditer(text):
             body = _block_body(text, m.end())
             if _SENSITIVE_TRUE.search(body):
                 found.add(m.group(1))
+    for tf in sorted(workdir.glob("*.tf.json")):
+        try:
+            document = json.loads(tf.read_text(encoding="utf-8", errors="replace"))
+        except ValueError:
+            continue
+        variables = document.get("variable") if isinstance(document, dict) else None
+        blocks = variables if isinstance(variables, list) else [variables]
+        for block in blocks:
+            if isinstance(block, dict):
+                for name, spec in block.items():
+                    if isinstance(spec, dict) and spec.get("sensitive") is True:
+                        found.add(str(name))
     return found
 
 
@@ -119,31 +147,43 @@ def _block_body(text: str, start: int) -> str:
     return text[start : i - 1]
 
 
+@dataclass
+class Registered:
+    """What ``register_overrides`` protected: ``names`` got at least one leaf into the registry; ``unprotected``
+    are secret-looking names whose every value was too short for the registry (nothing scrubs them)."""
+
+    names: list[str] = field(default_factory=list)
+    unprotected: list[str] = field(default_factory=list)
+
+
 def register_overrides(
     registry: SecretRegistry,
     overrides: Mapping[str, Any],
     sensitive_names: set[str],
     denylist: tuple[str, ...],
     env: Mapping[str, str] | None = None,
-) -> list[str]:
-    """Register the values of ``overrides`` and of ``TF_VAR_<name>`` in ``env`` for variables that are declared
-    sensitive or whose name matches the key denylist; returns the variable names that were registered."""
+) -> Registered:
+    """Register the values of ``overrides`` and of every ``TF_VAR_<name>`` in ``env`` for variables that are
+    declared sensitive or whose name matches the key denylist."""
     patterns = compile_key_denylist(denylist)
-    hit: set[str] = set()
+    accepted: set[str] = set()
+    tried: set[str] = set()
 
     def secret_name(name: str) -> bool:
         return name in sensitive_names or any(p.search(name) for p in patterns)
 
     for name, value in overrides.items():
         if secret_name(name):
-            hit.add(name)
-            _add_leaves(registry, value)
-    for name in sensitive_names | {n for n in overrides if secret_name(n)}:
-        value = (env or {}).get(f"TF_VAR_{name}")
-        if value:
-            hit.add(name)
-            registry.add(value)
-    return sorted(hit)
+            tried.add(name)
+            if _add_leaves(registry, value):
+                accepted.add(name)
+    for key, value in (env or {}).items():
+        name = key[len(TF_VAR_PREFIX) :] if key.startswith(TF_VAR_PREFIX) else None
+        if name and value and secret_name(name):
+            tried.add(name)
+            if _add_leaves(registry, value):
+                accepted.add(name)
+    return Registered(sorted(accepted), sorted(tried - accepted))
 
 
 def check_required_env(stack: Stack, env: Mapping[str, str]) -> None:
@@ -152,26 +192,40 @@ def check_required_env(stack: Stack, env: Mapping[str, str]) -> None:
         raise StepError(f"required_env not set: {', '.join(missing)}")
 
 
-def _add_leaves(registry: SecretRegistry, value: Any) -> None:
+def _add_leaves(registry: SecretRegistry, value: Any) -> bool:
+    """Register every scalar leaf; True when at least one leaf is protected (new or already known)."""
     if isinstance(value, dict):
-        for v in value.values():
-            _add_leaves(registry, v)
-    elif isinstance(value, list | tuple):
-        for v in value:
-            _add_leaves(registry, v)
-    elif value is None or isinstance(value, bool):
-        return
-    else:
-        registry.add(str(value))
+        return any([_add_leaves(registry, v) for v in value.values()])
+    if isinstance(value, list | tuple):
+        return any([_add_leaves(registry, v) for v in value])
+    if value is None or isinstance(value, bool):
+        return False
+    text = str(value)
+    return registry.add(text) or registry.count_matches(text) > 0
 
 
 def _write_json(path: Path, data: Any, mode: int | None = None) -> Path:
+    """Atomic write; with ``mode`` the file is created with that mode before any content lands in it."""
     tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    if mode is not None:
-        tmp.chmod(mode)
+    text = json.dumps(data, indent=2, sort_keys=True) + "\n"
+    if mode is None:
+        tmp.write_text(text, encoding="utf-8")
+    else:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.chmod(tmp, mode)
     os.replace(tmp, path)
     return path
+
+
+def _gated_json(path: Path, data: Any, registry: SecretRegistry) -> Path:
+    """Write a redacted document (0600) only after its text passed the registry scan: a hit is a StepError and
+    nothing touches the disk."""
+    hits = registry.count_matches(json.dumps(data, indent=2, sort_keys=True))
+    if hits:
+        raise StepError(f"redaction gate: registered value found in {path.name} ({hits} matches); not written")
+    return _write_json(path, data, mode=0o600)
 
 
 def _tail(text: str, limit: int = 2000) -> str:
@@ -211,7 +265,9 @@ class StackSession:
         readonly = bool(self.runner.env.get("CI"))
         result = self.timed("init", lambda: self.runner.init(backend_config(self.project, self.stack), readonly))
         if result.exit_code != 0:
-            raise TerraformError(f"init failed (exit {result.exit_code}){_tail(self.registry.redact(result.stderr))}")
+            # init -json puts its diagnostics on stdout as @level error messages; stderr is usually empty
+            detail = "; ".join(_diagnostic_text(d) for d in tfjson.diagnostics(result.messages)) or result.stderr
+            raise TerraformError(f"init failed (exit {result.exit_code}){_tail(self.registry.redact(detail))}")
         try:
             self.engine_version = str(self.timed("version", self.runner.version).get("terraform_version"))
         except TerraformError:
@@ -219,6 +275,14 @@ class StackSession:
 
     def version_text(self) -> str | None:
         return self.engine_version
+
+
+def _diagnostic_text(message: Mapping[str, Any]) -> str:
+    diag = message.get("diagnostic") if isinstance(message.get("diagnostic"), dict) else {}
+    parts = [str(message.get("@message") or diag.get("summary") or "")]
+    if diag.get("detail"):
+        parts.append(str(diag["detail"]).strip())
+    return ": ".join(p for p in parts if p)
 
 
 def open_session(
@@ -233,8 +297,10 @@ def open_session(
     step_id: str | None = None,
     line_filter: Callable[[str], Callable[[str], str] | None] | None = None,
     lock: bool | None = None,
+    timeout: float | None = None,
 ) -> StackSession:
-    """Lock the stack, open the redacted log sinks and build the runner. Resources are released by ``stack_ctx``."""
+    """Lock the stack, open the redacted log sinks and build the runner. Resources are released by ``stack_ctx``.
+    ``timeout`` (seconds) becomes the session deadline for every Terraform command."""
     stack, workdir = resolve_stack(project, stack_name)
     assert project is not None and project.root is not None
     check_required_env(stack, env)
@@ -259,7 +325,7 @@ def open_session(
         sinks[channel].write_line(line)
 
     callback, flush = terraform_stream(registry, emit)
-    child_env = dict(env)
+    child_env = {k: v for k, v in env.items() if k != KEY_ENV_VAR}  # the HMAC key is nobody's business but ours
     register_overrides(registry, {}, declared_sensitive_variables(workdir), project_key_denylist(project), child_env)
     runner = TerraformRunner(
         workdir,
@@ -267,6 +333,7 @@ def open_session(
         stream=callback,
         lock=stack.plan_lock if lock is None else lock,
         plugin_cache_dir=child_env.get("TF_PLUGIN_CACHE_DIR"),
+        deadline=None if timeout is None else time.monotonic() + timeout,
     )
     return StackSession(project, stack_name, stack, workdir, registry, step_dir, runner, flush, state_dir)
 
@@ -312,8 +379,14 @@ def plan_stack(
         return PlanOutcome(1, False, "", "", {}, result, error)
 
     plan_json = session.timed("show", lambda: session.runner.show_plan(plan.plan_file))
+    if not tfjson.is_supported_format(plan_json.get("format_version")):
+        raise TerraformError(
+            f"show -json format_version {plan_json.get('format_version')!r} is not a 1.x plan format this version "
+            "of codeorca can render"
+        )
     providers_schema = session.timed("providers_schema", session.runner.providers_schema)
-    seed_registry(registry, plan_json)
+    denylist = project_key_denylist(project)
+    seed_registry(registry, plan_json, denylist)
     verdict = policy.plan_gate(
         plan_json,
         policy.Policy(
@@ -328,7 +401,7 @@ def plan_stack(
         registry,
         session.stack_name,
         verdict,
-        project_key_denylist(project),
+        denylist,
         stack.never_render.model_dump(),
         exit_code=plan.exit_code,
         engine_version=session.version_text(),
@@ -340,24 +413,28 @@ def plan_stack(
         "durations_s": dict(session.durations),
         "registry_size": registry.size,
     }
-    plan_json_path = _write_json(step_dir / PLAN_JSON, document, mode=0o600)
-    hits = scan_files([plan_json_path], registry)
-    if hits:
-        plan_json_path.unlink(missing_ok=True)
-        raise StepError(f"redaction gate: registered value found in {hits[0][0]} ({hits[0][1]} matches)")
+    plan_json_path = _gated_json(step_dir / PLAN_JSON, document, registry)
 
+    never_outputs = set(stack.never_render.outputs)
     prior = tfjson.prior_outputs(plan_json)
     previous = tfjson.previous_outputs(plan_json)
-    prior_outputs = {
-        name: {"value": previous.get(name, prior.get(name))} for name in sorted(set(prior) | set(previous))
+    flat = {
+        name: previous.get(name, prior.get(name))
+        for name in sorted(set(prior) | set(previous))
+        if name not in never_outputs
     }
+    prior_outputs = {name: {"value": value} for name, value in redact_tree(flat, registry, denylist).items()}
+    warnings: list[str] = []
+    if not document["summary"]["complete"]:
+        warnings.append("incomplete plan: Terraform reports complete=false (a targeted or errored plan); not applyable")
     result = {
         "exit_code": plan.exit_code,
         "changed": plan.changed,
         "files": {"plan_file": str(out), "plan_json": str(plan_json_path)},
         "summary": document["summary"],
         "gate": verdict.model_dump(),
-        "prior_outputs": redact_tree(prior_outputs, registry),
+        "warnings": warnings,
+        "prior_outputs": prior_outputs,
         "sensitive_variables": tfjson.sensitive_variables(plan_json),
         "sensitive_outputs": tfjson.sensitive_outputs(plan_json),
         "engine_version": session.version_text(),
@@ -383,11 +460,7 @@ def output_stack(session: StackSession) -> dict[str, Any]:
         else:
             value = redact_tree(value, registry, denylist)
         tf_outputs[name] = {"value": value, "sensitive": sensitive, "type": spec.get("type")}
-    path = _write_json(session.step_dir / TF_OUTPUTS_JSON, tf_outputs, mode=0o600)
-    hits = scan_files([path], registry)
-    if hits:
-        path.unlink(missing_ok=True)
-        raise StepError(f"redaction gate: registered value found in {hits[0][0]} ({hits[0][1]} matches)")
+    path = _gated_json(session.step_dir / TF_OUTPUTS_JSON, tf_outputs, registry)
     return {"tf_outputs": tf_outputs, "files": {"tf_outputs": str(path)}}
 
 
@@ -420,6 +493,7 @@ def execute(step, ctx: StepContext, registry: SecretRegistry) -> StepResult:
             run_dir=ctx.run_dir,
             step_id=step.id,
             line_filter=ctx.line_filter,
+            timeout=ctx.timeout,
         )
         overrides = dict(step.var_overrides or {})
         registered = register_overrides(
@@ -439,6 +513,8 @@ def execute(step, ctx: StepContext, registry: SecretRegistry) -> StepResult:
                 raise StepError(f"unknown terraform action {action!r}")
         except policy.PolicyError as e:
             raise StepError(f"policy: {e}") from None
+        except TerraformTimeout as e:
+            raise StepTimeout(f"step {step.id}: {registry.redact(str(e))}") from None
         except TerraformError as e:
             raise StepError(registry.redact(str(e))) from None
         finally:
@@ -461,9 +537,15 @@ def _validate(session: StackSession) -> StepResult:
     return StepResult("failed", result=result, error=f"validate: {first.get('summary', 'invalid configuration')}")
 
 
-def _plan(session: StackSession, overrides: dict[str, Any], ctx: StepContext, registered: list[str]) -> StepResult:
+def _plan(session: StackSession, overrides: dict[str, Any], ctx: StepContext, registered: Registered) -> StepResult:
     outcome = plan_stack(session, var_overrides=overrides, run_id=ctx.run_id, step_id=ctx.step.id)
-    outcome.result["registered_overrides"] = registered
+    outcome.result["registered_overrides"] = registered.names
+    outcome.result["unprotected_overrides"] = registered.unprotected  # too short to scrub: names only, never values
+    if registered.unprotected:
+        outcome.result.setdefault("warnings", []).append(
+            "sensitive variable value(s) shorter than the registry minimum are not scrubbed: "
+            + ", ".join(registered.unprotected)
+        )
     if outcome.exit_code == 1:
         return StepResult("failed", result=outcome.result, error=outcome.error)
     return StepResult("succeeded", result=outcome.result)

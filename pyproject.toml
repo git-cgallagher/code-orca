@@ -14,6 +14,7 @@ requires-python = ">=3.13"
 # Runtime deps are the ones already pinned in the execution environment (ghcr.io/git-cgallagher/ansible-runtime);
 # exact versions are locked in the container image, not here.
 dependencies = [
+  "jinja2>=3.1",
   "pydantic>=2.11",
   "ruamel.yaml>=0.18",
 ]
@@ -32,7 +33,7 @@ Repository = "https://github.com/git-cgallagher/code-orca"
 
 [tool.setuptools]
 package-dir = { "" = "src" }
-packages = ["codeorca"]
+packages = ["codeorca", "codeorca.steps"]
 
 [tool.ruff]
 line-length = 120

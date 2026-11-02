@@ -33,7 +33,7 @@ Consumers keep their own `codeorca.yaml`, `workflows/`, `specs/` in their own (u
 | `src/codeorca/adapters/terraform.py` | `TerraformRunner`: one policy-checked `_run` for init/validate/plan/show/output/providers schema/apply/test; `-detailed-exitcode` 2 preserved; apply bound to the plan's sha256; stream callback is where redaction attaches |
 | `tests/terraform/` | deny floor, plan gate, tfjson and runner tests (the live ones skip without `terraform` on PATH) |
 | `src/codeorca/ansible_plugins/` | plugins handed to `ansible-playbook` by path: `callback/codeorca_jsonl.py` is the **stdout** callback (one JSON object per line for every event, nothing else; schema in its docstring; imports only stdlib + `ansible`, never `codeorca`) |
-| `src/codeorca/adapters/ansible.py` | `AnsibleRunner`: `ansible-playbook` as an argv subprocess with the callback forced in (`ANSIBLE_STDOUT_CALLBACK`/`ANSIBLE_CALLBACK_PLUGINS`), `CODEORCA_REDACTION_KEY`/`ANSIBLE_DEBUG`/`ANSIBLE_LOG_PATH`/`ANSIBLE_VERBOSITY` dropped, JSONL parsed tolerantly, `(line, channel)` stream callback where redaction attaches, bitmask exit codes, tree kill on timeout; `generate_inventory`, `generate_role_playbook`, `write_handoff` |
+| `src/codeorca/adapters/ansible.py` | `AnsibleRunner`: `ansible-playbook` as an argv subprocess with the callback forced in (`ANSIBLE_STDOUT_CALLBACK`/`ANSIBLE_CALLBACK_PLUGINS`), `CODEORCA_REDACTION_KEY` dropped, `HARDENED_ENV` forced (`ANSIBLE_DEBUG=False`, `ANSIBLE_LOG_PATH=/dev/null`, `ANSIBLE_VERBOSITY=0`, `ANSIBLE_KEEP_REMOTE_FILES=False`) plus `ANSIBLE_CALLBACKS_ENABLED=codeorca_jsonl` (`project.ansible.env` may not set any of them), JSONL parsed tolerantly, `(line, channel)` stream callback where redaction attaches, bitmask exit codes, tree kill on timeout; `generate_inventory`, `generate_role_playbook`, `write_handoff` |
 | `src/codeorca/steps/ansible.py` | the `ansible` executor (`make_executor(registry)`): playbook or generated `import_role` play, 0600 inventory + extra-vars handoff files deleted after the run, `<step dir>/inventory.yml` kept redacted for the host-spec renderer, pre-run registration of denylist-named `extra_vars`/inventory values, `events.jsonl` through the stream redactor, `--check --diff` under `--dry-run`, `check_unsupported` policy (stricter of project and step) |
 | `tests/steps/test_spec_render_ansible.py`, `tests/integration/test_reference_configure_local.py`, `tests/cli/test_lint_cli.py` | host-spec step (pure helpers without ansible; live runs over the host-spec fixture with and without play scope, and the failing-subprocess path), the reference `configure-local` workflow end to end (determinism, `codeorca render` with ansible patched out, `scan_outputs`), `lint ansible` output and exit codes |
 | `tests/ansible/`, `tests/fixtures/ansible/` | callback, adapter and step tests over an offline `connection: local` fixture playbook (ok/changed/skipped/failed/no_log/loop/check-unsupported tasks), a `sleep` playbook for timeouts and a role with `meta/argument_specs.yml`; they need `ansible-playbook` on PATH or next to the test interpreter (`pip install -e '.[dev,ansible]'`) and skip otherwise |
@@ -177,6 +177,14 @@ Phase 2 integration (2026-11-01):
   and only the play scope renders it; the merge lets the play-scope template replace the inventory attempt and
   drops its error. A group var that references a role default has the same problem: keep reference group vars
   resolvable from inventory + extra vars.
+- **Dropping `ANSIBLE_DEBUG`/`ANSIBLE_LOG_PATH`/`ANSIBLE_VERBOSITY` from the env protects nothing**: each has an
+  `ansible.cfg` twin (`[defaults] debug`/`log_path`/`verbosity`) and ansible-playbook runs from the project root, so
+  a consumer's config turned them back on (debug dumped `no_log` module args to stderr). Env beats ini, so the
+  adapter **forces** safe values. Empty values do not work: `ANSIBLE_LOG_PATH=` resolves to the cwd ("can not be a
+  directory"), `ANSIBLE_CALLBACKS_ENABLED=` fails at start ("A non-empty plugin name is required"),
+  `ANSIBLE_VAULT_IDENTITY_LIST=` too; hence `/dev/null` and `callbacks_enabled=codeorca_jsonl` (naming the stdout
+  callback there is a no-op). Aggregate callbacks (`ansible.builtin.junit`) see raw results and write files past the
+  redactor, so none is allowed.
 - **`from x import f` defeats `monkeypatch.setattr("x.f", …)`**: `steps/host_spec.py` imports
   `run_vars_subprocess` by name, so a test that must prove no subprocess ran patches `codeorca.steps.host_spec`.
 - **Specs render multi-line strings as literal blocks** (`|`, a `SafeRepresenter` subclass in `specs/__init__.py`,

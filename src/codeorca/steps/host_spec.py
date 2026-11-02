@@ -13,8 +13,10 @@
    there are extra vars or vars to borrow; a project inventory with its own ``group_vars`` is used in place.
 2. **Inventory scope**: ``run_vars_subprocess`` (``python -m codeorca.specs.ansible_vars``) over that inventory,
    roles path ``<project>/ansible/roles``, the project's key and lookup denylists, the listed templates; stderr
-   lines go through the registry into the step's ``stderr.log``; the child env drops the adapter's
-   ``DROPPED_ENV`` (the redaction key, ``ANSIBLE_DEBUG``, ``ANSIBLE_LOG_PATH``, ``ANSIBLE_VERBOSITY``).
+   lines go through the registry into the step's ``stderr.log``; the child env drops the redaction key and forces
+   ``ANSIBLE_DEBUG=False``, ``ANSIBLE_LOG_PATH=/dev/null``, ``ANSIBLE_VERBOSITY=0`` (the play scope's runner forces
+   the adapter's whole ``FORCED_ENV``): forced, not dropped, because a consumer's ``ansible.cfg`` would turn them
+   back on.
 3. **Play scope** (optional): the roles, play ``vars`` and ``vars_files`` of ``play_scope.playbook`` are read from
    the file (a play var that gets a marker is left out), ``render_play_scope_playbook`` generates the check-mode
    play (written to the handoff dir, a registry-redacted copy kept as ``play-scope.yml``), and ``AnsibleRunner``
@@ -57,6 +59,7 @@ from ruamel.yaml import YAML
 
 from codeorca.adapters.ansible import (
     DROPPED_ENV,
+    HARDENED_ENV,
     AnsibleError,
     AnsibleRunner,
     AnsibleTimeout,
@@ -159,11 +162,14 @@ def _safe_load(path: Path) -> Any:
 
 
 def child_env(ctx_env: Mapping[str, str], config: AnsibleConfig) -> dict[str, str]:
-    """The step env plus ``project.ansible.env``, minus the adapter's ``DROPPED_ENV`` (no config can re-enable
-    the redaction key, ``ANSIBLE_DEBUG``, ``ANSIBLE_LOG_PATH`` or ``ANSIBLE_VERBOSITY``)."""
+    """The step env plus ``project.ansible.env``, minus the adapter's ``DROPPED_ENV`` (the redaction key) and with
+    its ``HARDENED_ENV`` forced: dropping ``ANSIBLE_DEBUG``/``ANSIBLE_LOG_PATH``/``ANSIBLE_VERBOSITY`` is not enough,
+    since each has an ``ansible.cfg`` twin that env outranks."""
     env = dict(ctx_env)
     env.update({k: str(v) for k, v in config.env.items()})
-    return {k: v for k, v in env.items() if k not in DROPPED_ENV}
+    env = {k: v for k, v in env.items() if k not in DROPPED_ENV}
+    env.update(HARDENED_ENV)
+    return env
 
 
 def spec_stack(output: Path, host: str) -> str:

@@ -68,6 +68,14 @@ FORBIDDEN_VARS = frozenset({"hostvars", "vars", "groups", "omit", "ansible_facts
 IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 # Environment never handed to the subprocess: the redaction key (no child sees it) and the no_log bypass.
 STRIPPED_ENV = ("CODEORCA_REDACTION_KEY", "ANSIBLE_DEBUG")
+# Forced in the subprocess (``adapters.ansible.HARDENED_ENV``): env beats ``ansible.cfg``, which could otherwise turn
+# debug, a file log or verbosity back on (the display logs warnings and lookup chatter to ``log_path``).
+FORCED_ENV = {
+    "ANSIBLE_DEBUG": "False",
+    "ANSIBLE_VERBOSITY": "0",
+    "ANSIBLE_LOG_PATH": os.devnull,
+    "ANSIBLE_KEEP_REMOTE_FILES": "False",
+}
 
 
 class AnsibleVarsError(RuntimeError):
@@ -176,7 +184,7 @@ def run_vars_subprocess(
 
     stdout is read whole into memory (it may hold secrets: the caller redacts the document); every stderr line
     goes to ``stderr(line)`` as it arrives (the caller's redacting sink). The child environment is ``env`` minus
-    ``CODEORCA_REDACTION_KEY`` and ``ANSIBLE_DEBUG``, with the untrusted-template guard set. A non-zero exit or a
+    ``CODEORCA_REDACTION_KEY``, with ``FORCED_ENV`` and the untrusted-template guard set. A non-zero exit or a
     stdout that is not one JSON object raises :class:`AnsibleVarsError` with the exit code only, never the output.
     ``timeout`` (seconds) kills the child: an executed lookup (``pipe``, ``url``) can hang.
     """
@@ -190,6 +198,7 @@ def run_vars_subprocess(
     for template in templates:
         argv += ["--template", str(template)]
     child_env = {k: v for k, v in env.items() if k not in STRIPPED_ENV}
+    child_env.update(FORCED_ENV)
     child_env[UNTRUSTED_ENV] = "error"
     child_env.setdefault("ANSIBLE_NOCOLOR", "1")
 

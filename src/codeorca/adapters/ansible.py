@@ -6,12 +6,18 @@ Command contract (verified on ansible-core 2.21.5):
   [--skip-tags ...] [--limit ...] [--check --diff] <playbook>``. Values never travel on the command line
   (visible in ``ps``): extra vars go through a 0600 JSON file (``write_handoff``), the inventory through a 0600
   YAML file (``generate_inventory``).
-- The child environment is the caller's minus ``CODEORCA_REDACTION_KEY`` (nobody's business but ours),
-  ``ANSIBLE_DEBUG`` (bypasses ``no_log`` entirely), ``ANSIBLE_LOG_PATH`` (an unredacted copy of everything) and
-  ``ANSIBLE_VERBOSITY`` (``-v`` prints module arguments to stdout past the callback), plus the forced
+- The child environment is the caller's minus ``CODEORCA_REDACTION_KEY`` (nobody's business but ours), with
+  ``HARDENED_ENV`` **forced** (not merely dropped: every one of these has an ``ansible.cfg`` twin, and ansible-playbook
+  runs from the project root where a consumer's ``ansible.cfg`` would turn it back on; env beats ini):
+  ``ANSIBLE_DEBUG=False`` (debug bypasses ``no_log`` entirely), ``ANSIBLE_LOG_PATH=/dev/null`` (a file log is an
+  unredacted copy of everything; an empty value resolves to the cwd), ``ANSIBLE_VERBOSITY=0`` (``-vvvv`` prints
+  module arguments past the callback), ``ANSIBLE_KEEP_REMOTE_FILES=False`` (a kept ``AnsiballZ`` holds the module
+  arguments verbatim) and ``ANSIBLE_CALLBACKS_ENABLED=codeorca_jsonl`` (an aggregate callback such as
+  ``ansible.builtin.junit`` sees raw results and writes them past the redactor; an empty value fails at start with
+  "A non-empty plugin name is required", and naming the stdout callback is a no-op). Also forced:
   ``ANSIBLE_STDOUT_CALLBACK=codeorca_jsonl``, ``ANSIBLE_CALLBACK_PLUGINS=<this package's callback dir>`` (joined
   in front of any caller value), ``ANSIBLE_NOCOLOR=1``, ``ANSIBLE_FORCE_COLOR=0``,
-  ``ANSIBLE_RETRY_FILES_ENABLED=False``, ``ANSIBLE_HOST_KEY_CHECKING=True`` unless the caller set it, and
+  ``ANSIBLE_RETRY_FILES_ENABLED=False``; ``ANSIBLE_HOST_KEY_CHECKING=True`` unless the caller set it, and
   ``ANSIBLE_LOCAL_TEMP`` when ``local_temp`` is given.
 - stdout is the callback's JSONL: every line is parsed into an event; a line that is not JSON (a stray print from
   a plugin, an aggregate callback a consumer's ``ansible.cfg`` enabled) is kept as a ``{"type": "log"}`` event. The
@@ -56,8 +62,20 @@ StreamCallback = Callable[[str, str], None]
 CALLBACK_NAME = "codeorca_jsonl"
 PLAYBOOK_PROGRAM = "ansible-playbook"
 # Dropped from every child environment.
-DROPPED_ENV = ("CODEORCA_REDACTION_KEY", "ANSIBLE_DEBUG", "ANSIBLE_LOG_PATH", "ANSIBLE_VERBOSITY")
+DROPPED_ENV = ("CODEORCA_REDACTION_KEY",)
+# Forced in every ansible child (the vars subprocess included): env beats ``ansible.cfg``, so dropping these names
+# would let a consumer's config turn them back on.
+HARDENED_ENV = {
+    "ANSIBLE_DEBUG": "False",
+    "ANSIBLE_VERBOSITY": "0",
+    "ANSIBLE_LOG_PATH": os.devnull,
+    "ANSIBLE_KEEP_REMOTE_FILES": "False",
+}
+# Names a project's ``ansible.env`` may not set (``project.AnsibleConfig`` refuses them): they are forced anyway.
+RESERVED_ENV = frozenset({*DROPPED_ENV, *HARDENED_ENV, "ANSIBLE_STDOUT_CALLBACK", "ANSIBLE_CALLBACKS_ENABLED"})
 FORCED_ENV = {
+    **HARDENED_ENV,
+    "ANSIBLE_CALLBACKS_ENABLED": CALLBACK_NAME,  # no aggregate callback; empty fails, the stdout one is a no-op
     "ANSIBLE_STDOUT_CALLBACK": CALLBACK_NAME,
     "ANSIBLE_NOCOLOR": "1",
     "ANSIBLE_FORCE_COLOR": "0",

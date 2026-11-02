@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Phase 2 review fixes (secrets): the Ansible adapter forces `ANSIBLE_DEBUG=False`, `ANSIBLE_LOG_PATH=/dev/null`,
+  `ANSIBLE_VERBOSITY=0`, `ANSIBLE_KEEP_REMOTE_FILES=False` and `ANSIBLE_CALLBACKS_ENABLED=codeorca_jsonl` instead of
+  dropping names a consumer's `ansible.cfg` could set again (the vars subprocess forces the first three too), and
+  `project.ansible.env` refuses those names.
 - Phase 2 integration: `codeorca run` registers the `ansible` executor; `spec-render` takes `source.ansible`
   (`codeorca.steps.host_spec`): inventory scope via the vars subprocess, optional play scope as a check-mode play
   through `AnsibleRunner` with markers handed over in a 0600 `-e @` file, a staged inventory that merges the

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import shutil
 import stat
 from pathlib import Path
@@ -161,10 +162,17 @@ def test_spec_stack_and_child_env_policy():
     assert host_spec.spec_stack(Path("specs/app/hosts/h.yaml"), "h") == "app"
     assert host_spec.spec_stack(Path("specs/h.yaml"), "h") == "h"
     env = host_spec.child_env(
-        {"PATH": "/bin", "CODEORCA_REDACTION_KEY": "k", "ANSIBLE_DEBUG": "1"},
-        AnsibleConfig(env={"ANSIBLE_LOG_PATH": "/tmp/x.log", "ANSIBLE_VERBOSITY": "4", "ANSIBLE_NOCOLOR": "1"}),
+        {"PATH": "/bin", "CODEORCA_REDACTION_KEY": "k", "ANSIBLE_DEBUG": "1", "ANSIBLE_LOG_PATH": "/tmp/x.log"},
+        AnsibleConfig(env={"ANSIBLE_NOCOLOR": "1"}),
     )
-    assert env == {"PATH": "/bin", "ANSIBLE_NOCOLOR": "1"}
+    assert env == {
+        "PATH": "/bin",
+        "ANSIBLE_NOCOLOR": "1",
+        "ANSIBLE_DEBUG": "False",
+        "ANSIBLE_VERBOSITY": "0",
+        "ANSIBLE_LOG_PATH": os.devnull,
+        "ANSIBLE_KEEP_REMOTE_FILES": "False",
+    }
 
 
 # ------------------------------------------------------------------------------------------- live runs

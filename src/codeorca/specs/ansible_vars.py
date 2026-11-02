@@ -383,7 +383,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     os.environ[UNTRUSTED_ENV] = "error"  # before the first ansible import: the templar reads it at import
-    os.environ.pop("ANSIBLE_DEBUG", None)
+    # forced, not popped: env beats ansible.cfg, which could turn debug or a file log back on
+    os.environ.update({"ANSIBLE_DEBUG": "False", "ANSIBLE_VERBOSITY": "0", "ANSIBLE_LOG_PATH": os.devnull})
     # Only the document may reach stdout: park the real stdout and point fd 1 at stderr for everything else.
     sys.stdout.flush()
     saved = os.dup(1)

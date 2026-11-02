@@ -148,8 +148,11 @@ def test_build_env_drops_forces_and_defaults():
         },
         local_temp="/tmp/t",
     )
-    for name in ("CODEORCA_REDACTION_KEY", "ANSIBLE_DEBUG", "ANSIBLE_LOG_PATH", "ANSIBLE_VERBOSITY"):
-        assert name not in env
+    assert "CODEORCA_REDACTION_KEY" not in env
+    # forced, not dropped: each has an ansible.cfg twin that only an env value outranks
+    assert env["ANSIBLE_DEBUG"] == "False" and env["ANSIBLE_VERBOSITY"] == "0"
+    assert env["ANSIBLE_LOG_PATH"] == os.devnull and env["ANSIBLE_KEEP_REMOTE_FILES"] == "False"
+    assert env["ANSIBLE_CALLBACKS_ENABLED"] == "codeorca_jsonl"
     assert env["ANSIBLE_STDOUT_CALLBACK"] == "codeorca_jsonl"
     assert env["ANSIBLE_CALLBACK_PLUGINS"].split(os.pathsep) == [str(callback_plugins_dir()), "/custom"]
     assert env["ANSIBLE_HOST_KEY_CHECKING"] == "False"  # the caller's choice survives
@@ -251,10 +254,47 @@ def test_child_env_never_carries_the_redaction_key_or_debug(tmp_path):
     env = {"CODEORCA_REDACTION_KEY": SECRET, "ANSIBLE_DEBUG": "1", "ANSIBLE_LOG_PATH": str(tmp_path / "unredacted.log")}
     result, capture, runner = run_fixture(tmp_path, do_fail=False, env=env)
     assert result.rc == 0
-    for name in ("CODEORCA_REDACTION_KEY", "ANSIBLE_DEBUG", "ANSIBLE_LOG_PATH"):
-        assert name not in runner.env and name not in result.env_names
+    assert "CODEORCA_REDACTION_KEY" not in runner.env and "CODEORCA_REDACTION_KEY" not in result.env_names
+    assert runner.env["ANSIBLE_DEBUG"] == "False" and runner.env["ANSIBLE_LOG_PATH"] == os.devnull
     assert not (tmp_path / "unredacted.log").exists()
     assert SECRET not in json.dumps(result.events)
+
+
+CFG_SECRET = "FIXTURE-DEBUGLEAK-nolog-0009"
+CFG_PLAYBOOK = f"""- hosts: all
+  gather_facts: false
+  tasks:
+    - name: hidden command
+      ansible.builtin.command: echo {CFG_SECRET}
+      no_log: true
+"""
+
+
+@requires_ansible
+def test_project_ansible_cfg_cannot_turn_debug_log_verbosity_or_aggregate_callbacks_back_on(tmp_path):
+    # ansible-playbook runs from the project root, so the consumer's ansible.cfg is read; env beats ini
+    project = tmp_path / "proj"
+    project.mkdir()
+    (project / "ansible.cfg").write_text(
+        "[defaults]\ndebug = True\nverbosity = 4\nlog_path = ./ansible.log\n"
+        "callbacks_enabled = ansible.builtin.junit\nkeep_remote_files = True\n",
+        encoding="utf-8",
+    )
+    (project / "pb.yml").write_text(CFG_PLAYBOOK, encoding="utf-8")
+    (project / "inv.yml").write_text(
+        "all:\n  hosts:\n    h1:\n      ansible_connection: local\n"
+        "      ansible_python_interpreter: '{{ ansible_playbook_python }}'\n",
+        encoding="utf-8",
+    )
+    capture = Capture()
+    env = {**os.environ, "JUNIT_OUTPUT_DIR": str(project / "junit")}
+    runner = AnsibleRunner(project, env, stream=capture, local_temp=tmp_path / "tmp")
+    result = runner.run(project / "pb.yml", project / "inv.yml", timeout=120)
+    assert result.rc == 0, capture.lines
+    assert CFG_SECRET not in "".join(line for _, line in capture.lines)
+    assert not (project / "ansible.log").exists()
+    assert not (project / "junit").exists()
+    assert [e["type"] for e in result.events].count("stats") == 1  # the stdout callback is loaded once
 
 
 SLEEP_MARKER = "60.0731"  # an unusual duration: the survivor check must not match another process's `sleep 60`

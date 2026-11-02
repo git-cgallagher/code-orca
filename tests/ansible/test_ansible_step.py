@@ -124,7 +124,7 @@ def test_handoff_files_are_private_while_the_play_runs_and_gone_afterwards(proje
     argv = json.loads((step_dir / "argv.json").read_text())[0]
     assert argv[-1].endswith("ansible/site.yml") and "-i" in argv and "--check" not in argv
     names = json.loads((step_dir / "env-names.json").read_text())
-    assert "ANSIBLE_STDOUT_CALLBACK" in names and "CODEORCA_REDACTION_KEY" not in names and "ANSIBLE_DEBUG" not in names
+    assert "ANSIBLE_STDOUT_CALLBACK" in names and "CODEORCA_REDACTION_KEY" not in names
     assert (tmp_path / "hello.txt").exists()
 
 
@@ -298,9 +298,7 @@ def test_project_ansible_env_reaches_the_child(project_root, tmp_path):
     )
     assert rc == EXIT_OK
     names = json.loads((r.run_dir.steps_dir / "cfg" / "env-names.json").read_text())
-    assert (
-        "ANSIBLE_HOST_KEY_CHECKING" in names and "ANSIBLE_DEBUG" not in names and "CODEORCA_REDACTION_KEY" not in names
-    )
+    assert "ANSIBLE_HOST_KEY_CHECKING" in names and "CODEORCA_REDACTION_KEY" not in names
 
 
 @pytest.mark.parametrize("bad", [{"inline": {}}])

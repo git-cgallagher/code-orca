@@ -9,6 +9,9 @@ Rules baked in:
 - ``stacks.*.depends_on`` names must exist and form a DAG (``graphlib``).
 - ``stacks.*.secrets`` values are ``ssm:/`` references, never values.
 - ``redaction.placeholder: hmac`` requires ``hmac_key``.
+- ``ansible.env`` may not set a name the Ansible adapter forces (``adapters.ansible.RESERVED_ENV``: the redaction
+  key, ``ANSIBLE_DEBUG``/``ANSIBLE_LOG_PATH``/``ANSIBLE_VERBOSITY``/``ANSIBLE_KEEP_REMOTE_FILES`` and the callback
+  selection), so a setting that would be silently overridden fails instead.
 """
 
 from __future__ import annotations
@@ -109,6 +112,15 @@ class AnsibleConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     env: dict[str, str] = {}
     check_unsupported: Literal["warn", "fail", "ignore"] = "warn"
+
+    @model_validator(mode="after")
+    def _no_reserved_env(self):
+        from codeorca.adapters.ansible import RESERVED_ENV
+
+        reserved = sorted(name for name in self.env if name in RESERVED_ENV)
+        if reserved:
+            raise ValueError(f"ansible.env may not set {', '.join(reserved)}: code-orca forces these for every play")
+        return self
 
 
 class GateConfig(BaseModel):

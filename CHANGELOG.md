@@ -2,12 +2,24 @@
 
 ## Unreleased
 
+- Phase 3 integration: `codeorca run`/`resume` register the `gate`, `python` and `powershell` executors and hand one
+  SSM resolver per run to the helpers and the terraform step (a stack's `secrets:` resolved into the child env only,
+  registered first, `drift` included; without boto3 only the step that needs a secret fails); the registry takes the
+  SSM-backed redaction key (`CODEORCA_REDACTION_KEY` still wins). New `codeorca resume <run-id|latest>
+  (--approve [--field k=v] | --reject)` (terminal required, no bypass; secret inputs asked with `getpass`) and
+  `codeorca lint powershell <paths> [--ansible-settings]`. A gate cancelled by `on_timeout: cancel` now fails the
+  run (exit 1). The terraform step's s3 backend config is `bootstrap.s3.backend_settings` (adds `kms_key_id`).
+  Reference: `demo-rollout` runs end to end (plan, spec, gate, apply, Ansible from the outputs, host spec, python
+  and powershell helpers, finally summary); `bootstrap-backend` validates each stack after the helper. CI installs
+  the `aws` extra, imports the Phase 3 modules from the wheel, requires the pwsh tests to run, lints the
+  PowerShell helpers, runs `demo-rollout` to the gate (exit 3, run.json waiting) and asserts `resume --approve`
+  refuses without a terminal; the test job has a 30-minute timeout. Tests never reach AWS (`tests/conftest.py`).
 - Helper steps (Phase 3, plan 5.8): `steps/python_step.py` (`python -I`) and `steps/powershell_step.py`
   (`pwsh -NoProfile -NonInteractive -File`, `-WhatIf` under `--dry-run`, scripts without a script-level
   `SupportsShouldProcess` refused there) on the shared contract in `steps/helpers.py` (project-root-relative scripts,
   `{secret: ssm:/...}` env resolved through an injected resolver and registered before the child starts, outputs via
   `CODEORCA_OUTPUT_FILE`), plus `lint_powershell` (PSScriptAnalyzer, optional ansible-test pslint settings). The
-  shell step's child-process code moved into `shell.run_argv` unchanged. Not registered yet (integration).
+  shell step's child-process code moved into `shell.run_argv` unchanged. Registered by the CLI (integration).
 - Phase 3 (gate, resume, apply): the `gate` step (dry-run auto-approval; on a terminal: message, staged specs and
   plan sha256s, approve/reject and typed `fields`, approver/decision/timestamp/plan binding recorded; no terminal:
   `wait` -> exit 3 or `fail`; no timeout ever approves), `codeorca.resume.resume` (terminal required with no

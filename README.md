@@ -6,17 +6,18 @@ redacted configuration specs** rendered from Terraform plan/state JSON and from 
 resolution, and Python or PowerShell helpers where neither tool fits. It ships as one container
 holding Terraform, Ansible, Python, PowerShell and itself.
 
-Status: **Phase 2 (Ansible).** Phase 1 (core, read-only): workflow and project models, the sequential DAG
-runner, the Terraform adapter (init/validate/plan/show/output/providers schema/test; apply refused until the gate
-lands), the policy floor and plan gate, the redaction pipeline, the Terraform plan-spec renderer and the `run`,
-`drift`, `doctor`, `render`, `summary` commands. Phase 2: the `ansible` step (`ansible-playbook` with a redacting
-JSONL stdout callback), the Ansible host spec (inventory + play scope) and `codeorca lint ansible`. Helpers, the
-approval gate + apply, backend bootstrap and the container follow (see `AGENTS.md`, TODO).
+Status: **Phase 3 (gates, apply, helpers, secrets, backend bootstrap).** Phase 1 (core, read-only): workflow and
+project models, the sequential DAG runner, the Terraform adapter, the policy floor and plan gate, the redaction
+pipeline, the Terraform plan-spec renderer and the `run`, `drift`, `doctor`, `render`, `summary` commands. Phase 2:
+the `ansible` step (`ansible-playbook` with a redacting JSONL stdout callback), the Ansible host spec (inventory +
+play scope) and `codeorca lint ansible`. Phase 3: the approval `gate` + `codeorca resume`, Terraform `apply` bound
+to the approved plan's sha256, `migrate_backend`, the `python`/`powershell` helpers + `codeorca lint powershell`,
+SSM secrets and the SSM-backed redaction key, and the S3 state-backend bootstrap. The container image follows (see
+`AGENTS.md`, TODO).
 
 ```bash
-pip install -e '.[dev,ansible]'        # the ansible extra pins ansible-core 2.21; without it the Ansible tests skip
-pip install -e '.[aws]'                # boto3: SSM secrets, the SSM-backed redaction key, the S3 backend bootstrap
-python -m codeorca.bootstrap.s3 --project codeorca.yaml --dry-run   # an s3 backend's would-be diff, writes nothing
+pip install -e '.[dev,ansible,aws]'    # ansible-core 2.21 (Ansible steps) and boto3 (SSM, S3 bootstrap); tests
+                                       # needing a missing extra, terraform or pwsh skip
 codeorca validate examples/reference/workflows/*.yaml
 codeorca schema export schema          # JSON Schema for editors (yaml-language-server modeline in the examples)
 ```
@@ -25,9 +26,10 @@ codeorca schema export schema          # JSON Schema for editors (yaml-language-
 
 Every command that touches a project takes `-p/--project codeorca.yaml` (default `./codeorca.yaml`); paths in
 the project file (`state_dir`, `specs_dir`, `workflows_dir`, `stacks.*.dir`) resolve against it. The HMAC key
-for redaction placeholders comes from the environment variable **`CODEORCA_REDACTION_KEY`** in this phase (the
-SSM-backed key named by `redaction.hmac_key` arrives in Phase 3); a project with `placeholder: hmac` refuses to
-run without it. The reference project runs offline against a local backend with `terraform` on PATH:
+for redaction placeholders is **`CODEORCA_REDACTION_KEY`** when that variable is set (SSM is then never called),
+otherwise the SSM SecureString named by `redaction.hmac_key` (needs the `aws` extra and credentials; key id
+`<ref>@<version>` in spec headers); a project with `placeholder: hmac` refuses to run when neither resolves. The
+reference project runs offline against a local backend with `terraform` on PATH:
 
 ```bash
 export CODEORCA_REDACTION_KEY=example-not-secret-local            # any string; its id (not its value) lands in spec headers
@@ -45,7 +47,7 @@ codeorca runs gc --keep 20 -p examples/reference/codeorca.yaml
 - `run <workflow>` takes a file path or a name under `workflows_dir`; `--input k=v` sets a declared input. An
   input whose **name** matches `redaction.key_denylist` (`app_secret`, `api_token`, ...) is registered as a
   secret before anything is written, so it shows as `<redacted:key>` in `run.json` and its value is scrubbed from
-  every log and spec. Exit codes: 0 ok, 1 a blocking failure, 3 waiting at a gate (Phase 3).
+  every log and spec. Exit codes: 0 ok, 1 a blocking failure, 3 waiting at a gate.
 - The reference stack's `app_secret` variable is sensitive and has **no default**: `plan-only` passes it as a
   workflow input (default `FIXTURE-SECRET-reference-001`, a placeholder CI asserts never leaks) through
   `var_overrides`; `drift` carries no inputs, so it takes the variable from `TF_VAR_app_secret` (the executor
@@ -145,6 +147,86 @@ searched for `*.yml`/`*.yaml`, vars/meta/templates trees skipped) for `debug` of
 secret-named variable, and a secret-named variable passed to a module parameter the module does not mark
 `no_log`. It prints `file:line rule level message` and exits 1 on any finding above `info`. With `-p` it uses the
 project's key and lookup denylists, otherwise the default key denylist.
+
+## Usage (Phase 3: gates, apply, helpers, secrets, backend)
+
+`demo-rollout` is the whole loop on the reference stack, offline: plan -> plan spec -> **gate** -> **apply** ->
+Ansible on localhost from the outputs -> host spec -> a python and a powershell helper -> `finally` summary.
+
+```bash
+export CODEORCA_REDACTION_KEY=example-not-secret-local
+codeorca run demo-rollout -p examples/reference/codeorca.yaml | cat   # no terminal: stops at the gate, exit 3
+codeorca resume latest --approve -p examples/reference/codeorca.yaml  # on YOUR terminal: approve, apply, finish
+codeorca resume latest --reject -p examples/reference/codeorca.yaml   # or reject: the apply and its dependents are omitted
+codeorca run demo-rollout -p examples/reference/codeorca.yaml --dry-run   # gate auto-approved, apply skipped,
+                                                                          # Ansible --check, helpers dry-run
+codeorca lint powershell examples/reference/helpers [--ansible-settings]
+```
+
+**Gate and apply.** A `gate` step prints its message, the specs the run staged and every plan file with its
+sha256, then asks `approve`/`reject` and its typed `fields` (`--field k=v` on `resume --approve`). It asks only
+when stdin AND stdout are terminals. Without one (an agent, CI, a pipe) `non_interactive: wait` stops the run
+(`run.json` status `waiting`, exit 3; `finally` does not run yet) and `non_interactive: fail` fails it.
+`codeorca resume <run-id|latest> --approve|--reject` decides the gate **on a terminal only**: there is no flag or
+environment variable that bypasses that check, for either decision. Secret inputs the remaining steps need
+(recorded redacted) are asked for again on the terminal, not echoed, never taken from the command line. Resume
+refuses a changed workflow, a gate older than `gate.max_age` and a plan file that changed or vanished since the gate
+recorded it; completed steps are replayed, the rest run, `finally` runs once. A `terraform` `apply` step runs only
+a plan file of this run whose sha256 an approving gate it needs recorded, re-checks the plan gate (with the gate's
+`allow_delete_of`), deletes the plan file afterwards and retries only a lock-acquisition failure before any change.
+`timeout` bounds the prompt; `on_timeout: fail|cancel|warn` never approves, and a cancelled gate fails the run
+(exit 1). `--dry-run` auto-approves (recorded as `approver: dry-run`) and an apply then only reports the plan.
+
+```yaml
+- id: approve
+  type: gate
+  needs: [plan_spec]
+  message: "Apply the app stack? Review ${{ steps.plan_spec.outputs.path }}"
+  non_interactive: wait                       # exit 3 for an agent; resume on a terminal
+  fields: { ticket: { type: string, required: true } }
+- id: apply_app
+  type: terraform
+  needs: [approve]
+  stack: app
+  action: apply
+  plan_file: "${{ steps.plan_app.outputs.plan_file }}"
+```
+
+**Helpers.** `python` (`[python, -I, script, *args]`, the interpreter running code-orca) and `powershell`
+(`pwsh -NoProfile -NonInteractive -File script *args`, `-WhatIf` appended under `--dry-run`, which refuses a script
+that does not declare `[CmdletBinding(SupportsShouldProcess)]`). `script:` is relative to the project root (also the
+child's cwd) and must stay inside it; the result is the JSON the script writes to `$CODEORCA_OUTPUT_FILE`
+(`result.output`), stdout/stderr are redacted logs; `CODEORCA_DRY_RUN=1` under `--dry-run`. `env:` values are
+literals or `{secret: ssm:/path}`:
+
+```yaml
+- id: dns_check
+  type: python
+  script: helpers/check_dns.py
+  args: ["--name", "localhost"]
+  env: { EXAMPLE_API_TOKEN: { secret: "ssm:/example/app/api-token" } }   # SSM -> child env only, redacted
+  outputs: { resolved: "${{ result.output.resolved }}" }
+```
+
+`codeorca lint powershell <paths…> [--ansible-settings]` runs PSScriptAnalyzer through `pwsh` (with
+`--ansible-settings`, ansible-test's pslint rules, so a helper can move into an Ansible collection unchanged) and
+exits 1 on any warning or error; missing `pwsh`/PSScriptAnalyzer is one `info` finding.
+
+**SSM secrets.** `ssm:/path` references are fetched inside the process (time-limited, a wall-clock deadline
+included, so a hung credential provider cannot hang the run), **registered with the redactor before the value is
+returned**, cached in memory only and passed into a child's environment only: helper `env:` entries and a stack's
+`secrets: {ENV_NAME: ssm:/path}` (into every terraform command's env for that stack, `drift` included; a name also
+in `required_env` is satisfied by it). Without boto3 only a step that needs a secret fails, naming the `aws` extra.
+AWS credentials themselves arrive as environment variables passed by name (`aws-vault exec`, SSO, OIDC in CI).
+
+**Backend bootstrap** (s3 backends; plan 5.11). `codeorca run bootstrap-backend` (or
+`python -m codeorca.bootstrap.s3 --project codeorca.yaml [--dry-run]`) refuses a caller outside
+`backend.account_id`, creates the bucket if absent, converges public access block, versioning, encryption, a
+TLS-only policy statement, a noncurrent-version lifecycle rule and a tag (refusing an Object Lock default retention),
+writes each stack's `backend.hcl` and reports `{bucket, created, changed, diff, …}`; the workflow then runs
+`terraform init` + `validate` per stack. `--dry-run` is the drift check: the diff, nothing written. Adopting a stack
+with local state is an explicit `action: migrate_backend` step behind a gate (refused when the target already holds
+a state).
 
 ## Principles (the short list)
 

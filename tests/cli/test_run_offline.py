@@ -45,3 +45,14 @@ def test_refused_run_leaves_no_run_directory(tmp_path: Path, monkeypatch, capsys
     assert cli.main(["run", "fe", "-p", str(root / "codeorca.yaml")]) == 1
     assert "for_each is not implemented" in capsys.readouterr().err
     assert list_runs(root / ".codeorca" / "runs") == []
+
+
+def test_run_registers_the_real_executors_but_default_executors_stays_phase1():
+    from codeorca.redact import SecretRegistry
+    from codeorca.steps import default_executors
+
+    executors = cli._executors(SecretRegistry(b"example-not-secret", "env:test"))
+    assert executors["ansible"].__name__ == "run_ansible"
+    assert callable(executors["terraform"])
+    assert executors["spec-render"].__name__ == "run_spec_render"
+    assert default_executors()["ansible"].__name__ != "run_ansible"  # the placeholder, untouched

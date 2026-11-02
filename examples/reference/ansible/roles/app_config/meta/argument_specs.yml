@@ -1,0 +1,23 @@
+---
+# The role's interface. code-orca's host spec reads this file: `type`, `description`, `default` and `required`
+# become the spec's documentation column, and `no_log: true` makes a var render as `<secret: declared>`.
+argument_specs:
+  main:
+    short_description: Write the example app's config file
+    options:
+      app_listen_port:
+        type: int
+        default: 8080
+        description: Port the app listens on.
+      app_config_paths:
+        type: list
+        elements: str
+        description: Config files the app reads, in order.
+      app_config_dir:
+        type: str
+        default: /tmp/codeorca-reference
+        description: Directory the config file is written to (outside any repository).
+      app_api_token:
+        type: str
+        no_log: true
+        description: API token handed to the app; never rendered in a spec.

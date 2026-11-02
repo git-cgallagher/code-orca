@@ -24,6 +24,8 @@ dev = [
   "pytest>=8",
   "ruff>=0.8",
 ]
+# The ansible step and the host-spec renderer need ansible-core; the tests under tests/ansible skip without it.
+ansible = ["ansible-core>=2.21,<2.22"]
 
 [project.scripts]
 codeorca = "codeorca.cli:main"

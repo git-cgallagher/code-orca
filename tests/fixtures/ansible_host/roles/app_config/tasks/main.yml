@@ -1,0 +1,3 @@
+- name: Fixture task (never run by the tests)
+  ansible.builtin.debug:
+    msg: "{{ app_config_banner }}"

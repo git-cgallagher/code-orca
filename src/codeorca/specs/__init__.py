@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from ruamel.yaml import YAML
+from ruamel.yaml.representer import SafeRepresenter
 
 from codeorca import __version__
 from codeorca.redact import SecretRegistry, entropy_warnings
@@ -57,8 +58,23 @@ def sort_tree(obj: Any) -> Any:
     return obj
 
 
+class _SpecRepresenter(SafeRepresenter):
+    """Multi-line strings as literal blocks (``|``), so a rendered template or a heredoc diffs one line per changed
+    line. A subclass: ``add_representer`` on the shared class would change every other dump in the process."""
+
+
+def _represent_str(representer, value: str):
+    if "\n" in value:
+        return representer.represent_scalar("tag:yaml.org,2002:str", value, style="|")
+    return SafeRepresenter.represent_str(representer, value)
+
+
+_SpecRepresenter.add_representer(str, _represent_str)
+
+
 def _yaml() -> YAML:
     yaml = YAML(typ="safe", pure=True)
+    yaml.Representer = _SpecRepresenter
     yaml.default_flow_style = False
     yaml.sort_base_mapping_type_on_output = False  # we sort ourselves, so the header keeps its order
     yaml.width = 4096  # never fold a long value: a diff must show one changed line per changed value

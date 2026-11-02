@@ -1,0 +1,5 @@
+- name: Render the app config
+  ansible.builtin.template:
+    src: app.conf.j2
+    dest: "{{ app_config_dir }}/app.conf"
+    mode: "0644"

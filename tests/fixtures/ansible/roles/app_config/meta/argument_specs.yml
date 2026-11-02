@@ -1,0 +1,16 @@
+argument_specs:
+  main:
+    short_description: Fixture role for the generated role playbook
+    options:
+      app_config_name:
+        type: str
+        default: demo
+        description: Name shown in the rendered template.
+      app_config_dir:
+        type: str
+        required: true
+        description: Directory the rendered file is written to.
+      app_config_token:
+        type: str
+        no_log: true
+        description: A placeholder secret the spec renderer must never resolve.

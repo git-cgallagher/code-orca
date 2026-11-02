@@ -1,0 +1,80 @@
+# Lint fixture: every secret-looking value is a placeholder. Line numbers matter to the tests.
+- hosts: web
+  gather_facts: false
+  tasks:
+    - name: dumps everything                      # no-hostvars-dump
+      ansible.builtin.debug:
+        var: hostvars[inventory_hostname]
+
+    - name: dumps vars                            # no-hostvars-dump
+      debug:
+        var: vars
+
+    - name: reads hostvars in msg                 # no-hostvars-dump
+      ansible.builtin.debug:
+        msg: "{{ hostvars['web1']['app_name'] }}"
+
+    - name: prints a secret                       # debug-secret-name
+      ansible.builtin.debug:
+        var: db_password
+
+    - name: prints a secret in msg                # debug-secret-name
+      ansible.builtin.debug:
+        msg: "token is {{ api_token }}"
+
+    - name: secret into a plain parameter         # secret-to-plain-param (lineinfile.line is not no_log)
+      ansible.builtin.lineinfile:
+        line: "{{ db_password }}"
+        path: /tmp/example-not-secret
+
+    - name: secret into a no_log parameter        # fine: user.password is no_log in the argument_spec
+      ansible.builtin.user:
+        name: app
+        password: "{{ db_password }}"
+
+    - name: secret into a documented alias        # fine: uri.url_password has alias password
+      ansible.builtin.uri:
+        url: http://example.com
+        password: "{{ db_password }}"
+
+    - name: secret on the command line            # secret-to-plain-param (free-form)
+      ansible.builtin.shell: "curl -u app:{{ db_password }} http://example.com"
+
+    - name: secret-store lookup into a plain parameter   # secret-to-plain-param (lookup denylist)
+      ansible.builtin.lineinfile:
+        line: "{{ lookup('amazon.aws.ssm_parameter', '/example/app') }}"
+        path: /tmp/example-not-secret-2
+
+    - name: unknown module                        # unknown-module
+      example.collection.widget:
+        api_token: "{{ api_token }}"
+
+    - name: redundant no_log                      # redundant-task-no-log
+      ansible.builtin.copy:
+        content: hello
+        dest: /tmp/example-not-secret-3
+      no_log: true
+
+    - name: no_log covers the leak                # fine: task-level no_log
+      ansible.builtin.lineinfile:
+        line: "{{ db_password }}"
+        path: /tmp/example-not-secret-4
+      no_log: true
+
+    - name: secret into copy content              # fine: copy.content is no_log in its argument_spec
+      ansible.builtin.copy:
+        content: "{{ db_password }}"
+        dest: /tmp/example-not-secret-7
+
+    - name: a block
+      block:
+        - name: secret via action form            # secret-to-plain-param
+          action:
+            module: ansible.builtin.lineinfile
+            line: "{{ app_secret }}"
+            path: /tmp/example-not-secret-5
+
+    - name: a quoted string is not a reference    # fine
+      ansible.builtin.copy:
+        content: "{{ 'password' }}"
+        dest: /tmp/example-not-secret-6

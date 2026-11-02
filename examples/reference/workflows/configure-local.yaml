@@ -1,0 +1,54 @@
+# yaml-language-server: $schema=../../../schema/codeorca-workflow.schema.json
+# Runs end to end in Phase 2: configure this machine with the reference role (connection: local, writes only
+# under `config_dir`, outside the repository), then render the redacted Ansible host spec.
+# `codeorca run configure-local -p examples/reference/codeorca.yaml` needs ansible-core
+# (`pip install 'code-orca[ansible]'`) and CODEORCA_REDACTION_KEY in the environment.
+api: codeorca/v1
+kind: workflow
+name: configure-local
+description: Configure the local host with the app_config role, render its host spec, print where it landed.
+
+inputs:
+  env: { type: string, enum: [dev, prod], default: dev }
+  # A PLACEHOLDER, not a secret. Its name matches redaction.key_denylist, so the value is registered before
+  # anything runs; CI asserts it never reaches a spec, a log or the run directory. The role declares
+  # `app_api_token` with `no_log: true`, so the host spec shows `<secret: declared>`.
+  api_token: { type: string, default: FIXTURE-SECRET-reference-token-001 }
+  config_dir: { type: string, default: /tmp/codeorca-reference }   # where the role writes app.conf
+
+steps:
+  - id: configure
+    type: ansible
+    playbook: ansible/site.yml
+    inventory:
+      inline:
+        app:
+          hosts:
+            app-host:
+              ansible_host: 127.0.0.1
+              ansible_connection: local
+    extra_vars:                                           # handed over as a 0600 `-e @file`, deleted after the play
+      app_environment: "${{ inputs.env }}"
+      app_bucket: example-app-123456789012
+      app_api_token: "${{ inputs.api_token }}"
+      app_config_dir: "${{ inputs.config_dir }}"
+    outputs:
+      stats: "${{ result.stats }}"
+
+  - id: host_spec
+    type: spec-render
+    needs: [configure]
+    source:
+      ansible:
+        inventory: "${{ steps.configure.outputs.inventory_path }}"   # the redacted copy the configure step kept
+        host: app-host
+        play_scope:                                       # a check-mode play: role defaults, play vars, templates
+          playbook: ansible/site.yml
+          vars: [app_listen_port, app_config_paths, app_config_dir]
+        templates: [ansible/roles/app_config/templates/app.conf.j2]
+    output: specs/app/hosts/app-host.yaml                 # relative to the project root; also staged under the run dir
+
+  - id: show_spec
+    type: shell
+    needs: [host_spec]
+    run: ["echo", "host spec written to ${{ steps.host_spec.outputs.path }}"]

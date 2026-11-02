@@ -190,7 +190,7 @@ def test_backend_config_local_is_empty_and_s3_is_non_secret():
     }
 
 
-def test_spec_render_other_sources_are_not_implemented_and_bad_source_is_an_error(tmp_path, registry, project):
+def test_spec_render_state_source_is_not_implemented_and_bad_sources_are_errors(tmp_path, registry, project):
     wf = workflow(
         [
             {
@@ -217,7 +217,8 @@ def test_spec_render_other_sources_are_not_implemented_and_bad_source_is_an_erro
     )
     r = run(wf, tmp_path, registry, project)
     assert "terraform_state" in r.states["s"]["error"] and "not implemented in this phase" in r.states["s"]["error"]
-    assert "'ansible' is not implemented" in r.states["a"]["error"]
+    # source.ansible is implemented (tests/steps/test_spec_render_ansible.py); a missing inventory is an error
+    assert r.states["a"]["status"] == "errored" and "inventory 'i' does not exist" in r.states["a"]["error"]
     assert r.states["m"]["status"] == "errored" and "does not exist" in r.states["m"]["error"]
 
 

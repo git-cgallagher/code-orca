@@ -1,0 +1,2 @@
+app_config_rotate_days: 30
+app_config_banner: "{{ app_name }} ({{ app_env }})"

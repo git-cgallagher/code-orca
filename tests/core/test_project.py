@@ -122,3 +122,13 @@ def test_critical_tag_must_be_key_equals_value(reference, tag):
     data["policy"]["critical_tag"] = tag
     with pytest.raises(ValidationError, match="critical_tag"):
         Project.model_validate(data)
+
+
+def test_project_ansible_env_may_not_set_forced_names():
+    from codeorca.project import AnsibleConfig
+
+    # forced by the adapter anyway: refusing beats silently overriding the consumer's setting
+    for name in ("ANSIBLE_DEBUG", "ANSIBLE_LOG_PATH", "ANSIBLE_CALLBACKS_ENABLED", "CODEORCA_REDACTION_KEY"):
+        with pytest.raises(ValueError, match=name):
+            AnsibleConfig(env={name: "x"})
+    assert AnsibleConfig(env={"ANSIBLE_NOCOLOR": "1"}).env == {"ANSIBLE_NOCOLOR": "1"}

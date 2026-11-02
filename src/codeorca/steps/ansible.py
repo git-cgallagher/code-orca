@@ -51,6 +51,7 @@ from codeorca.adapters.ansible import (
     describe_rc,
     generate_inventory,
     generate_role_playbook,
+    plain_tree,
     write_handoff,
     write_private,
 )
@@ -185,14 +186,16 @@ def execute(step, ctx: StepContext, registry: SecretRegistry) -> StepResult:
 
         callback, flush = terraform_stream(registry, emit)  # a StreamRedactor per channel; the name is historical
         runner = AnsibleRunner(root, env, stream=callback, local_temp=step_dir / "tmp")
-        inventory_path, kept_inventory = _prepare_inventory(
-            step, root, inline, handoff_dir, step_dir, registry, denylist
-        )
-        extra_vars_file = write_handoff(handoff_dir, EXTRA_VARS_FILE, extra_vars) if extra_vars else None
-        kept_extra_vars = _keep_extra_vars(step_dir, extra_vars, registry, denylist)
         outcome: AnsibleResult | None = None
         error: str | None = None
         try:
+            # inside the try: the live inventory may hold ansible_password & co., and anything that raises after it
+            # was written (a TypeError while dumping the extra vars) must still delete it
+            inventory_path, kept_inventory = _prepare_inventory(
+                step, root, inline, handoff_dir, step_dir, registry, denylist
+            )
+            extra_vars_file = write_handoff(handoff_dir, EXTRA_VARS_FILE, extra_vars) if extra_vars else None
+            kept_extra_vars = _keep_extra_vars(step_dir, extra_vars, registry, denylist)
             try:
                 outcome = runner.run(
                     playbook,
@@ -260,7 +263,7 @@ def _keep_extra_vars(
     path.unlink(missing_ok=True)
     if not extra_vars:
         return None
-    kept = redact_tree(json.loads(json.dumps(dict(extra_vars), default=str)), registry, denylist)
+    kept = redact_tree(json.loads(json.dumps(plain_tree(dict(extra_vars)))), registry, denylist)
     return write_private(path, json.dumps(kept, indent=2, sort_keys=True) + "\n")
 
 

@@ -213,7 +213,8 @@ def write_handoff(directory: str | os.PathLike[str], name: str, mapping: Mapping
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(directory, 0o700)
     path = directory / name
-    return write_private(path, json.dumps(dict(mapping), indent=2, sort_keys=True, default=str) + "\n")
+    # plain_tree first: str keys everywhere, or sort_keys raises on a mapping with int and str keys ({80: http, a: b})
+    return write_private(path, json.dumps(plain_tree(dict(mapping)), indent=2, sort_keys=True) + "\n")
 
 
 def write_private(path: str | os.PathLike[str], text: str) -> Path:
@@ -226,14 +227,18 @@ def write_private(path: str | os.PathLike[str], text: str) -> Path:
     return path
 
 
-def _plain(value: Any) -> Any:
+def plain_tree(value: Any) -> Any:
+    """JSON/YAML-safe plain data: str keys, lists for every sequence/set, ``str()`` for anything else."""
     if isinstance(value, Mapping):
-        return {str(k): _plain(v) for k, v in value.items()}
+        return {str(k): plain_tree(v) for k, v in value.items()}
     if isinstance(value, list | tuple | set | frozenset):
-        return [_plain(v) for v in value]
+        return [plain_tree(v) for v in value]
     if value is None or isinstance(value, bool | int | float | str):
         return value
     return str(value)
+
+
+_plain = plain_tree
 
 
 class _QuotedStrRepresenter(SafeRepresenter):

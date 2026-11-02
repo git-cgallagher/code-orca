@@ -305,3 +305,31 @@ def test_project_ansible_env_reaches_the_child(project_root, tmp_path):
 def test_empty_inline_inventory_is_refused_by_the_model(bad):
     with pytest.raises(ValueError):
         workflow([ansible(inventory=bad)])
+
+
+@requires_ansible
+def test_mixed_key_extra_vars_are_handed_over(project_root, tmp_path):
+    project = load_project(project_root / "codeorca.yaml")
+    step = ansible(
+        inventory=inline_inventory(app_port=8080, ansible_password="FIXTURE-InventoryPw-quux-778899"),
+        extra_vars={"scratch_dir": str(tmp_path), "ports": {80: "http", "https": 443}},
+    )
+    rc, r = run(project, workflow([step]), tmp_path, registry())
+    assert rc == EXIT_OK, r.states["cfg"].get("error")
+    kept = json.loads((r.run_dir.steps_dir / "cfg" / "extra-vars.json").read_text())
+    assert kept["ports"] == {"80": "http", "https": 443}
+    assert not (r.run_dir.handoff_dir / "cfg").exists()
+
+
+def test_live_inventory_is_deleted_when_writing_the_extra_vars_fails(project_root, tmp_path, monkeypatch):
+    def boom(*_a, **_k):
+        raise TypeError("simulated failure after the live inventory was written")
+
+    monkeypatch.setattr(ansible_step, "_keep_extra_vars", boom)
+    project = load_project(project_root / "codeorca.yaml")
+    step = ansible(inventory=inline_inventory(ansible_password="FIXTURE-InventoryPw-quux-778899"), extra_vars={"a": 1})
+    rc, r = run(project, workflow([step]), tmp_path, registry())
+    assert rc == EXIT_FAILED
+    assert not (r.run_dir.handoff_dir / "cfg").exists()
+    leftovers = [p for p in r.run_dir.path.rglob("*") if p.is_file() and "InventoryPw" in p.read_text(errors="ignore")]
+    assert leftovers == []

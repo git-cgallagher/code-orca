@@ -23,9 +23,13 @@ dependencies = [
 dev = [
   "pytest>=8",
   "ruff>=0.8",
+  "moto[s3,ssm,sts]>=5",  # AWS mocked in tests/providers and tests/bootstrap; never real AWS
 ]
 # The ansible step and the host-spec renderer need ansible-core; the tests under tests/ansible skip without it.
 ansible = ["ansible-core>=2.21,<2.22"]
+# The SSM secrets provider, the SSM-backed redaction key and the S3 backend bootstrap need boto3; without it they
+# fail closed with a message naming this extra.
+aws = ["boto3>=1.35"]
 
 [project.scripts]
 codeorca = "codeorca.cli:main"

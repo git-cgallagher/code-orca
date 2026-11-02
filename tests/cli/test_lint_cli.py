@@ -48,6 +48,33 @@ def test_unparsable_file_and_missing_path(tmp_path: Path, capsys):
     broken = tmp_path / "site.yml"
     broken.write_text("- hosts: all\n  tasks: [\n", encoding="utf-8")
     assert cli.main(["lint", "ansible", str(broken)]) == 1
-    assert f"{broken}:0 parse-error error " in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert out.startswith(f"{broken}:") and " parse-error error " in out and "message withheld" in out
     assert cli.main(["lint", "ansible", str(tmp_path / "missing")]) == 1
     assert "neither a file nor a directory" in capsys.readouterr().err
+
+
+def test_lint_output_never_prints_a_value(tmp_path, capsys):
+    """Findings carry variable names only, and a parse error never echoes the offending line."""
+    from codeorca.cli import main
+
+    play = tmp_path / "play.yml"
+    play.write_text(
+        "- hosts: all\n"
+        "  vars:\n"
+        "    db_password: FIXTURE-SECRET-lint-value-001\n"
+        "  tasks:\n"
+        "    - ansible.builtin.debug:\n"
+        "        msg: '{{ db_password }}'\n",
+        encoding="utf-8",
+    )
+    broken = tmp_path / "broken.yml"
+    broken.write_text(
+        "- hosts: all\n  vars:\n    api_token: FIXTURE-SECRET-lint-value-002\n   bad: [\n", encoding="utf-8"
+    )
+    rc = main(["lint", "ansible", str(play), str(broken)])
+    out = capsys.readouterr()
+    assert rc == 1
+    assert "debug-secret-name" in out.out and "db_password" in out.out
+    assert "parse-error" in out.out and "message withheld" in out.out
+    assert "FIXTURE-SECRET-lint-value" not in out.out + out.err

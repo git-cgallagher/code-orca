@@ -117,9 +117,11 @@ BUILTIN_PREFIXES = ("ansible.builtin.", "ansible.legacy.")
 # ------------------------------------------------------------------------------------------------- scanning
 
 
-def secret_references(value: Any, key_patterns: Sequence[re.Pattern[str]], lookup_patterns: Sequence[str]) -> list[str]:
-    """Names of secret-named variables and denied lookups referenced from the Jinja expressions in ``value``
-    (any depth). A quoted string inside an expression is not a reference."""
+def flagged_names(value: Any, key_patterns: Sequence[re.Pattern[str]], lookup_patterns: Sequence[str]) -> list[str]:
+    """Identifiers only: the NAMES of variables whose name matches a key pattern, and ``lookup:<plugin>`` for
+    denied lookups, referenced from the Jinja expressions in ``value`` (any depth). Never a value: a quoted
+    string inside an expression is not a reference and literal text is never returned, so a finding built from
+    this list is safe to print."""
     found: list[str] = []
     for text in _strings(value):
         for m in LOOKUP_RE.finditer(text):
@@ -271,8 +273,8 @@ def _lint_task(
             add("no-hostvars-dump", "debug msg reads hostvars")
         refs = []
         if isinstance(var, str):
-            refs = secret_references("{{ " + var + " }}", key_patterns, lookup_patterns)
-        refs += [r for r in secret_references(msg, key_patterns, lookup_patterns) if r not in refs]
+            refs = flagged_names("{{ " + var + " }}", key_patterns, lookup_patterns)
+        refs += [r for r in flagged_names(msg, key_patterns, lookup_patterns) if r not in refs]
         if refs:
             add("debug-secret-name", f"debug prints secret-named {', '.join(refs)}")
         return out
@@ -280,11 +282,11 @@ def _lint_task(
     secret_params: dict[str, list[str]] = {}
     if isinstance(params, Mapping):
         for name, value in params.items():
-            refs = secret_references(value, key_patterns, lookup_patterns)
+            refs = flagged_names(value, key_patterns, lookup_patterns)
             if refs:
                 secret_params[str(name)] = refs
     elif isinstance(params, str):
-        refs = secret_references(params, key_patterns, lookup_patterns)
+        refs = flagged_names(params, key_patterns, lookup_patterns)
         if refs:
             secret_params["_raw_params"] = refs
 

@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from codeorca.lint import RULES, lint_playbooks
-from codeorca.lint.ansible import no_log_from_source, resolve_installed_module, secret_references
+from codeorca.lint.ansible import flagged_names, no_log_from_source, resolve_installed_module
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 PLAYBOOK = FIXTURES / "playbook.yml"
@@ -88,14 +88,14 @@ def test_custom_key_denylist_changes_what_is_a_secret():
         lint_playbooks([PLAYBOOK], key_denylist=["(?i)key"], resolve_module=stub_resolver)
 
 
-def test_secret_references_ignores_string_literals_and_filters():
-    refs = secret_references("{{ db_password | b64encode }} {{ 'password' }} {{ x.api_token }}", _patterns(), ())
+def test_flagged_names_ignores_string_literals_and_filters():
+    refs = flagged_names("{{ db_password | b64encode }} {{ 'password' }} {{ x.api_token }}", _patterns(), ())
     assert refs == ["db_password"]
-    assert secret_references(
-        {"a": ["{{ lookup('amazon.aws.ssm_parameter', '/p') }}"]}, _patterns(), ["amazon.aws.*"]
-    ) == ["lookup:amazon.aws.ssm_parameter"]
-    assert secret_references("plain text with password word", _patterns(), ()) == []
-    assert secret_references(42, _patterns(), ()) == []
+    assert flagged_names({"a": ["{{ lookup('amazon.aws.ssm_parameter', '/p') }}"]}, _patterns(), ["amazon.aws.*"]) == [
+        "lookup:amazon.aws.ssm_parameter"
+    ]
+    assert flagged_names("plain text with password word", _patterns(), ()) == []
+    assert flagged_names(42, _patterns(), ()) == []
 
 
 def _patterns():

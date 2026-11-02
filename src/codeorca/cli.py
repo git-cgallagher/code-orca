@@ -407,7 +407,11 @@ def cmd_lint_ansible(args: argparse.Namespace) -> int:
         try:
             findings = lint_playbooks([file], key_denylist, lookup_denylist)
         except Exception as e:  # noqa: BLE001 - a file that does not parse is a finding, not a crash
-            print(f"{file}:0 parse-error error {type(e).__name__}: {str(e).splitlines()[0] if str(e) else ''}")
+            # Only the exception type and the line: a YAML parser's message quotes the offending source line,
+            # which can be a secret in a playbook.
+            line = getattr(getattr(e, "problem_mark", None), "line", None)
+            where = f"{file}:{line + 1}" if isinstance(line, int) else f"{file}:0"
+            print(f"{where} parse-error error {type(e).__name__} (message withheld: it can quote the file)")
             rc = 1
             continue
         for f in findings:

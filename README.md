@@ -15,6 +15,8 @@ approval gate + apply, backend bootstrap and the container follow (see `AGENTS.m
 
 ```bash
 pip install -e '.[dev,ansible]'        # the ansible extra pins ansible-core 2.21; without it the Ansible tests skip
+pip install -e '.[aws]'                # boto3: SSM secrets, the SSM-backed redaction key, the S3 backend bootstrap
+python -m codeorca.bootstrap.s3 --project codeorca.yaml --dry-run   # an s3 backend's would-be diff, writes nothing
 codeorca validate examples/reference/workflows/*.yaml
 codeorca schema export schema          # JSON Schema for editors (yaml-language-server modeline in the examples)
 ```

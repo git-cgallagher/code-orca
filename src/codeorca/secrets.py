@@ -1,9 +1,18 @@
 """Run-wide redaction wiring: one ``SecretRegistry`` per run, seeded before any subprocess starts.
 
-Phase 1 has no SSM wrapper, so the HMAC key comes from the environment variable ``CODEORCA_REDACTION_KEY``
-(its UTF-8 bytes); the key id recorded in spec headers is ``env:<sha256(key)[:8]>``. The SSM-backed key named by
-``redaction.hmac_key`` arrives in Phase 3. A project whose ``redaction.placeholder`` is ``hmac`` fails closed when
-the variable is absent; ``sha256`` mode needs no key.
+The HMAC key (``redaction.placeholder: hmac``) is resolved in this order, and never any other way:
+
+1. ``CODEORCA_REDACTION_KEY`` when it is set (the explicit override, kept from Phase 1): its UTF-8 bytes, key id
+   ``env:<sha256(key)[:8]>``. SSM is not called at all, so a run with the variable set is deterministic and never
+   touches a credential provider.
+2. Otherwise the SSM SecureString named by ``redaction.hmac_key``, fetched through
+   :func:`codeorca.providers.ssm.fetch_parameter` (time-limited) when the caller passes ``key_fetcher`` (the CLI does,
+   see :func:`ssm_key_fetcher`): key id ``<ref>@<version>`` (the spec header names the key and its version, never its
+   value). A parameter that is not a SecureString is refused.
+3. Anything else fails closed (:class:`RedactionKeyMissing`) with a message naming the parameter (never a value):
+   a failed fetch never falls back silently to another key.
+
+``sha256`` mode needs no key.
 
 Seeds (values only; names are recorded nowhere):
 
@@ -31,11 +40,41 @@ ENV_TOKEN_NAMES: tuple[str, ...] = ("AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"
 
 
 class RedactionKeyMissing(RuntimeError):
-    """``placeholder: hmac`` but no key is available in this phase."""
+    """``placeholder: hmac`` but no key could be resolved (the message names the parameter, never a value)."""
+
+
+# ``key_fetcher(ref) -> (key bytes, key id)``; raises on any failure.
+KeyFetcher = Callable[[str], tuple[bytes, str]]
 
 
 def key_id_for(key: bytes) -> str:
     return "env:" + hashlib.sha256(key).hexdigest()[:8]
+
+
+def ssm_key_fetcher(
+    project: Project | None = None, *, session_factory=None, timeout_s: float = 10
+) -> KeyFetcher | None:
+    """The SSM-backed key fetcher for :func:`build_registry`, or ``None`` when boto3 is not installed (and no
+    ``session_factory`` is injected). Region: ``backend.region`` for an s3 backend, else boto3's chain."""
+    from codeorca.providers import project_region
+    from codeorca.providers.ssm import boto3_available, fetch_parameter
+
+    if session_factory is None and not boto3_available():
+        return None
+    region = project_region(project)
+
+    def fetch(ref: str) -> tuple[bytes, str]:
+        param = fetch_parameter(ref, session_factory=session_factory, region=region, timeout_s=timeout_s)
+        if param.type != "SecureString":
+            raise RedactionKeyMissing(
+                f"redaction.hmac_key {ref} is a {param.type} parameter; the redaction key must be a SecureString"
+            )
+        if not param.value:
+            raise RedactionKeyMissing(f"redaction.hmac_key {ref} is empty")
+        version = param.version if param.version is not None else "unknown"
+        return param.value.encode("utf-8"), f"{ref}@{version}"
+
+    return fetch
 
 
 def key_denylist(project: Project | None) -> tuple[str, ...]:
@@ -56,23 +95,55 @@ def env_secret_names(project: Project | None) -> set[str]:
     return names
 
 
-def build_registry(project: Project | None, env: Mapping[str, str]) -> SecretRegistry:
-    """The run's registry: key from ``CODEORCA_REDACTION_KEY`` (hmac) and seeds from the environment."""
+def build_registry(
+    project: Project | None, env: Mapping[str, str], *, key_fetcher: KeyFetcher | None = None
+) -> SecretRegistry:
+    """The run's registry: the HMAC key (order in the module docstring) and seeds from the environment.
+
+    ``key_fetcher`` is how the SSM-backed key is reached (``ssm_key_fetcher(project)``); without it only the
+    environment variable can supply the key."""
     mode = project.redaction.placeholder if project is not None else "hmac"
     raw = env.get(KEY_ENV_VAR)
     if mode == "hmac":
-        if not raw:
-            raise RedactionKeyMissing(
-                f"redaction.placeholder is hmac but {KEY_ENV_VAR} is not set; in this phase the HMAC key comes "
-                "from that environment variable (the SSM-backed key named by redaction.hmac_key arrives in Phase 3)"
-            )
-        key = raw.encode("utf-8")
-        registry = SecretRegistry(key, key_id_for(key), mode="hmac")
+        key, key_id = _resolve_hmac_key(project, raw, key_fetcher)
+        registry = SecretRegistry(key, key_id, mode="hmac")  # registers the key's own text too
     else:
         key = raw.encode("utf-8") if raw else b""
         registry = SecretRegistry(key, key_id_for(key) if key else "none", mode="sha256")
     seed_from_env(registry, project, env)
     return registry
+
+
+def _resolve_hmac_key(project: Project | None, raw: str | None, key_fetcher: KeyFetcher | None) -> tuple[bytes, str]:
+    if raw:
+        key = raw.encode("utf-8")
+        return key, key_id_for(key)
+    ref = project.redaction.hmac_key if project is not None else None
+    if not ref:
+        raise RedactionKeyMissing(
+            f"redaction.placeholder is hmac but no redaction.hmac_key and {KEY_ENV_VAR} is not set"
+        )
+    if key_fetcher is None:
+        raise RedactionKeyMissing(
+            f"redaction.placeholder is hmac: the key {ref} cannot be fetched (no SSM provider: install the aws extra, "
+            f"pip install 'code-orca[aws]') and {KEY_ENV_VAR} is not set"
+        )
+    from codeorca.providers.ssm import SSMError
+
+    try:
+        return key_fetcher(ref)
+    except RedactionKeyMissing:
+        raise
+    except SSMError as e:  # the message names the parameter and a reason code only
+        raise RedactionKeyMissing(
+            f"could not fetch the redaction key {ref}: {e}; refusing to run without it (set {KEY_ENV_VAR} to supply "
+            "an explicit key instead)"
+        ) from None
+    except Exception as e:  # noqa: BLE001 - fail closed, naming the parameter and the error class only
+        raise RedactionKeyMissing(
+            f"could not fetch the redaction key {ref}: {type(e).__name__}; refusing to run without it (set "
+            f"{KEY_ENV_VAR} to supply an explicit key instead)"
+        ) from None
 
 
 def seed_from_env(registry: SecretRegistry, project: Project | None, env: Mapping[str, str]) -> int:

@@ -1,0 +1,25 @@
+# yaml-language-server: $schema=../../../schema/codeorca-workflow.schema.json
+# Create and converge the S3 state backend named by codeorca.yaml's `backend:` block (plan section 5.11), then
+# write each stack's backend.hcl. Idempotent: re-run it as the bucket's drift check (`--dry-run` writes nothing and
+# reports the would-be diff).
+#
+# It applies to projects whose backend.type is s3: it refuses unless `sts get-caller-identity` is
+# backend.account_id, refuses a bucket with an Object Lock default retention, and never reads state objects.
+# The reference project keeps `backend.type: local` so CI needs no AWS account: there the helper refuses with
+# "a local backend has nothing to bootstrap", so this workflow VALIDATES in CI but is not run there.
+# Needs the aws extra (pip install 'code-orca[aws]') and AWS credentials in the environment, passed by name.
+api: codeorca/v1
+kind: workflow
+name: bootstrap-backend
+description: Create and converge the S3 state bucket and write every stack's backend.hcl.
+
+steps:
+  - id: bootstrap
+    type: python
+    script: helpers/bootstrap_backend.py                  # wraps codeorca.bootstrap.s3.main(); project = ../codeorca.yaml
+    timeout: 5m
+    outputs:
+      bucket: "${{ result.output.bucket }}"
+      created: "${{ result.output.created }}"
+      changed: "${{ result.output.changed }}"
+      backend_files: "${{ result.output.backend_files }}"

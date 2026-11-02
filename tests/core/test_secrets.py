@@ -37,7 +37,7 @@ SECRET = "FIXTURE-SECRET-env-token-001"
 def test_hmac_mode_without_the_env_key_fails_closed_naming_the_variable():
     with pytest.raises(RedactionKeyMissing) as e:
         build_registry(PROJECT, {})
-    assert KEY_ENV_VAR in str(e.value) and "Phase 3" in str(e.value)
+    assert KEY_ENV_VAR in str(e.value) and "ssm:/codeorca/redaction-key" in str(e.value)
 
 
 def test_key_id_is_env_prefixed_sha256_prefix_and_the_key_itself_is_registered():

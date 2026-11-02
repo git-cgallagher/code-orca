@@ -17,7 +17,11 @@ Consumers keep their own `codeorca.yaml`, `workflows/`, `specs/` in their own (u
 | `src/codeorca/models.py` | Pydantic v2 models: the single source of truth for workflow files and the JSON Schema |
 | `src/codeorca/config.py` | YAML 1.2 loader (ruamel, pure) |
 | `src/codeorca/cli.py` | `codeorca validate`, `schema export [--check]` (workflow + project schemas), `run` (registers the terraform, ansible and spec-render executors), `drift`, `doctor`, `render`, `summary`, `runs gc`, `lint ansible` (`-p` optional there); every project command takes `-p` |
-| `src/codeorca/secrets.py` | run-wide redaction wiring: `build_registry` (HMAC key from `CODEORCA_REDACTION_KEY` in this phase, fail-closed; seeds from `AWS_SECRET_ACCESS_KEY`/`AWS_SESSION_TOKEN` + every stack's `secrets:`/`required_env` values), `seed_inputs` (inputs whose name matches the key denylist), `line_hook` for `Runner(stream=)`, `record_filter` for `Runner(redact=)`, `terraform_stream` (a `StreamRedactor` per channel) for `TerraformRunner(stream=)` |
+| `src/codeorca/secrets.py` | run-wide redaction wiring: `build_registry(project, env, *, key_fetcher=None)` (HMAC key: `CODEORCA_REDACTION_KEY` when set, SSM not called; else the SecureString `redaction.hmac_key` through `key_fetcher` = `ssm_key_fetcher(project)`, key id `<ref>@<version>`; else fail closed naming the parameter; seeds from `AWS_SECRET_ACCESS_KEY`/`AWS_SESSION_TOKEN` + every stack's `secrets:`/`required_env` values), `seed_inputs` (inputs whose name matches the key denylist), `line_hook` for `Runner(stream=)`, `record_filter` for `Runner(redact=)`, `terraform_stream` (a `StreamRedactor` per channel) for `TerraformRunner(stream=)` |
+| `src/codeorca/providers/` | secret providers (plan 5.9): `ssm.py` (`SSMSecrets(registry, *, session_factory, region, timeout_s)`: `get`/`resolve_secret`/`fetch`, a SecureString or any value fetched as a secret registered before it is returned, per-run in-memory cache, `__reduce__` raises; `fetch_parameter`, `aws_config` (connect/read timeout, `retries={'max_attempts': 2}`), `call_with_deadline` (wall-clock limit on a daemon thread, covers a hung credential provider); errors carry the parameter + error code only); `__init__.py` `make_resolver(project, registry)` (`None` without boto3), `make_secrets`, `declared_secret_refs`, `NO_PROVIDER_MESSAGE`; boto3 is the `aws` extra, imported lazily |
+| `src/codeorca/bootstrap/s3.py` | S3 state-backend bootstrap (plan 5.11; `python -m codeorca.bootstrap.s3 --project … [--dry-run] [--output-file]`, `main(argv)`, `bootstrap(project, *, dry_run, session_factory, timeout_s)`): refuses a local backend and a caller outside `backend.account_id`, creates the bucket, refuses an Object Lock default retention before any write, converges public access block / versioning / encryption / TLS-only policy statement (Sid `CodeOrcaDenyInsecureTransport`, merged) / noncurrent-expiry lifecycle rule (merged by ID) / `managed-by=code-orca` tag, writes each stack's `backend.hcl` (`backend_settings`, `render_backend_hcl`); output `{bucket, region, account_id, created, changed, dry_run, backend_files, diff, notes}`; never touches objects |
+| `examples/reference/helpers/bootstrap_backend.py`, `examples/reference/workflows/bootstrap-backend.yaml` | the reference bootstrap workflow (one `python` step wrapping `codeorca.bootstrap.s3.main`); validates in CI, refuses the reference project's local backend |
+| `tests/providers/`, `tests/bootstrap/` | SSM provider, SSM redaction key and bootstrap tests over moto (`mock_aws` + fake credentials + `AWS_CONFIG_FILE` emptied in an autouse conftest, so a developer's aws-vault profile never engages); never real AWS |
 | `src/codeorca/doctor.py` | `codeorca doctor`: tiny dependency-free version matcher (`exact`, `>=,<`, `7.6.*`, `*`), injectable probes, table / `--json` / `--lock` output |
 | `src/codeorca/specs/` | spec rendering: `__init__.py` (`render_spec_yaml`, `write_spec` + `.meta.yaml` sidecar + the post-write gate, `build_header`, `NEVER_RENDERED`), `terraform_plan.py` (`seed_registry`, `build_plan_document`: merge_unknown -> placeholder mask -> schema mask -> value scrub + key denylist on value trees only, provenance from `configuration.*.expressions`, `never_render`) |
 | `src/codeorca/specs/ansible_vars.py` | the Ansible host spec's **inventory scope**, run as a subprocess (`python -m codeorca.specs.ansible_vars --inventory … --host … [--roles-path …] [--lookup-denylist] [--key-denylist] [--template] [--extra-vars-file] [--play-hosts] [--resolve-lookup]`): one JSON document on stdout (fd 1 is parked, ansible's own output goes to stderr), `declared`/`resolved`/`source` per var templated key by key, `<secret: declared>` from `meta/argument_specs.yml` or `meta/main.yml`'s `argument_specs` (`no_log`, nested too, OR-ed over every role and entry point), `<skipped: key matches denylist>`, `<vault>` (never decrypted), `<skipped: lookup <fqcn> is a secret source>` (lookup denylist by raw name and FQCN, denylist-named arguments, non-literal plugin names), nested denylist-named leaves masked for templating, argument-spec enrichment, `--template` files rendered like the `template` action with the markers in place (a template whose text calls a denied lookup is a marker), extra vars overlaid on top; provenance derived from the `group_vars`/`host_vars` files `DataLoader.find_vars_files` selects; underscore keys (`_play_hosts`, `_lookup_fqcns`, `_skipped_templates`) for the caller only |
@@ -98,7 +102,7 @@ Phase 1 integration (2026-11-01):
   (`tfjson.previous_outputs`); `prior_outputs` is the fallback for outputs with no change entry.
 - **`init -json` and `-migrate-state` are mutually exclusive** on 1.14.7; the `migrate_backend` action (Phase 3) must
   run its init without `-json` (tolerant text parsing) or not at all.
-- **The redaction key is `CODEORCA_REDACTION_KEY` in Phase 1** (bytes of its UTF-8; key id `env:<sha256[:8]>` in
+- **(Superseded in Phase 3: see the Phase 3 gotchas.) The redaction key is `CODEORCA_REDACTION_KEY` in Phase 1** (bytes of its UTF-8; key id `env:<sha256[:8]>` in
   spec headers). There is no SSM wrapper yet, so `redaction.hmac_key` is validated but unused; a project with
   `placeholder: hmac` fails closed when the variable is absent. The key's own text is registered, so it never
   appears in a log either.
@@ -265,6 +269,31 @@ Phase 3 gate / resume / apply (2026-11-02):
   only when the configuration declares `backend "local" {}` explicitly; `-migrate-state -force-copy` from local
   path A to B copies and leaves A in place.
 - **`n` is a YAML 1.1 boolean token**: a gate field (or any key) named `n` fails validation; name it `count`.
+Phase 3, SSM provider and backend bootstrap (2026-11-02):
+- **botocore timeouts do not bound credential resolution.** `connect_timeout`/`read_timeout` cover the HTTP call
+  only; a `credential_process` (aws-vault waiting on a locked keychain) hangs before it. Every code-orca AWS call
+  also runs under `providers.ssm.call_with_deadline` (a daemon thread joined with a wall-clock limit, 4x the
+  per-call timeout by default); the abandoned thread cannot keep the process alive.
+- **`retries={'max_attempts': 2}` means two retries**: botocore normalises it to `total_max_attempts == 3`
+  (legacy mode); assert that, not the dict you passed.
+- **The redaction key's precedence is deliberate**: `CODEORCA_REDACTION_KEY`, when set, wins and SSM is never
+  called (deterministic key id, no credential provider touched in CI or tests); otherwise the SecureString named by
+  `redaction.hmac_key` (key id `<ref>@<version>`; a `String` parameter is refused); a failed fetch never falls back
+  to anything: it fails closed naming the parameter. `build_registry` only reaches SSM when the caller passes
+  `key_fetcher`, so a test that calls it bare stays offline.
+- **AWS tests must neutralise the developer's config**, not just set fake keys: `AWS_PROFILE` and `~/.aws/config`
+  profiles with `credential_process` (aws-vault) would still engage. The conftests drop the profile/role/container
+  variables and point `AWS_CONFIG_FILE`/`AWS_SHARED_CREDENTIALS_FILE` at an empty file under `mock_aws`.
+- **`SecretRegistry` has `__slots__`**: an instance's `add` cannot be monkeypatched; subclass it to spy.
+- **`${` and `%{` are template sequences in an HCL string**, a backend file included: `render_backend_hcl` escapes
+  them (`$${`, `%%{`). `terraform fmt` only accepts `.tf`/`.tfvars`/`.tftest.hcl`: syntax-check a backend file by
+  copying it to `.tfvars`.
+- **S3 settings to compare field by field** (moto 5 and S3 alike): `get_bucket_versioning` returns `{}` with no
+  `Status` on a new bucket; a missing setting is an error code (`NoSuchPublicAccessBlockConfiguration`,
+  `ServerSideEncryptionConfigurationNotFoundError`, `NoSuchBucketPolicy`, `NoSuchLifecycleConfiguration`,
+  `ObjectLockConfigurationNotFoundError`, `NoSuchTagSet`); a policy's `Statement`/`Action`/`Resource` may be a
+  string or a list; `put_bucket_policy`/`put_bucket_lifecycle_configuration`/`put_bucket_tagging` replace the whole
+  set, so the bootstrap merges by Sid / rule ID / tag key. A lifecycle rule needs `Filter` (`{"Prefix": ""}`).
 
 Terraform (1.14.7):
 - `show -json` (plan and state), `output -json`, plan files, the plan's `variables` block and `TF_LOG` all

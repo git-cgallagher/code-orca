@@ -11,6 +11,8 @@ Step statuses and their propagation (the plan's step-semantics table):
   ``omitted``, unrelated steps are ``cancelled``; a step whose ``when`` names an override function is still
   evaluated and runs if it is ``True``.
 - ``waiting``: an executor (a gate) asked the run to stop; scheduling stops, the run is persisted, exit 3.
+  ``finally`` steps do NOT run at a wait: the run is not over, and they run once, at its real end, after
+  ``codeorca resume`` (``codeorca.resume``) decided the gate.
 - ``cached``: reserved for ``cache:`` (not implemented in this phase).
 
 ``redact`` (optional) is applied to every record the runner persists: run.json (inputs, vars, step states),
@@ -20,9 +22,12 @@ an input or echoed by a step never reaches the run directory in clear.
 Outputs are evaluated from the executor's typed ``result`` only for ``succeeded`` steps; every other status
 leaves ``steps.<id>.outputs`` as ``None`` so a bare reference raises and ``| default()`` works (expr.py).
 
+Resume (``Runner.restore``): a runner built from a persisted run.json replays every step that already has a
+status (its status and outputs come from run.json, the executor is not called again), runs the steps that never
+ran, then ``finally``. ``codeorca.resume`` decides the waiting gate first (``settle``).
+
 Deliberately NOT implemented in this phase (the runner raises ``NotImplementedInPhase`` when a workflow uses
-them): ``for_each``, ``cache: {sources, status}``, ``max_parallel > 1``, and resume (run.json is persisted
-with everything a resume needs, but nothing reads it back yet).
+them): ``for_each``, ``cache: {sources, status}``, ``max_parallel > 1``.
 
 Exit codes: 0 every step succeeded (or was skipped/omitted/failed-with-continue), 1 a blocking failure,
 3 waiting at a gate.
@@ -30,6 +35,7 @@ Exit codes: 0 every step succeeded (or was skipped/omitted/failed-with-continue)
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -139,6 +145,8 @@ class StepContext:
     attempt: int = 1
     env: dict[str, str] = field(default_factory=dict)
     stream: Callable[[str, str], str] | None = None
+    # the whole workflow, for executors that need the graph (an apply checks the gates it transitively needs)
+    workflow: Workflow | None = None
 
     def line_filter(self, name: str) -> Callable[[str], str] | None:
         if self.stream is None:
@@ -158,6 +166,11 @@ def _render_obj(obj: Any, ctx: Mapping[str, Any]) -> Any:
 
 def _now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
+
+
+def workflow_sha256(workflow: Workflow) -> str:
+    """A digest of the validated workflow: a resume refuses when the workflow changed since the run stopped."""
+    return hashlib.sha256(workflow.model_dump_json(by_alias=True).encode("utf-8")).hexdigest()
 
 
 def _git_sha(cwd: Path | None) -> str | None:
@@ -245,6 +258,7 @@ class Runner:
         redact: Callable[[Any], Any] | None = None,
         sleep: Callable[[float], None] = time.sleep,
         cwd: Path | None = None,
+        _restored: Mapping[str, Any] | None = None,
     ):
         self.project = project
         self.workflow = workflow
@@ -256,7 +270,9 @@ class Runner:
         self.redact = redact  # applied to every record the runner persists (run.json, result.json, outputs)
         self.sleep = sleep
         self.cwd = cwd
-        self.inputs = resolve_inputs(workflow, inputs)
+        # a restored run keeps its persisted inputs verbatim: a redacted value (``<redacted:key>``) of an int
+        # input must not be re-coerced; ``codeorca.resume`` overlays the secret inputs supplied again
+        self.inputs = dict(inputs) if _restored is not None else resolve_inputs(workflow, inputs)
         self._check_supported()
         self.steps: dict[str, Any] = {s.id: s for s in workflow.steps}
         self.states: dict[str, dict[str, Any]] = {
@@ -268,9 +284,69 @@ class Runner:
         self.started = _now()
         self.exit_code: int | None = None
         self.transient = [re.compile(p) for p in (project.policy.transient_errors if project else [])]
+        self.workflow_sha256 = workflow_sha256(workflow)
+        self.resumes: list[dict[str, Any]] = []
+        if _restored is not None:
+            self._restore(_restored)
+            return  # nothing is persisted until the resumed run starts (run.json stays the waiting record)
         self.git_sha = _git_sha(cwd)
         self.vars = self._render_vars()  # once, over the inputs only: run.json carries RESOLVED vars
         self.persist()  # the run exists on disk as soon as it is created
+
+    @classmethod
+    def restore(
+        cls,
+        project: Project | None,
+        workflow: Workflow,
+        record: Mapping[str, Any],
+        run_dir: RunDir,
+        executors: Mapping[str, Executor],
+        *,
+        inputs: Mapping[str, Any] | None = None,
+        vars: Mapping[str, Any] | None = None,
+        env: Mapping[str, str] | None = None,
+        stream: Callable[[str, str], str] | None = None,
+        redact: Callable[[Any], Any] | None = None,
+        sleep: Callable[[float], None] = time.sleep,
+        cwd: Path | None = None,
+    ) -> Runner:
+        """A runner over a persisted run (run.json ``record``): states, outputs, start time, git SHA and dry-run
+        flag come from the record; ``inputs``/``vars`` default to the persisted ones (the caller passes them when
+        it re-supplied redacted secret inputs). Steps that already have a status are replayed, not re-run."""
+        runner = cls(
+            project,
+            workflow,
+            dict(record.get("inputs") or {}) if inputs is None else inputs,
+            run_dir,
+            executors,
+            bool(record.get("dry_run")),
+            env=env,
+            stream=stream,
+            redact=redact,
+            sleep=sleep,
+            cwd=cwd,
+            _restored=record,
+        )
+        if vars is not None:
+            runner.vars = dict(vars)
+        return runner
+
+    def _restore(self, record: Mapping[str, Any]) -> None:
+        if record.get("run_id") != self.run_dir.run_id:
+            raise RunError(f"run.json names run {record.get('run_id')!r}, not {self.run_dir.run_id!r}")
+        self.started = record.get("started") or self.started
+        self.git_sha = record.get("git_sha")
+        self.vars = dict(record.get("vars") or {})
+        self.resumes = list(record.get("resumes") or [])
+        persisted = record.get("steps") or {}
+        for sid, state in self.states.items():
+            if isinstance(persisted.get(sid), dict):
+                state.update(persisted[sid])
+        # what fail_fast decided before the stop still holds
+        for s in [*self.workflow.steps, *self.workflow.finally_]:
+            st = self.states[s.id]["status"]
+            if st in ("failed", "errored") and s.on_failure != "continue" and self.workflow.fail_fast:
+                self.cancelled = True
 
     def _render_vars(self) -> dict[str, Any]:
         """Workflow ``vars`` rendered over ``inputs``/``run``/``project`` (never ``steps``: a var is fixed for the
@@ -336,6 +412,7 @@ class Runner:
         self.persist(finished=True)
 
     def _run(self) -> int:
+        self.status = "running"
         self.persist()
         sorter = TopologicalSorter(self.workflow.graph())
         sorter.prepare()
@@ -343,19 +420,29 @@ class Runner:
         while sorter.is_active() and not waiting:
             ready = sorted(sorter.get_ready(), key=lambda sid: list(self.steps).index(sid))
             for sid in ready:
+                if self.states[sid]["status"] is not None:
+                    # a resumed run: this step finished before the stop; its status and outputs are replayed
+                    sorter.done(sid)
+                    if self.states[sid]["status"] == "waiting":
+                        waiting = True
+                        break
+                    continue
                 status = self._run_step(self.steps[sid], final=False)
                 sorter.done(sid)
                 if status == "waiting":
                     waiting = True
                     break
         if waiting:
+            # the run is not over: finally steps run once, at the real end, after the gate is decided (resume)
             self.status = "waiting"
         else:
             self.status = "failed" if self._blocked() else "succeeded"
-        for step in self.workflow.finally_:
-            self._run_step(step, final=True)
-        if self.status != "waiting" and self._blocked():
-            self.status = "failed"
+            for step in self.workflow.finally_:
+                if self.states[step.id]["status"] is not None:
+                    continue  # ran before a stop (a run.json written before finally moved to the real end)
+                self._run_step(step, final=True)
+            if self._blocked():
+                self.status = "failed"
         self.exit_code = {"succeeded": EXIT_OK, "failed": EXIT_FAILED, "waiting": EXIT_WAITING}[self.status]
         self.persist(finished=True)
         return self.exit_code
@@ -437,6 +524,10 @@ class Runner:
                 break
             self.sleep(self._backoff(step, attempt))
         assert result is not None
+        return self._record_result(step, result)
+
+    def _record_result(self, step, result: StepResult) -> str:
+        state = self.states[step.id]
         self.run_dir.write_result(
             step.id, self._scrub({"status": result.status, "attempts": state["attempts"], **result.result})
         )
@@ -449,6 +540,22 @@ class Runner:
             except ExpressionError as e:
                 status, error = "errored", str(e)
         return self._finish(step, status, outputs, result.result, error)
+
+    def settle(self, step_id: str, result: StepResult) -> str:
+        """Decide a step that is ``waiting`` (a gate, from ``codeorca.resume``): its result.json, outputs and
+        status are recorded exactly as if its executor had returned ``result``; returns the final status."""
+        state = self.states.get(step_id)
+        if state is None or state["status"] != "waiting":
+            raise RunError(f"step {step_id!r} is not waiting")
+        if result.status == "waiting":
+            raise RunError(f"step {step_id!r}: a waiting step must be decided, not left waiting")
+        step = self.steps[step_id]
+        state["status"] = None  # _finish sets it; _outputs must not see the stale 'waiting'
+        return self._record_result(step, result)
+
+    def add_resume(self, entry: Mapping[str, Any]) -> None:
+        """Record one resume (``{gate, decision, approver, resumed_at}``) in run.json."""
+        self.resumes.append(dict(entry))
 
     def _finish(self, step, status: str, outputs, result, error: str | None) -> str:
         state = self.states[step.id]
@@ -503,6 +610,7 @@ class Runner:
             attempt=attempt,
             env=env,
             stream=self.stream,
+            workflow=self.workflow,
         )
         try:
             return self.executors[rendered.type](rendered, ctx)
@@ -545,10 +653,12 @@ class Runner:
 
     # --- persistence -----------------------------------------------------------------------------------------
     def record(self, finished: bool = False) -> dict[str, Any]:
+        last = self.resumes[-1] if self.resumes else {}
         return {
             "run_id": self.run_dir.run_id,
             "codeorca": __version__,
             "workflow": self.workflow.name,
+            "workflow_sha256": self.workflow_sha256,
             "project": self.project.project if self.project else None,
             "git_sha": self.git_sha,
             "dry_run": self.dry_run,
@@ -559,6 +669,9 @@ class Runner:
             "started": self.started,
             "finished": _now() if finished else None,
             "steps": self.states,
+            "resumes": self.resumes,
+            "resumed_at": last.get("resumed_at"),
+            "decision": last.get("decision"),
         }
 
     def persist(self, finished: bool = False) -> None:

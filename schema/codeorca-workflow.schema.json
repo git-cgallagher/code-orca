@@ -406,11 +406,12 @@
           "type": "array"
         },
         "fields": {
-          "additionalProperties": {
-            "additionalProperties": true,
-            "type": "object"
-          },
           "default": {},
+          "patternProperties": {
+            "^[A-Za-z_][A-Za-z0-9_]*$": {
+              "$ref": "#/$defs/GateField"
+            }
+          },
           "title": "Fields",
           "type": "object"
         }
@@ -421,6 +422,47 @@
         "message"
       ],
       "title": "Gate",
+      "type": "object"
+    },
+    "GateField": {
+      "additionalProperties": false,
+      "description": "A typed value the approver types at the gate; exposed as ``steps.<gate>.outputs.<name>``.",
+      "properties": {
+        "type": {
+          "default": "string",
+          "enum": [
+            "string",
+            "int",
+            "bool"
+          ],
+          "title": "Type",
+          "type": "string"
+        },
+        "required": {
+          "default": false,
+          "title": "Required",
+          "type": "boolean"
+        },
+        "default": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "integer"
+            },
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Default"
+        }
+      },
+      "title": "GateField",
       "type": "object"
     },
     "Input": {

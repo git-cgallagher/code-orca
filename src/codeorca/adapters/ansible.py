@@ -30,9 +30,13 @@ Command contract (verified on ansible-core 2.21.5):
   module it runs and anything that module started are in groups of their own and outlive the leader. On a timeout
   the adapter lists the leader's descendants first (``ps -axo pid=,ppid=``), SIGKILLs every one of them and their
   groups, then the leader's group, and raises ``AnsibleTimeout``.
-- Exit codes are ansible-playbook's, a bitmask: 0 ok, 1 error, 2 failed hosts, 4 unreachable hosts (2|4 = 6 when
-  both), 8 parser error, 250 unexpected. ``failed_hosts``/``unreachable_hosts`` come from the stats event
-  (``ignore_errors`` and rescued tasks produce failed results that are not failures).
+- Exit codes are ansible-playbook's (``ansible.errors.ExitCode`` at 2.21.5), NOT a usable bitmask: 0 ok, 1 error,
+  2 failed hosts, 4 unreachable hosts **and** ``PARSER_ERROR`` (both are 4: a playbook that does not parse exits 4
+  with no stats), 5 invalid CLI option, 99 interrupted, 250 unexpected. A run with failed and unreachable hosts
+  exits 4 (the strategy returns unreachable first), and ``RUN_FAILED_BREAK_PLAY`` (8) never leaves
+  ``PlaybookExecutor`` (it becomes 2). So :meth:`AnsibleResult.describe` builds the status from the stats event:
+  ``failed_hosts``/``unreachable_hosts`` come from it (``ignore_errors``, ``ignore_unreachable`` and rescued tasks
+  produce failed results that are not failures), and a non-zero exit with no stats event is a parser/CLI error.
 """
 
 from __future__ import annotations
@@ -87,7 +91,9 @@ RC_OK = 0
 RC_ERROR = 1
 RC_FAILED = 2
 RC_UNREACHABLE = 4
-RC_PARSER = 8
+RC_PARSER = 4  # ExitCode.PARSER_ERROR == HOST_UNREACHABLE on 2.21.5 ("FIXME: conflicts" upstream)
+RC_INVALID_CLI = 5
+RC_INTERRUPTED = 99
 RC_UNEXPECTED = 250
 STAT_KEYS = ("ok", "changed", "failed", "unreachable", "skipped", "rescued", "ignored")
 
@@ -111,21 +117,20 @@ def callback_plugins_dir() -> Path:
     return Path(callback.__file__).resolve().parent
 
 
+_RC_TEXT = {
+    RC_OK: "ok",
+    RC_ERROR: "error",
+    RC_FAILED: "failed hosts",
+    RC_UNREACHABLE: "unreachable hosts or parser error",
+    RC_INVALID_CLI: "invalid command-line option",
+    RC_INTERRUPTED: "interrupted",
+    RC_UNEXPECTED: "unexpected error",
+}
+
+
 def describe_rc(rc: int) -> str:
-    if rc == RC_OK:
-        return "ok"
-    if rc == RC_ERROR:
-        return "error"
-    if rc == RC_PARSER:
-        return "parser error"
-    if rc == RC_UNEXPECTED:
-        return "unexpected error"
-    parts = []
-    if rc & RC_FAILED:
-        parts.append("failed hosts")
-    if rc & RC_UNREACHABLE:
-        parts.append("unreachable hosts")
-    return " and ".join(parts) if parts else f"exit {rc}"
+    """The exit code alone (prefer :meth:`AnsibleResult.describe`, which reads the stats): 4 is ambiguous."""
+    return _RC_TEXT.get(rc, f"exit {rc}")
 
 
 @dataclass
@@ -145,12 +150,37 @@ class AnsibleResult:
     def ok(self) -> bool:
         return self.rc == RC_OK
 
+    @property
+    def stats_seen(self) -> bool:
+        """A stats event arrived: the playbook parsed and ran (a parser or CLI error never emits one)."""
+        return any(event.get("type") == "stats" for event in self.events)
+
+    def describe(self) -> str:
+        """The status from the stats, not the exit code (4 is both "unreachable" and "parser error")."""
+        if self.rc == RC_OK:
+            return "ok"
+        if not self.stats_seen:
+            return "parser error" if self.rc == RC_PARSER else describe_rc(self.rc)
+        parts = []
+        if self.failed_hosts:
+            parts.append("failed hosts")
+        if self.unreachable_hosts:
+            parts.append("unreachable hosts")
+        return " and ".join(parts) if parts else describe_rc(self.rc)
+
     def last_failure(self) -> dict[str, Any] | None:
-        """The last ``runner``/``item`` event with status ``failed`` or ``unreachable`` that was not ignored."""
+        """The last ``runner``/``item`` event with status ``failed`` (``unreachable``) that was not ignored, for a
+        host the stats count as failed (unreachable). A rescued failure or an ``ignore_unreachable`` result is a
+        failed event too, for a host the stats do not count, so it never replaces the real failure. Without a
+        stats event (the run was killed) every non-ignored failure counts."""
+        hosts = {"failed": set(self.failed_hosts), "unreachable": set(self.unreachable_hosts)}
         for event in reversed(self.events):
-            if event.get("type") in ("runner", "item") and event.get("status") in ("failed", "unreachable"):
-                if not event.get("ignore_errors"):
-                    return event
+            status = event.get("status")
+            if event.get("type") not in ("runner", "item") or status not in hosts or event.get("ignore_errors"):
+                continue
+            if self.stats_seen and event.get("host") not in hosts[status]:
+                continue
+            return event
         return None
 
 

@@ -591,7 +591,8 @@ def execute(step, ctx: StepContext, registry: SecretRegistry) -> StepResult:
     outputs = {"path": result["path"]}
     if play_rc not in (None, 0):
         failed = "; ".join(f"{k}: {v}" for k, v in (document.get("errors", {}).get("play") or {}).items())
-        error = f"play scope exited {play_rc} ({describe_rc(play_rc)})" + (f"; {failed}" if failed else "")
+        status = (play_result or {}).get("status_text") or describe_rc(play_rc)
+        error = f"play scope exited {play_rc} ({status})" + (f"; {failed}" if failed else "")
         return StepResult("failed", outputs=outputs, result=result, error=registry.redact(error)[:_ERROR_LIMIT])
     return StepResult("succeeded", outputs=outputs, result=result)
 
@@ -689,6 +690,11 @@ def _run_play_scope(
         argv = [[registry.redact(a) for a in r.argv] for r in runner.history]
         (ctx.step_dir / "argv.json").write_text(json.dumps(argv, indent=2) + "\n", encoding="utf-8")
     parsed["roles"] = roles
+    parsed["status_text"] = outcome.describe()
+    if not outcome.stats_seen and outcome.rc != 0 and outcome.stderr_lines:
+        # a play that did not parse leaves its reason on stderr only
+        tail = "\n".join(outcome.stderr_lines).strip()[-500:]
+        parsed.setdefault("errors", {})["ansible-playbook"] = registry.redact(tail)
     return parsed, outcome.rc
 
 

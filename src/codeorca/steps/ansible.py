@@ -48,7 +48,6 @@ from codeorca.adapters.ansible import (
     AnsibleResult,
     AnsibleRunner,
     AnsibleTimeout,
-    describe_rc,
     generate_inventory,
     generate_role_playbook,
     plain_tree,
@@ -231,7 +230,7 @@ def execute(step, ctx: StepContext, registry: SecretRegistry) -> StepResult:
 
     result = {
         "rc": outcome.rc,
-        "status_text": describe_rc(outcome.rc),
+        "status_text": outcome.describe(),
         "stats": redact_tree(outcome.stats, registry),
         "failed_hosts": [registry.redact(h) for h in outcome.failed_hosts],
         "unreachable_hosts": [registry.redact(h) for h in outcome.unreachable_hosts],
@@ -293,7 +292,7 @@ def _prepare_inventory(
 
 
 def _failure_text(outcome: AnsibleResult) -> str:
-    parts = [f"ansible-playbook exited {outcome.rc} ({describe_rc(outcome.rc)})"]
+    parts = [f"ansible-playbook exited {outcome.rc} ({outcome.describe()})"]
     if outcome.failed_hosts:
         parts.append("failed hosts: " + ", ".join(outcome.failed_hosts))
     if outcome.unreachable_hosts:
@@ -303,7 +302,8 @@ def _failure_text(outcome: AnsibleResult) -> str:
         # never the exception text of a no_log result: it is the uncensored fail/assert message
         msg = last.get("msg") or (None if last.get("no_log") else last.get("exception")) or ""
         parts.append(f"last failure: [{last.get('host')}] {last.get('task')}: {msg}".rstrip(": "))
-    elif outcome.rc not in (2, 4, 6) and outcome.stderr_lines:
+    elif not (outcome.failed_hosts or outcome.unreachable_hosts) and outcome.stderr_lines:
+        # no host failed (a parser/CLI error exits 4 or 5 with no stats): the reason is only on stderr
         tail = "\n".join(outcome.stderr_lines).strip()[-_ERROR_LIMIT // 2 :]
         parts.append(tail)
     return "; ".join(parts)

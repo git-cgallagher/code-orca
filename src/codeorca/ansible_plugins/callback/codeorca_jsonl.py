@@ -26,7 +26,8 @@ otherwise, so a consumer can rely on the names):
 ``host``             the inventory host name (``runner``/``item``/``retry``/``notify``)
 ``status``           ``runner``/``item``: ``ok``, ``failed``, ``unreachable`` or ``skipped``
 ``changed``          bool (``runner``/``item``)
-``ignore_errors``    bool: the failure was ignored (``runner``/``item`` with status ``failed``)
+``ignore_errors``    bool: the failure was ignored (``runner``/``item`` with status ``failed``; ``unreachable``
+                     under ``ignore_unreachable``)
 ``no_log``           bool: the result was censored by ``no_log`` (Ansible did it; ``result`` holds the censored dict,
                      and ``exception``/``warnings``/``deprecations`` are ``null``: Ansible censors ``result.result``
                      but not ``TaskResult.exception``, which carries a ``fail``/``assert`` message verbatim)
@@ -296,7 +297,9 @@ class CallbackModule(CallbackBase):
         self._result_event("runner", result, "failed", ignore_errors=ignore_errors)
 
     def v2_runner_on_unreachable(self, result):
-        self._result_event("runner", result, "unreachable")
+        # ignore_unreachable: the stats count it as ignored, not unreachable
+        ignored = bool(getattr(result.task, "ignore_unreachable", False))
+        self._result_event("runner", result, "unreachable", ignore_errors=ignored)
 
     def v2_runner_on_skipped(self, result):
         self._result_event("runner", result, "skipped")

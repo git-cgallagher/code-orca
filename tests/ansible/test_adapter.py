@@ -56,14 +56,31 @@ def run_fixture(tmp_path: Path, *, do_fail: bool, check: bool = False, env: dict
 # ---------------------------------------------------------------------------------------- pure functions
 
 
-def test_describe_rc_is_a_bitmask():
+def test_describe_rc_knows_4_is_ambiguous_and_describe_reads_the_stats():
     assert describe_rc(0) == "ok"
     assert describe_rc(2) == "failed hosts"
-    assert describe_rc(4) == "unreachable hosts"
-    assert describe_rc(6) == "failed hosts and unreachable hosts"
+    assert describe_rc(4) == "unreachable hosts or parser error"  # ExitCode.PARSER_ERROR == HOST_UNREACHABLE
     assert describe_rc(1) == "error"
-    assert describe_rc(8) == "parser error"
+    assert describe_rc(5) == "invalid command-line option"
+    assert describe_rc(99) == "interrupted"
     assert describe_rc(250) == "unexpected error"
+    stats = {"type": "stats", "stats": {}}
+    assert AnsibleResult(4, events=[]).describe() == "parser error"  # no stats event: nothing ran
+    assert AnsibleResult(4, events=[stats], unreachable_hosts=["a"]).describe() == "unreachable hosts"
+    both = AnsibleResult(4, events=[stats], failed_hosts=["b"], unreachable_hosts=["a"])
+    assert both.describe() == "failed hosts and unreachable hosts"  # one run, rc 4 (unreachable wins)
+
+
+def test_last_failure_ignores_rescued_and_ignore_unreachable_results():
+    events = [
+        {"type": "runner", "host": "a", "task": "real", "status": "failed", "msg": "the-real-failure"},
+        {"type": "runner", "host": "b", "task": "rescued step", "status": "failed", "msg": "rescued"},
+        {"type": "runner", "host": "dead", "task": "ping", "status": "unreachable", "ignore_errors": True},
+        {"type": "runner", "host": "c", "task": "rescued later", "status": "unreachable", "msg": "noise"},
+        {"type": "stats", "stats": {}},
+    ]
+    result = AnsibleResult(2, events=events, failed_hosts=["a"])
+    assert result.last_failure()["msg"] == "the-real-failure"
 
 
 def test_summarize_reads_stats_and_check_unsupported():
@@ -349,7 +366,7 @@ def test_unreachable_host_maps_to_exit_4(tmp_path):
     assert result.rc == adapter.RC_UNREACHABLE
     assert result.unreachable_hosts == ["nowhere"] and result.failed_hosts == []
     assert result.last_failure()["status"] == "unreachable"
-    assert describe_rc(result.rc) == "unreachable hosts"
+    assert result.describe() == "unreachable hosts"
 
 
 # ------------------------------------------------------------------------------- callback edge cases (review)
@@ -433,3 +450,17 @@ def test_ascii_escaped_json_still_matches_a_registered_non_ascii_value():
     reg.add(value)
     line = json.dumps({"msg": value}, ensure_ascii=True)  # what the callback prints now
     assert reg.count_matches(line) == 1 and "caf" not in reg.redact(line)
+
+
+@requires_ansible
+def test_a_playbook_that_does_not_parse_reports_the_parser_error(tmp_path):
+    from codeorca.steps.ansible import _failure_text
+
+    playbook = tmp_path / "bad.yml"
+    playbook.write_text("- hosts: all\n  tasks:\n    - debug: {msg: x}\n      bogus_keyword: 1\n")
+    runner = AnsibleRunner(FIXTURES, dict(os.environ), local_temp=tmp_path / "tmp")
+    result = runner.run(playbook, FIXTURES / "inventory.yml", timeout=120)
+    assert result.rc == 4 and not result.stats_seen
+    assert result.describe() == "parser error"
+    text = _failure_text(result)
+    assert "parser error" in text and "bogus_keyword" in text

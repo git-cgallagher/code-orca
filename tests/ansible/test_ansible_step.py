@@ -334,3 +334,33 @@ def test_live_inventory_is_deleted_when_writing_the_extra_vars_fails(project_roo
     assert not (r.run_dir.handoff_dir / "cfg").exists()
     leftovers = [p for p in r.run_dir.path.rglob("*") if p.is_file() and "InventoryPw" in p.read_text(errors="ignore")]
     assert leftovers == []
+
+
+@requires_ansible
+def test_role_step_keeps_ansible_cfg_collection_paths_and_gathers_facts(project_root, tmp_path):
+    # collections/ holding only requirements.yml (the AWX/EE convention) must not replace the configured paths
+    (project_root / "collections").mkdir()
+    (project_root / "collections" / "requirements.yml").write_text("collections: []\n")
+    role = project_root / "mycolls" / "ansible_collections" / "exns" / "excoll" / "roles" / "facts"
+    (role / "tasks").mkdir(parents=True)
+    (role / "tasks" / "main.yml").write_text(
+        "- name: needs facts\n  ansible.builtin.debug:\n    msg: \"system={{ ansible_facts['system'] }}\"\n"
+    )
+    (project_root / "ansible.cfg").write_text("[defaults]\ncollections_path = ./mycolls\n")
+    project = load_project(project_root / "codeorca.yaml")
+    step = ansible(id="role", role="exns.excoll.facts")
+    del step["playbook"]
+    rc, r = run(project, workflow([step]), tmp_path, registry())
+    assert rc == EXIT_OK, r.states["role"].get("error")
+    names = json.loads((r.run_dir.steps_dir / "role" / "env-names.json").read_text())
+    assert "ANSIBLE_COLLECTIONS_PATH" not in names
+    assert '"gather_facts": true' in (r.run_dir.steps_dir / "role" / "playbook.yml").read_text()
+    assert not (r.run_dir.handoff_dir / "role").exists()
+
+
+def test_gather_facts_is_for_role_steps_only():
+    with pytest.raises(ValueError, match="gather_facts is for role steps"):
+        workflow([ansible(gather_facts=False)])
+    step = ansible(role="ns.c.r", gather_facts=False)
+    del step["playbook"]
+    assert workflow([step]).steps[0].gather_facts is False

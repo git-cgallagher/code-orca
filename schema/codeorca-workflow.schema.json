@@ -171,6 +171,18 @@
           ],
           "title": "Check Unsupported",
           "type": "string"
+        },
+        "gather_facts": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Gather Facts"
         }
       },
       "required": [

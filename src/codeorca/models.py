@@ -98,11 +98,15 @@ class Ansible(StepBase):
     skip_tags: list[str] = []
     limit: str | None = None
     check_unsupported: Literal["warn", "fail", "ignore"] = "warn"
+    # role steps only: the generated play's gather_facts (default true, as Ansible's own); a playbook sets its own
+    gather_facts: bool | None = None
 
     @model_validator(mode="after")
     def _playbook_xor_role(self):
         if bool(self.playbook) == bool(self.role):
             raise ValueError("ansible step needs exactly one of playbook or role")
+        if self.playbook and self.gather_facts is not None:
+            raise ValueError("gather_facts is for role steps; a playbook sets gather_facts in its own plays")
         return self
 
 

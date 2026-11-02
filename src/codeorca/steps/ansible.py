@@ -4,9 +4,10 @@ the extra-vars handoff as 0600 files that exist only while the playbook runs.
 What a step does, in order:
 
 1. resolve the playbook (``project.root`` relative; the current directory when there is no project) or, for
-   ``role:``, generate a one-task ``import_role`` playbook into the step dir (``playbook.yml``; the project's
-   ``roles/`` and ``collections/`` are put on ``ANSIBLE_ROLES_PATH`` / ``ANSIBLE_COLLECTIONS_PATH`` when they exist,
-   because a generated playbook does not sit next to them);
+   ``role:``, generate a one-task ``import_role`` playbook (``gather_facts`` from the step, default true) into the
+   handoff dir with **symlinks** ``roles`` and ``collections`` next to it pointing at the project's (playbook-adjacent
+   dirs are on Ansible's search path; setting ``ANSIBLE_ROLES_PATH``/``ANSIBLE_COLLECTIONS_PATH`` would replace the
+   defaults and any ``ansible.cfg`` paths); a copy is kept as ``<step dir>/playbook.yml``;
 2. register, **before** the process starts, every ``extra_vars`` and inline-inventory leaf whose key matches the
    key denylist (``ansible_password``, ``db_token`` ...); a value too short for the registry is reported by name
    under ``unprotected_vars``;
@@ -128,11 +129,29 @@ def _resolve_under(root: Path, relative: str, what: str) -> Path:
     return path
 
 
-def _prepend_path(env: dict[str, str], name: str, directory: Path) -> None:
-    if not directory.is_dir():
-        return
-    existing = env.get(name)
-    env[name] = f"{directory}{os.pathsep}{existing}" if existing else str(directory)
+def link_search_dirs(directory: Path, roles: Path | None, collections: Path | None) -> None:
+    """``<directory>/roles`` and ``<directory>/collections`` as symlinks to the given dirs (when they exist).
+    Playbook-adjacent ``roles``/``collections`` are on Ansible's search path, so a generated playbook finds the
+    project's roles without ``ANSIBLE_ROLES_PATH``/``ANSIBLE_COLLECTIONS_PATH``, which would replace Ansible's
+    defaults (``~/.ansible/collections``, ``/usr/share/ansible/...``) and any ``ansible.cfg`` paths."""
+    for name, target in (("roles", roles), ("collections", collections)):
+        if target is not None and target.is_dir() and not (directory / name).exists():
+            (directory / name).symlink_to(target.resolve(), target_is_directory=True)
+
+
+def _write_role_playbook(path: Path, text: str, root: Path) -> None:
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(path.parent, 0o700)
+    path.write_text(text, encoding="utf-8")
+    link_search_dirs(
+        path.parent,
+        _first_dir(root / "roles", root / "ansible" / "roles"),
+        _first_dir(root / "collections", root / "ansible" / "collections"),
+    )
+
+
+def _first_dir(*candidates: Path) -> Path | None:
+    return next((c for c in candidates if c.is_dir()), None)
 
 
 def _write_json(path: Path, data: Any) -> None:
@@ -160,11 +179,12 @@ def execute(step, ctx: StepContext, registry: SecretRegistry) -> StepResult:
     env.update({k: str(v) for k, v in config.env.items()})
     if step.playbook:
         playbook = _resolve_under(root, str(step.playbook), "playbook")
+        kept_playbook = playbook
     else:
-        playbook = step_dir / GENERATED_PLAYBOOK
-        playbook.write_text(generate_role_playbook(str(step.role)), encoding="utf-8")
-        _prepend_path(env, "ANSIBLE_ROLES_PATH", root / "roles")
-        _prepend_path(env, "ANSIBLE_COLLECTIONS_PATH", root / "collections")
+        text = generate_role_playbook(str(step.role), gather_facts=step.gather_facts is not False)
+        kept_playbook = step_dir / GENERATED_PLAYBOOK
+        kept_playbook.write_text(text, encoding="utf-8")
+        playbook = handoff_dir / GENERATED_PLAYBOOK  # written inside the try below, next to its search-path links
 
     warnings: list[str] = []
     if unprotected:
@@ -190,6 +210,8 @@ def execute(step, ctx: StepContext, registry: SecretRegistry) -> StepResult:
         try:
             # inside the try: the live inventory may hold ansible_password & co., and anything that raises after it
             # was written (a TypeError while dumping the extra vars) must still delete it
+            if not step.playbook:
+                _write_role_playbook(playbook, kept_playbook.read_text(encoding="utf-8"), root)
             inventory_path, kept_inventory = _prepare_inventory(
                 step, root, inline, handoff_dir, step_dir, registry, denylist
             )
@@ -240,7 +262,7 @@ def execute(step, ctx: StepContext, registry: SecretRegistry) -> StepResult:
         "stderr_path": str(step_dir / STDERR_FILE),
         "inventory_path": str(kept_inventory),
         "extra_vars_path": str(kept_extra_vars) if kept_extra_vars else None,
-        "playbook": str(playbook),
+        "playbook": str(kept_playbook),
         "duration_s": outcome.duration_s,
         "registered_vars": registered,
         "unprotected_vars": unprotected,

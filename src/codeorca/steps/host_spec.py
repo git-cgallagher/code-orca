@@ -93,6 +93,7 @@ from codeorca.specs.ansible_vars import (
     load_argument_specs,
     lookup_skip_reason,
 )
+from codeorca.steps.ansible import link_search_dirs
 
 HOST_VARS_FILE = "host-vars.json"
 PLAY_FILE = "play-scope.yml"
@@ -653,17 +654,17 @@ def _run_play_scope(
     write_private(ctx.step_dir / PLAY_FILE, registry.redact(text))
     play_vars_file = write_handoff(handoff, PLAY_VARS_FILE, {**dict(extra_vars), **markers})
 
+    # the roles dirs and the collections dir as playbook-adjacent symlinks: ANSIBLE_ROLES_PATH /
+    # ANSIBLE_COLLECTIONS_PATH would replace Ansible's defaults and any ansible.cfg paths
     play_env = dict(env)
-    paths = [str(d) for d in roles_dirs]
-    if play_env.get("ANSIBLE_ROLES_PATH"):
-        paths.append(play_env["ANSIBLE_ROLES_PATH"])
-    if paths:
-        play_env["ANSIBLE_ROLES_PATH"] = os.pathsep.join(paths)
-    if (root / "collections").is_dir():
-        existing = play_env.get("ANSIBLE_COLLECTIONS_PATH")
-        play_env["ANSIBLE_COLLECTIONS_PATH"] = str(root / "collections") + (
-            f"{os.pathsep}{existing}" if existing else ""
-        )
+    links = handoff / "roles"
+    links.mkdir(mode=0o700, exist_ok=True)
+    for directory in roles_dirs:
+        for role_dir in sorted(d for d in directory.iterdir() if d.is_dir() and not d.name.startswith(".")):
+            if not (links / role_dir.name).exists():
+                (links / role_dir.name).symlink_to(role_dir.resolve(), target_is_directory=True)
+    collections = next((c for c in (playbook.parent / "collections", root / "collections") if c.is_dir()), None)
+    link_search_dirs(handoff, None, collections)
 
     held: list[tuple[str, str]] = []  # (line, channel): nothing is written before the clear values are registered
     runner = AnsibleRunner(

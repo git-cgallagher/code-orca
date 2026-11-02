@@ -71,9 +71,11 @@ def default_session_factory(region: str | None = None) -> SessionFactory:
     return factory
 
 
-def call_with_deadline(fn: Callable[[], Any], deadline_s: float, what: str) -> Any:
+def call_with_deadline(
+    fn: Callable[[], Any], deadline_s: float, what: str, error: type[Exception] | None = None
+) -> Any:
     """Run ``fn`` on a daemon thread and wait at most ``deadline_s``; a hung call is abandoned (the daemon thread
-    cannot keep the process alive) and ``SSMError`` names ``what`` only."""
+    cannot keep the process alive) and ``error`` (default :class:`SSMError`) names ``what`` only."""
     box: dict[str, Any] = {}
 
     def target() -> None:
@@ -86,7 +88,7 @@ def call_with_deadline(fn: Callable[[], Any], deadline_s: float, what: str) -> A
     thread.start()
     thread.join(deadline_s)
     if thread.is_alive():
-        raise SSMError(f"{what}: no answer within {deadline_s:g} s (credential provider or endpoint hung)")
+        raise (error or SSMError)(f"{what}: no answer within {deadline_s:g} s (credential provider or endpoint hung)")
     if "error" in box:
         raise box["error"]
     return box.get("value")

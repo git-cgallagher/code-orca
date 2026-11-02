@@ -464,3 +464,37 @@ def test_a_playbook_that_does_not_parse_reports_the_parser_error(tmp_path):
     assert result.describe() == "parser error"
     text = _failure_text(result)
     assert "parser error" in text and "bogus_keyword" in text
+
+
+def test_proc_table_parses_stat_after_the_last_paren(tmp_path):
+    for pid, line in {
+        "10": "10 (ansible-playbook) S 1 10",
+        "11": "11 (a b) c)) S 10 11",
+        "12": "12 (sleep) S 11 12",
+    }.items():
+        (tmp_path / pid).mkdir()
+        (tmp_path / pid / "stat").write_text(line)
+    (tmp_path / "self").mkdir()
+    (tmp_path / "self" / "stat").write_text("99 (python) R 1 99")
+    (tmp_path / "net").mkdir()
+    table = adapter._process_table(tmp_path)  # /proc wins when it is there: a slim image has no ps
+    assert sorted(table) == [(10, 1), (11, 10), (12, 11)]
+    assert adapter._descendants(10, table) == {11, 12}
+
+
+def test_process_table_without_proc_or_ps_is_empty(tmp_path, monkeypatch):
+    monkeypatch.setattr(adapter, "_ps_table", lambda: None)
+    assert adapter._process_table(tmp_path) == []
+
+
+def test_pumps_that_drain_just_after_the_deadline_are_not_a_timeout():
+    import threading
+
+    reader = threading.Thread(target=time.sleep, args=(0.3,))
+    reader.start()
+    assert adapter._join_pumps([reader], lambda: 0.0)  # the leader exited in time; the last lines still drain
+    stuck = threading.Thread(target=time.sleep, args=(5,), daemon=True)
+    stuck.start()
+    started = time.monotonic()
+    assert not adapter._join_pumps([stuck], lambda: 0.0)
+    assert time.monotonic() - started < 4

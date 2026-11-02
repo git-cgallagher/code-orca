@@ -110,6 +110,7 @@ def test_handoff_files_are_private_while_the_play_runs_and_gone_afterwards(proje
     assert files == {"inventory.yml": "0600", "extra-vars.json": "0600"}
     assert all(Path(f["path"]).parent == handoff_dir for f in seen[0]["result"]["files"])
     assert not handoff_dir.exists()
+    assert not (step_dir / "tmp").exists()  # ANSIBLE_LOCAL_TEMP is removed too
     kept = step_dir / "inventory.yml"
     assert kept.is_file() and stat.S_IMODE(kept.stat().st_mode) == 0o600
     assert "app-host" in kept.read_text() and "ansible_connection" in kept.read_text()

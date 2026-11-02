@@ -225,7 +225,11 @@ Ansible (core 2.21.5):
   (`WORKER_SESSION_ISOLATION`, on by default), so the worker, its `AnsiballZ_*.py` and whatever that runs are in
   sessions of their own; `killpg(leader)` kills only `ansible-playbook` and the `sleep` keeps running. The adapter
   lists the leader's descendants with `ps -axo pid=,ppid=` *before* killing and SIGKILLs every pid and group
-  (found on the Phase 2 timeout test, 2026-11-01).
+  (found on the Phase 2 timeout test, 2026-11-01). The runtime image (`python:3.13-slim-trixie`) ships **no `ps`**
+  (no procps), so on Linux the tree comes from `/proc/*/stat` (fields after the *last* `)`: `comm` may hold
+  parentheses); the leader's group is SIGSTOPped first so it cannot fork mid-kill. Still residual: a detached
+  `async` task (reparented to init) and, for `connection: local`, the killed module's `AnsiballZ_*.py` in
+  `~/.ansible/tmp` (its arguments verbatim; `no_log` does not scrub the payload).
 - **`ansible.builtin.command` in check mode says "Command would have run if not in check mode"**, not "does not
   support check mode" (that wording is `module_utils/basic.py` and the action base class); `script` says "Check
   mode is not supported for this task.", `fetch` "check mode not (yet) supported for this module", and `raw` skips

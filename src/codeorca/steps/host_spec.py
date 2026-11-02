@@ -689,6 +689,7 @@ def _run_play_scope(
             flush()
         argv = [[registry.redact(a) for a in r.argv] for r in runner.history]
         (ctx.step_dir / "argv.json").write_text(json.dumps(argv, indent=2) + "\n", encoding="utf-8")
+        shutil.rmtree(ctx.step_dir / "tmp", ignore_errors=True)  # ANSIBLE_LOCAL_TEMP
     parsed["roles"] = roles
     parsed["status_text"] = outcome.describe()
     if not outcome.stats_seen and outcome.rc != 0 and outcome.stderr_lines:

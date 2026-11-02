@@ -28,8 +28,11 @@ Command contract (verified on ansible-core 2.21.5):
 - The child runs in its own session, but a process-group kill is NOT enough: every ansible-core worker calls
   ``os.setsid()`` (``WORKER_SESSION_ISOLATION``, default on since 2.19; ``setpgid`` otherwise), so the worker, the
   module it runs and anything that module started are in groups of their own and outlive the leader. On a timeout
-  the adapter lists the leader's descendants first (``ps -axo pid=,ppid=``), SIGKILLs every one of them and their
-  groups, then the leader's group, and raises ``AnsibleTimeout``.
+  the adapter SIGSTOPs the leader's group, lists its descendants (``/proc/*/stat`` on Linux, where a slim image has
+  no ``ps``; ``ps -axo pid=,ppid=`` elsewhere), stops and SIGKILLs every one of them and their groups, then the
+  leader's group, and raises ``AnsibleTimeout``. A detached ``async`` task survives (residual), and a killed
+  ``connection: local`` module leaves its ``AnsiballZ_*.py`` (module arguments verbatim) under the remote tmp
+  (``~/.ansible/tmp``, residual); the steps remove their own ``ANSIBLE_LOCAL_TEMP``.
 - Exit codes are ansible-playbook's (``ansible.errors.ExitCode`` at 2.21.5), NOT a usable bitmask: 0 ok, 1 error,
   2 failed hosts, 4 unreachable hosts **and** ``PARSER_ERROR`` (both are 4: a playbook that does not parse exits 4
   with no stats), 5 invalid CLI option, 99 interrupted, 250 unexpected. A run with failed and unreachable hosts
@@ -441,10 +444,8 @@ class AnsibleRunner:
         timed_out = False
         try:
             rc = proc.wait(timeout=remaining())
-            for t in pumps:  # a worker holding the pipes open cannot keep the step alive past the deadline
-                t.join(timeout=remaining())
-                if t.is_alive():
-                    raise subprocess.TimeoutExpired(argv, timeout or 0)
+            if not _join_pumps(pumps, remaining):
+                raise subprocess.TimeoutExpired(argv, timeout or 0)
         except subprocess.TimeoutExpired:
             timed_out = True
             _killpg(proc)
@@ -474,19 +475,71 @@ class AnsibleRunner:
         return result
 
 
-def _descendants(root: int) -> set[int]:
-    """Every live descendant of ``root`` (``ps`` is the portable way: macOS has no ``/proc``)."""
+PUMP_GRACE_S = 2.0
+
+
+def _join_pumps(pumps: list[threading.Thread], remaining: Callable[[], float | None]) -> bool:
+    """Join the pipe readers after the leader exited; False when one is still alive. A worker holding the pipes open
+    cannot keep the step alive past the deadline, but a leader that exited just before it gets ``PUMP_GRACE_S`` for
+    the readers to drain the last lines (a run that finished in time is never reported as a timeout)."""
+    for t in pumps:
+        left = remaining()
+        t.join(timeout=None if left is None else max(left, PUMP_GRACE_S))
+        if t.is_alive():
+            return False
+    return True
+
+
+def _proc_table(proc_root: Path = Path("/proc")) -> list[tuple[int, int]]:
+    """``[(pid, ppid)]`` from ``/proc/<pid>/stat`` (Linux; slim images ship no ``ps``). ``comm`` may hold spaces and
+    parentheses, so the fields are read after the LAST ``)``."""
+    table: list[tuple[int, int]] = []
+    try:
+        entries = list(proc_root.iterdir())
+    except OSError:
+        return table
+    for entry in entries:
+        if not entry.name.isdigit():
+            continue
+        try:
+            stat = (entry / "stat").read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue  # gone meanwhile
+        fields = stat.rpartition(")")[2].split()
+        if len(fields) >= 2 and fields[1].isdigit():
+            table.append((int(entry.name), int(fields[1])))
+    return table
+
+
+def _ps_table() -> list[tuple[int, int]] | None:
+    """``[(pid, ppid)]`` from ``ps`` (macOS has no ``/proc``); None when ``ps`` cannot run."""
     try:
         out = subprocess.run(  # noqa: S603 - fixed argv
             ["ps", "-axo", "pid=,ppid="], capture_output=True, text=True, timeout=10, check=False
         ).stdout
     except (OSError, subprocess.SubprocessError):
-        return set()
-    children: dict[int, list[int]] = {}
+        return None
+    table = []
     for line in out.splitlines():
         parts = line.split()
         if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
-            children.setdefault(int(parts[1]), []).append(int(parts[0]))
+            table.append((int(parts[0]), int(parts[1])))
+    return table
+
+
+def _process_table(proc_root: Path = Path("/proc")) -> list[tuple[int, int]]:
+    """``/proc`` when it is there (Linux), else ``ps``; empty when neither works (the leader's group is still
+    killed)."""
+    if (proc_root / "self" / "stat").is_file():
+        return _proc_table(proc_root)
+    return _ps_table() or []
+
+
+def _descendants(root: int, table: list[tuple[int, int]] | None = None) -> set[int]:
+    """Every live descendant of ``root``."""
+    children: dict[int, list[int]] = {}
+    for pid, ppid in _process_table() if table is None else table:
+        children.setdefault(ppid, []).append(pid)
     found: set[int] = set()
     stack = [root]
     while stack:
@@ -497,14 +550,23 @@ def _descendants(root: int) -> set[int]:
     return found
 
 
-def _killpg(proc: subprocess.Popen) -> None:
-    """SIGKILL the leader's whole tree: the descendants (collected while the tree is intact) and their process
-    groups first, then the leader's group. Workers are session leaders of their own, so the leader's group alone
-    would leave the running module behind."""
-    pids = _descendants(proc.pid) | {proc.pid}
+def _signal_all(pids: set[int], sig: int) -> None:
     for pid in sorted(pids, reverse=True):
         for sender in (os.killpg, os.kill):
             try:
-                sender(pid, signal.SIGKILL)
+                sender(pid, sig)
             except (ProcessLookupError, PermissionError):
                 pass
+
+
+def _killpg(proc: subprocess.Popen) -> None:
+    """SIGKILL the leader's whole tree. The leader's group is SIGSTOPped first (it cannot fork a new worker while we
+    look), then every descendant and its group is stopped and the tree listed again (a worker forked meanwhile is
+    caught), then everything is SIGKILLed, the leader's group last. Workers are session leaders of their own, so the
+    leader's group alone would leave the running module behind. A detached ``async`` task (``async_wrapper``
+    double-forks to init) is outside the tree: residual."""
+    _signal_all({proc.pid}, signal.SIGSTOP)
+    pids = _descendants(proc.pid)
+    _signal_all(pids, signal.SIGSTOP)
+    pids |= _descendants(proc.pid)
+    _signal_all(pids | {proc.pid}, signal.SIGKILL)

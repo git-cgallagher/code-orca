@@ -217,6 +217,7 @@ def execute(step, ctx: StepContext, registry: SecretRegistry) -> StepResult:
                 _write_json(step_dir / "env-names.json", sorted(runner.env))
         finally:
             shutil.rmtree(handoff_dir, ignore_errors=True)  # the handoff files live exactly as long as the playbook
+            shutil.rmtree(step_dir / "tmp", ignore_errors=True)  # ANSIBLE_LOCAL_TEMP: a killed run leaves it behind
 
     assert outcome is not None
     mode = effective_check_unsupported(project, str(step.check_unsupported))

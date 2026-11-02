@@ -9,6 +9,10 @@
 - Phase 2 review fixes (runtime): the ansible step writes the live inventory and the extra-vars handoff inside the
   `try` that deletes the handoff dir (a failure after the inventory was written left `ansible_password` on disk),
   and handoff JSON is dumped with str keys (a nested `{80: http, https: 443}` raised under `sort_keys`).
+- Phase 2 review fixes (timeouts): the tree kill reads `/proc/*/stat` on Linux (the slim runtime image has no
+  `ps`), SIGSTOPs the leader's group and every descendant before the SIGKILL, and the steps remove their
+  `ANSIBLE_LOCAL_TEMP`; a playbook that exits just before the deadline gets a 2 s grace for the pipe readers
+  instead of being reported as a timeout.
 - Phase 2 review fixes (exit status): `AnsibleResult.describe` reads the stats (rc 4 is also ansible-core's
   `PARSER_ERROR`; a run with no stats event is a parser/CLI error and the step error carries the stderr tail),
   `describe_rc` no longer decodes a bitmask, and `last_failure` skips rescued failures and `ignore_unreachable`

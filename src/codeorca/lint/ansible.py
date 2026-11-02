@@ -279,26 +279,27 @@ def _lint_task(
             add("debug-secret-name", f"debug prints secret-named {', '.join(refs)}")
         return out
 
-    secret_params: dict[str, list[str]] = {}
+    # parameter NAME -> the flagged variable NAMES it receives (identifiers only, never a value)
+    params_with_flagged_names: dict[str, list[str]] = {}
     if isinstance(params, Mapping):
         for name, value in params.items():
             refs = flagged_names(value, key_patterns, lookup_patterns)
             if refs:
-                secret_params[str(name)] = refs
+                params_with_flagged_names[str(name)] = refs
     elif isinstance(params, str):
         refs = flagged_names(params, key_patterns, lookup_patterns)
         if refs:
-            secret_params["_raw_params"] = refs
+            params_with_flagged_names["_raw_params"] = refs
 
-    if task_no_log and not secret_params:
+    if task_no_log and not params_with_flagged_names:
         add("redundant-task-no-log", f"no_log: true on {module} but no parameter carries a secret-named value", "info")
-    if not secret_params or task_no_log:
+    if not params_with_flagged_names or task_no_log:
         return out
     no_log_params = resolver(module)
     if no_log_params is None:
         add("unknown-module", f"{module} could not be resolved; secret-to-plain-param not checked", "info")
         return out
-    for name, refs in sorted(secret_params.items()):
+    for name, refs in sorted(params_with_flagged_names.items()):
         if name not in no_log_params:
             add("secret-to-plain-param", f"{module} parameter {name} receives {', '.join(refs)} but is not no_log")
     return out

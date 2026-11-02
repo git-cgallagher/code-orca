@@ -350,3 +350,86 @@ def test_unreachable_host_maps_to_exit_4(tmp_path):
     assert result.unreachable_hosts == ["nowhere"] and result.failed_hosts == []
     assert result.last_failure()["status"] == "unreachable"
     assert describe_rc(result.rc) == "unreachable hosts"
+
+
+# ------------------------------------------------------------------------------- callback edge cases (review)
+
+
+def run_edge(tmp_path: Path, edge: str, *, check: bool = False):
+    extra = write_handoff(tmp_path / "handoff", "extra-vars.json", {"scratch_dir": str(tmp_path), "edge": edge})
+    capture = Capture()
+    runner = AnsibleRunner(FIXTURES, dict(os.environ), stream=capture, local_temp=tmp_path / "tmp")
+    result = runner.run(
+        FIXTURES / "edges.yml", FIXTURES / "inventory.yml", extra_vars_file=extra, check=check, diff=check, timeout=120
+    )
+    return result, capture
+
+
+@requires_ansible
+def test_no_log_failure_exception_and_warnings_are_never_emitted(tmp_path):
+    from codeorca.steps.ansible import _failure_text
+
+    result, capture = run_edge(tmp_path, "nolog_fail")
+    assert result.rc == 2
+    stdout = "".join(capture.channel("stdout"))
+    assert "FIXTURE-UNREG-nolog-0006" not in stdout
+    event = [e for e in result.events if e["type"] == "runner" and e["task"] == "no_log assert"][0]
+    assert event["no_log"] is True and event["exception"] is None and event["warnings"] is None
+    assert "FIXTURE-UNREG-nolog-0006" not in _failure_text(result)
+
+
+@requires_ansible
+def test_loop_control_label_hides_the_loop_item_in_the_result(tmp_path):
+    result, capture = run_edge(tmp_path, "loop_label")
+    assert result.rc == 0
+    assert "FIXTURE-LOOPITEM-zz9-plural" not in "".join(line for _, line in capture.lines)
+    items = [e for e in result.events if e["type"] == "item" and e["task"] == "labelled loop"]
+    assert [e["item"] for e in items] == ["alice"] and items[0]["result"]["item"] == "alice"
+
+
+@requires_ansible
+def test_unicode_line_separators_never_split_an_event(tmp_path):
+    result, capture = run_edge(tmp_path, "separators")
+    assert result.rc == 0
+    for line in capture.channel("stdout"):
+        assert len(line.rstrip("\n").splitlines()) == 1  # what the stream redactor's sink does
+        json.loads(line)
+    event = [e for e in result.events if e["type"] == "runner" and e["task"] == "line separators"][0]
+    assert event["result"]["msg"] == "a b\u0085c d"
+
+
+@requires_ansible
+def test_set_stats_values_never_reach_the_stats_event(tmp_path):
+    result, capture = run_edge(tmp_path, "set_stats")
+    assert "FIXTURE-SECRETSTATS-hhhh8888" not in "".join(line for _, line in capture.lines)
+    stats = [e for e in result.events if e["type"] == "stats"][0]
+    assert stats["custom"] == {"_run": ["tok"]}
+
+
+@requires_ansible
+def test_raw_script_and_fetch_are_check_unsupported(tmp_path):
+    result, _ = run_edge(tmp_path, "check_unsupported", check=True)
+    assert {task for _, task in result.check_unsupported} == {
+        "raw check-unsupported",
+        "script check-unsupported",
+        "fetch check-unsupported",
+    }
+    when_skipped = [e for e in result.events if e["type"] == "runner" and e["task"] == "labelled loop"]
+    assert when_skipped and not when_skipped[0]["check_unsupported"]  # a when: skip in check mode is not unsupported
+
+
+@requires_ansible
+def test_notify_events_carry_no_task_attribution(tmp_path):
+    result, _ = run_edge(tmp_path, "notify")
+    notify = [e for e in result.events if e["type"] == "notify"]
+    assert notify and all(e["task"] is None and e["handler"] == "edge handler" for e in notify)
+
+
+def test_ascii_escaped_json_still_matches_a_registered_non_ascii_value():
+    from codeorca.redact import SecretRegistry
+
+    reg = SecretRegistry(b"example-not-secret-key", "test", mode="sha256")
+    value = "FIXTURE-SECRET-café- -001"
+    reg.add(value)
+    line = json.dumps({"msg": value}, ensure_ascii=True)  # what the callback prints now
+    assert reg.count_matches(line) == 1 and "caf" not in reg.redact(line)

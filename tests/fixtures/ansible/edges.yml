@@ -1,0 +1,68 @@
+# Fixture playbook for the callback's edge cases (review fixes). Every value is a placeholder.
+# Extra vars the tests pass: scratch_dir; edge (which group of tasks runs: "nolog_fail", "loop_label",
+# "separators", "set_stats", "check_unsupported", "notify").
+- name: Edge play
+  hosts: app
+  gather_facts: false
+  vars:
+    users:
+      - {name: alice, pw: "FIXTURE-LOOPITEM-zz9-plural"}
+    app_dsn: "mysql://svc:FIXTURE-UNREG-nolog-0006@db.example.com/app"
+  tasks:
+    - name: no_log assert
+      ansible.builtin.assert:
+        that: app_dsn is not defined
+        fail_msg: "unexpected DSN {{ app_dsn }}"
+      no_log: true
+      when: edge == "nolog_fail"
+
+    - name: labelled loop
+      ansible.builtin.debug:
+        msg: "user {{ item.name }}"
+      loop: "{{ users }}"
+      loop_control:
+        label: "{{ item.name }}"
+      when: edge == "loop_label"
+
+    - name: line separators
+      ansible.builtin.debug:
+        msg: "a b\u0085c d"
+      when: edge == "separators"
+
+    - name: no_log stats
+      ansible.builtin.set_stats:
+        data:
+          tok: FIXTURE-SECRETSTATS-hhhh8888
+      no_log: true
+      when: edge == "set_stats"
+
+    - name: raw check-unsupported
+      ansible.builtin.raw: "true"
+      when: edge == "check_unsupported"
+
+    - name: script check-unsupported
+      ansible.builtin.script: probe.sh
+      when: edge == "check_unsupported"
+
+    - name: fetch check-unsupported
+      ansible.builtin.fetch:
+        src: /etc/hosts
+        dest: "{{ scratch_dir }}/fetched/"
+        flat: true
+      when: edge == "check_unsupported"
+
+    - name: notifying task
+      ansible.builtin.command: "true"
+      changed_when: true
+      notify: edge handler
+      when: edge == "notify"
+
+    - name: later task
+      ansible.builtin.debug:
+        msg: later
+      when: edge == "notify"
+
+  handlers:
+    - name: edge handler
+      ansible.builtin.debug:
+        msg: handled

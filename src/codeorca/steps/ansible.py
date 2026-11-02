@@ -297,7 +297,8 @@ def _failure_text(outcome: AnsibleResult) -> str:
         parts.append("unreachable hosts: " + ", ".join(outcome.unreachable_hosts))
     last = outcome.last_failure()
     if last is not None:
-        msg = last.get("msg") or last.get("exception") or ""
+        # never the exception text of a no_log result: it is the uncensored fail/assert message
+        msg = last.get("msg") or (None if last.get("no_log") else last.get("exception")) or ""
         parts.append(f"last failure: [{last.get('host')}] {last.get('task')}: {msg}".rstrip(": "))
     elif outcome.rc not in (2, 4, 6) and outcome.stderr_lines:
         tail = "\n".join(outcome.stderr_lines).strip()[-_ERROR_LIMIT // 2 :]

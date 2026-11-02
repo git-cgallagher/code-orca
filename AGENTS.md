@@ -227,8 +227,15 @@ Ansible (core 2.21.5):
   lists the leader's descendants with `ps -axo pid=,ppid=` *before* killing and SIGKILLs every pid and group
   (found on the Phase 2 timeout test, 2026-11-01).
 - **`ansible.builtin.command` in check mode says "Command would have run if not in check mode"**, not "does not
-  support check mode" (that wording is `module_utils/basic.py` and the action base class): the callback's
-  `check_unsupported` detection matches both.
+  support check mode" (that wording is `module_utils/basic.py` and the action base class); `script` says "Check
+  mode is not supported for this task.", `fetch` "check mode not (yet) supported for this module", and `raw` skips
+  with **no message at all**: the callback matches the wordings and treats a check-mode skip with no `msg` and no
+  `skip_reason` as unsupported (a `when:` skip always has a reason; a `no_log` skip has lost it, residual).
+- **`no_log` censors `result.result`, not `TaskResult.exception`**: the exception summary carries the verbatim
+  `fail`/`assert` message, so the callback nulls `exception`/`warnings`/`deprecations` for a `no_log` result.
+  `loop_control.label` hides the item only in the default callback's display: the raw item still sits in the
+  result under `ansible_loop_var`, and `set_stats` data has no `no_log` link at all (the stats event carries keys
+  only). `str.splitlines()` splits on U+2028/U+2029/U+0085, so the callback prints with `ensure_ascii`.
 - **`ruamel.yaml`'s `add_representer` is a classmethod on a shared dict**: calling it on `yaml.representer` to
   quote strings changed every later dump in the process (the spec renderer's output broke two tests). Subclass
   `SafeRepresenter` and assign `yaml.Representer`.

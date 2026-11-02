@@ -6,6 +6,11 @@
   `ANSIBLE_VERBOSITY=0`, `ANSIBLE_KEEP_REMOTE_FILES=False` and `ANSIBLE_CALLBACKS_ENABLED=codeorca_jsonl` instead of
   dropping names a consumer's `ansible.cfg` could set again (the vars subprocess forces the first three too), and
   `project.ansible.env` refuses those names.
+- Phase 2 review fixes (callback): a `no_log` result's `exception`/`warnings`/`deprecations` are `null` (the step
+  error never falls back to the exception text of a `no_log` failure); an item event's result shows the
+  `loop_control.label` in place of the loop variable; the stats event lists `set_stats` keys only; events are
+  ASCII-escaped JSON (U+2028/U+0085 no longer split a line); `notify` events carry no task attribution and
+  `include` events name the include task; `raw`, `script` and `fetch` count as check-mode-unsupported.
 - Phase 2 integration: `codeorca run` registers the `ansible` executor; `spec-render` takes `source.ansible`
   (`codeorca.steps.host_spec`): inventory scope via the vars subprocess, optional play scope as a check-mode play
   through `AnsibleRunner` with markers handed over in a 0600 `-e @` file, a staged inventory that merges the

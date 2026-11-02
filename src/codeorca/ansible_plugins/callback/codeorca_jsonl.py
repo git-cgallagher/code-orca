@@ -27,21 +27,30 @@ otherwise, so a consumer can rely on the names):
 ``status``           ``runner``/``item``: ``ok``, ``failed``, ``unreachable`` or ``skipped``
 ``changed``          bool (``runner``/``item``)
 ``ignore_errors``    bool: the failure was ignored (``runner``/``item`` with status ``failed``)
-``no_log``           bool: the result was censored by ``no_log`` (Ansible did it; ``result`` holds the censored dict)
+``no_log``           bool: the result was censored by ``no_log`` (Ansible did it; ``result`` holds the censored dict,
+                     and ``exception``/``warnings``/``deprecations`` are ``null``: Ansible censors ``result.result``
+                     but not ``TaskResult.exception``, which carries a ``fail``/``assert`` message verbatim)
 ``check_mode``       bool: the task ran in check mode
 ``check_unsupported`` bool: the result says the module does not support check mode (it was skipped, not run)
 ``msg``              the result's ``msg`` when it is a string
 ``result``           the full result dict (``_ansible_*`` keys dropped; ``results`` dropped on a loop's summary
-                     result, the per-item results arrive as ``item`` events)
-``item``             the loop item (``item`` events; ``(censored due to no_log)`` when censored)
+                     result, the per-item results arrive as ``item`` events; on an ``item`` event with a
+                     ``loop_control.label`` the loop variable is replaced by the label and ``ansible_loop`` is
+                     dropped, as the default callback shows only the label: playbooks label to hide credentials)
+``item``             the loop item's label (``item`` events; ``(censored due to no_log)`` when censored)
 ``diff``             the result's ``diff`` when present (``runner``/``item``)
 ``warnings`` / ``deprecations`` / ``exception``  text summaries of what the task result carried
 ``attempts``         (``retry``) attempts so far
-``handler``          (``notify``) the handler name
+``handler``          (``notify``) the handler name; a ``notify`` event's ``task``/``action``/``path`` are ``null``
+                     (it fires when results are processed, after later tasks may have started)
 ``included``         (``include``) the included file
 ``hosts``            (``play_start``) the play's host pattern; (``include``) the hosts it was included for
 ``stats``            (``stats``) per host ``{ok, changed, failed, unreachable, skipped, rescued, ignored}``
-``custom``           (``stats``) ``set_stats`` data when any
+``custom``           (``stats``) the KEYS of the ``set_stats`` data per scope (``{"_run": ["k"]}``), never values:
+                     the aggregate cannot tell which data came from a ``no_log`` task
+
+Lines are JSON with ``ensure_ascii`` on: U+2028/U+2029/U+0085 in a result would otherwise be emitted raw, and a
+consumer that splits on ``str.splitlines()`` (the stream redactor's sink did) cut one event into broken lines.
 """
 
 from __future__ import annotations
@@ -64,10 +73,16 @@ DOCUMENTATION = """
       - Results censored by no_log stay censored; redaction is the orchestrator's job.
 """
 
-# A skipped result whose message says the module could not run in check mode. Two wordings exist in
-# ansible-core: module_utils/basic.py and the action base class say "does not support check mode"; the
-# command/shell modules skip themselves with "Command would have run if not in check mode".
-CHECK_UNSUPPORTED = re.compile(r"does not support check mode|would have run if not in check mode", re.IGNORECASE)
+# A skipped result whose message says the module could not run in check mode. The wordings in ansible-core 2.21.5:
+# module_utils/basic.py and the action base class say "does not support check mode"; command/shell skip themselves
+# with "Command would have run if not in check mode"; action/script.py raises "Check mode is not supported for this
+# task."; action/fetch.py "check mode not (yet) supported for this module". action/raw.py returns ``skipped`` with
+# no message at all, which ``_result_event`` catches separately (a skip in check mode with no msg and no
+# ``skip_reason``: a ``when:`` or empty-loop skip always has one).
+CHECK_UNSUPPORTED = re.compile(
+    r"does not support check mode|would have run if not in check mode|check mode (?:is )?not (?:\(yet\) )?supported",
+    re.IGNORECASE,
+)
 
 _INTERNAL_PREFIX = "_ansible_"
 
@@ -142,7 +157,8 @@ class CallbackModule(CallbackBase):
     def _emit(self, event_type: str, **fields) -> None:
         event = {"type": event_type, "ts": _now(), "play": self._play_name}
         event.update(fields)
-        sys.stdout.write(json.dumps(event, default=str, ensure_ascii=False, sort_keys=False) + "\n")
+        # ensure_ascii: U+2028/U+2029/U+0085 must never appear raw (``str.splitlines`` splits on them)
+        sys.stdout.write(json.dumps(event, default=str, ensure_ascii=True, sort_keys=False) + "\n")
         sys.stdout.flush()  # one line per event, however the process ends (a timeout kill loses nothing buffered)
 
     def _task_fields(self, task=None) -> dict:
@@ -167,12 +183,22 @@ class CallbackModule(CallbackBase):
             data.pop("results")  # the per-item results were emitted as ``item`` events already
         msg = data.get("msg")
         skipped = status == "skipped"
-        check_unsupported = skipped and any(
-            isinstance(text, str) and CHECK_UNSUPPORTED.search(text) for text in (msg, data.get("skip_reason"))
-        )
+        task_fields = self._task_fields(result.task)
+        reasons = (msg, data.get("skip_reason"), data.get("skipped_reason"))
         no_log = bool(raw.get("_ansible_no_log")) or bool(getattr(result.task, "no_log", False))
+        check_unsupported = skipped and (
+            any(isinstance(text, str) and CHECK_UNSUPPORTED.search(text) for text in reasons)
+            # raw (and any module that skips silently): in check mode with no reason at all; a censored result has
+            # lost its skip_reason too, so it cannot be told from a when: skip (residual)
+            or (bool(task_fields.get("check_mode")) and not any(reasons) and "censored" not in data)
+        )
+        if event_type == "item" and not no_log and "_ansible_item_label" in raw:
+            loop_var = raw.get("ansible_loop_var") or "item"
+            if loop_var in data:
+                data[str(loop_var)] = _plain(raw["_ansible_item_label"])
+            data.pop("ansible_loop", None)  # extended loop info carries allitems
         fields = {
-            **self._task_fields(result.task),
+            **task_fields,
             "host": result.host.get_name(),
             "status": status,
             "changed": bool(result.is_changed()),
@@ -182,9 +208,11 @@ class CallbackModule(CallbackBase):
             "msg": msg if isinstance(msg, str) else None,
             "result": data,
             "diff": data.get("diff"),
-            "warnings": [_summary_text(w) for w in (result.warnings or [])],
-            "deprecations": [_summary_text(d) for d in (result.deprecations or [])],
-            "exception": _summary_text(result.exception) if result.exception is not None else None,
+            # Ansible censors result.result under no_log, but not these: the exception summary is the verbatim
+            # fail/assert message. Never un-censor.
+            "warnings": None if no_log else [_summary_text(w) for w in (result.warnings or [])],
+            "deprecations": None if no_log else [_summary_text(d) for d in (result.deprecations or [])],
+            "exception": _summary_text(result.exception) if result.exception is not None and not no_log else None,
         }
         if event_type == "item":
             label = raw.get("_ansible_item_label", raw.get("item")) if not no_log else "(censored due to no_log)"
@@ -215,14 +243,25 @@ class CallbackModule(CallbackBase):
         self._task_check_mode = bool(task.check_mode) if task.check_mode is not None else None
 
     def v2_playbook_on_notify(self, handler, host):
-        self._emit("notify", host=host.get_name(), handler=handler.get_name(), **self._task_fields())
+        # fires while results are processed, when a later task may already have started (serial/free strategies):
+        # the last task_start is not the notifying task, so no task attribution at all
+        self._emit(
+            "notify",
+            host=host.get_name(),
+            handler=handler.get_name(),
+            task=None,
+            action=None,
+            path=None,
+            check_mode=None,
+        )
 
     def v2_playbook_on_include(self, included_file):
+        task = getattr(included_file, "_task", None)  # the include task itself, not the last task_start
         self._emit(
             "include",
             included=str(included_file._filename),
             hosts=[h.get_name() for h in included_file._hosts],
-            **self._task_fields(),
+            **(self._task_fields(task) if task is not None else self._task_fields()),
         )
 
     def v2_playbook_on_no_hosts_matched(self):
@@ -245,7 +284,9 @@ class CallbackModule(CallbackBase):
                 "ignored": summary.get("ignored", 0),
             }
         custom = getattr(stats, "custom", None) or {}
-        self._emit("stats", stats=per_host, custom=_plain(custom))
+        # keys only: set_stats data from a no_log task would otherwise reach the events file in clear
+        keys = {str(scope): sorted(str(k) for k in data) for scope, data in custom.items() if isinstance(data, dict)}
+        self._emit("stats", stats=per_host, custom=keys)
 
     # ------------------------------------------------------------------------------------------------ results
     def v2_runner_on_ok(self, result):

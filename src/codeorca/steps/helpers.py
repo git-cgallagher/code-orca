@@ -1,6 +1,6 @@
 """Shared machinery of the ``python`` and ``powershell`` helper steps (plan section 5.8).
 
-The contract both helpers follow (and ``shell`` follows too, through ``shell.run_argv``):
+The contract both helpers follow (they run their child through ``shell.run_argv``, the shell step's machinery):
 
 - **Script path.** ``script:`` is relative to the project root (``project.root``; the process cwd when there is no
   project). It is resolved with symlinks followed and must stay inside the root and be an existing file; the

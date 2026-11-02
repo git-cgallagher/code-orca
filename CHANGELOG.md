@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Phase 3 (SSM + backend bootstrap): `codeorca.providers` (`SSMSecrets`, `make_resolver`: SSM `ssm:/` references
+  registered before they are returned, memory-only cache, time-limited calls incl. a wall-clock deadline, value-free
+  errors), the SSM-backed redaction key (`build_registry(..., key_fetcher=ssm_key_fetcher(project))`, key id
+  `<ref>@<version>`; `CODEORCA_REDACTION_KEY` still wins when set; a failed fetch fails closed), and
+  `codeorca.bootstrap.s3` (`python -m codeorca.bootstrap.s3`): S3 state bucket created and converged idempotently
+  (account check, Object Lock default-retention refusal, public access block, versioning, encryption, merged
+  TLS-only policy, lifecycle and tags), `backend.hcl` per stack, `--dry-run` diff; reference workflow
+  `bootstrap-backend`; new `aws` extra (`boto3`), `moto` in `dev`.
 - Phase 2 review fixes (host spec, secrets): a listed template whose own text calls a denied lookup is a
   `<skipped: …>` marker in both scopes; the play scope reads its playbook, its roles' `defaults`/`vars` (every file
   Ansible reads, `main/` dirs included) and its `vars_files` with `!vault` values opaque (`specs/ansible_files.py`;

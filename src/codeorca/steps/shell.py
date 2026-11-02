@@ -78,12 +78,27 @@ def run_shell(step, ctx: StepContext) -> StepResult:
             policy.check_argv(argv)
         except policy.PolicyError as e:
             raise StepError(f"step {step.id}: policy: {e}") from None
-    env = dict(ctx.env)
+    return run_argv(step.id, argv, dict(ctx.env), ctx)
+
+
+def run_argv(
+    step_id: str,
+    argv: list[str],
+    env: dict[str, str],
+    ctx: StepContext,
+    *,
+    cwd: str | os.PathLike[str] | None = None,
+    label: str | None = None,
+) -> StepResult:
+    """Run one argv as the step's child process: everything the module docstring describes after the argv is
+    built (argv.json through the hook, env NAMES, line-sinked logs, deadline + process-group kill, the output file
+    rewritten and parsed). Shared by ``shell`` and the ``python``/``powershell`` helpers (``steps/helpers.py``).
+    ``label`` names the program in the failure message (default ``argv[0]``)."""
     scrub = ctx.line_filter("stdout")
-    ctx.run_dir.write_argv(step.id, [scrub(a) if scrub else a for a in argv])
-    ctx.run_dir.write_env_names(step.id, env)
-    out_sink = ctx.run_dir.line_sink(step.id, "stdout", ctx.line_filter("stdout"))
-    err_sink = ctx.run_dir.line_sink(step.id, "stderr", ctx.line_filter("stderr"))
+    ctx.run_dir.write_argv(step_id, [scrub(a) if scrub else a for a in argv])
+    ctx.run_dir.write_env_names(step_id, env)
+    out_sink = ctx.run_dir.line_sink(step_id, "stdout", ctx.line_filter("stdout"))
+    err_sink = ctx.run_dir.line_sink(step_id, "stderr", ctx.line_filter("stderr"))
     err_tail = _Tail()
     output_file = env.get("CODEORCA_OUTPUT_FILE")
     deadline = time.monotonic() + ctx.timeout if ctx.timeout is not None else None
@@ -97,6 +112,7 @@ def run_shell(step, ctx: StepContext) -> StepResult:
                 proc = subprocess.Popen(
                     argv,
                     env=env,
+                    cwd=cwd,
                     stdin=subprocess.DEVNULL,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
@@ -106,7 +122,7 @@ def run_shell(step, ctx: StepContext) -> StepResult:
                     start_new_session=True,  # its own process group, so a timeout kills children too
                 )
             except OSError as e:
-                raise StepError(f"step {step.id}: cannot start {argv[0]!r}: {e}") from None
+                raise StepError(f"step {step_id}: cannot start {argv[0]!r}: {e}") from None
             assert proc.stdout is not None and proc.stderr is not None
             pumps = [
                 threading.Thread(target=_pump, args=(proc.stdout, out_sink, None, None), daemon=True),
@@ -127,7 +143,7 @@ def run_shell(step, ctx: StepContext) -> StepResult:
                 proc.wait()
                 for t in pumps:
                     t.join(timeout=5)
-                raise StepTimeout(f"step {step.id}: exceeded {ctx.timeout}s") from None
+                raise StepTimeout(f"step {step_id}: exceeded {ctx.timeout}s") from None
             except BaseException:  # an interrupt: the child is in its own session and would survive us
                 _killpg(proc)
                 proc.wait()
@@ -141,7 +157,7 @@ def run_shell(step, ctx: StepContext) -> StepResult:
         try:
             output = json.loads(text)
         except json.JSONDecodeError as e:
-            raise StepError(f"step {step.id}: {output_file} is not JSON: {e}") from None
+            raise StepError(f"step {step_id}: {output_file} is not JSON: {e}") from None
     result = {
         "exit_code": exit_code,
         "stdout_path": str(out_sink.path),
@@ -151,7 +167,8 @@ def run_shell(step, ctx: StepContext) -> StepResult:
     if exit_code == 0:
         return StepResult("succeeded", result=result)
     tail = err_tail.text.strip()
-    return StepResult("failed", result=result, error=f"{argv[0]} exited {exit_code}{': ' + tail if tail else ''}")
+    name = label or argv[0]
+    return StepResult("failed", result=result, error=f"{name} exited {exit_code}{': ' + tail if tail else ''}")
 
 
 def _rewrite_output_file(output_file: str | None, scrub: Callable[[str], str] | None) -> None:

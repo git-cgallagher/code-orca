@@ -15,7 +15,8 @@ argv: ``[<pwsh>, "-NoProfile", "-NonInteractive", "-File", <script>, *args]`` (+
   ``param`` block and any function body) must hold ``[CmdletBinding(... SupportsShouldProcess ...)]`` that is not
   ``= $false``/``= 0``. A ``#`` inside a string ahead of the first ``{`` is read as a comment, and a
   ``{`` inside a string there ends the area early; both are unusual in a script header and fail closed (refused).
-- ``POWERSHELL_TELEMETRY_OPTOUT=1`` and ``POWERSHELL_UPDATECHECK=Off`` are set unless the environment sets them.
+- ``POWERSHELL_TELEMETRY_OPTOUT=1``, ``POWERSHELL_UPDATECHECK=Off`` and ``NO_COLOR=1`` are set unless the environment
+  sets them (no ANSI escapes in ``stderr.log`` or a step error).
 - Everything else (script path, env and secrets, outputs, timeouts) is the shared contract in ``steps/helpers.py``.
 
 ``lint_powershell(paths, settings=None)`` runs ``Invoke-ScriptAnalyzer`` through ``pwsh`` and returns findings in
@@ -44,7 +45,8 @@ from codeorca.steps.helpers import HelperError, SecretResolver, run_helper
 
 PWSH = "pwsh"
 PWSH_FLAGS = ("-NoProfile", "-NonInteractive")
-QUIET_ENV = {"POWERSHELL_TELEMETRY_OPTOUT": "1", "POWERSHELL_UPDATECHECK": "Off"}
+# no telemetry or update check; NO_COLOR keeps ANSI error formatting out of the logs (honoured since 7.4)
+QUIET_ENV = {"POWERSHELL_TELEMETRY_OPTOUT": "1", "POWERSHELL_UPDATECHECK": "Off", "NO_COLOR": "1"}
 
 _BLOCK_COMMENT = re.compile(r"<#.*?#>", re.S)
 _LINE_COMMENT = re.compile(r"#[^\n]*")
@@ -111,6 +113,7 @@ def make_executor(registry: SecretRegistry, resolve_secret: SecretResolver | Non
 
 _LINT_SCRIPT = r"""
 $ErrorActionPreference = 'Stop'
+$PSStyle.OutputRendering = 'PlainText'
 if (-not (Get-Module -ListAvailable -Name PSScriptAnalyzer)) {
     Write-Output '__CODEORCA_NO_PSSCRIPTANALYZER__'
     exit 0
@@ -135,7 +138,8 @@ $out = @($records | ForEach-Object {
             message = [string]$_.Message
         }
     })
-ConvertTo-Json -InputObject $out -Depth 3 -AsArray -Compress
+# -InputObject keeps an array an array (0 and 1 elements included); -AsArray here would nest it
+ConvertTo-Json -InputObject $out -Depth 3 -Compress
 """
 
 _NO_PSSA = "__CODEORCA_NO_PSSCRIPTANALYZER__"
@@ -207,7 +211,7 @@ def lint_powershell(
         records = json.loads(stdout) if proc.returncode == 0 else None
     except json.JSONDecodeError:
         records = None
-    if not isinstance(records, list):
+    if not isinstance(records, list) or not all(isinstance(r, dict) for r in records):  # never drop silently
         tail = (proc.stderr.strip() or stdout)[-2000:]
         return [
             Finding(
@@ -227,7 +231,6 @@ def lint_powershell(
             message=str(r.get("message") or ""),
         )
         for r in records
-        if isinstance(r, dict)
     ]
     findings.sort(key=lambda f: (f["file"], f["line"], f["rule"]))
     return findings

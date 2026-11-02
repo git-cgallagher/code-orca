@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Helper steps (Phase 3, plan 5.8): `steps/python_step.py` (`python -I`) and `steps/powershell_step.py`
+  (`pwsh -NoProfile -NonInteractive -File`, `-WhatIf` under `--dry-run`, scripts without a script-level
+  `SupportsShouldProcess` refused there) on the shared contract in `steps/helpers.py` (project-root-relative scripts,
+  `{secret: ssm:/...}` env resolved through an injected resolver and registered before the child starts, outputs via
+  `CODEORCA_OUTPUT_FILE`), plus `lint_powershell` (PSScriptAnalyzer, optional ansible-test pslint settings). The
+  shell step's child-process code moved into `shell.run_argv` unchanged. Not registered yet (integration).
 - Phase 2 review fixes (host spec, secrets): a listed template whose own text calls a denied lookup is a
   `<skipped: …>` marker in both scopes; the play scope reads its playbook, its roles' `defaults`/`vars` (every file
   Ansible reads, `main/` dirs included) and its `vars_files` with `!vault` values opaque (`specs/ansible_files.py`;

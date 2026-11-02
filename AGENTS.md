@@ -45,6 +45,9 @@ Consumers keep their own `codeorca.yaml`, `workflows/`, `specs/` in their own (u
 | `src/codeorca/runner.py` | `Runner`: sequential graphlib DAG, status propagation, retry/backoff, timeouts, inputs, outputs from the typed `result`, `finally`, run.json; `StepContext`/`StepResult`/`Executor` |
 | `src/codeorca/steps/` | executor registry (`register`/`lookup`/`default_executors`), the `shell` executor (argv only, logs via line sink + stream hook), "not implemented in this phase" placeholders for the other types |
 | `tests/core/` | project model, expressions, run directory and runner tests (shell-step workflows on `sys.executable`) |
+| `src/codeorca/steps/helpers.py` | the shared `python`/`powershell` helper contract (plan 5.8): `run_helper`, project-root-relative `script:` (symlinks resolved, escape/missing refused), child cwd = project root, step `env:` with `{secret: ssm:/...}` resolved through an injected `resolve_secret` and registered before the child starts (denylist-named literals too; values under 8 chars listed by name in `unprotected_env`), `CODEORCA_*` env names reserved, `CODEORCA_DRY_RUN` set only under `--dry-run`, redaction through the registry whatever `ctx.stream` is; runs through `shell.run_argv` (the shell step's child-process machinery) |
+| `src/codeorca/steps/python_step.py`, `src/codeorca/steps/powershell_step.py` | `make_executor(registry, resolve_secret=None)` each: `[sys.executable, -I, script, *args]`; `[pwsh, -NoProfile, -NonInteractive, -File, script, *args]` + `-WhatIf` under `--dry-run` (a script without a script-level `[CmdletBinding(SupportsShouldProcess)]`, textual check `declares_should_process`, is refused there); `lint_powershell(paths, settings=None)` (PSScriptAnalyzer via pwsh, `{file, line, rule, level, message}` findings, one `info` finding when pwsh or the module is missing) and `ansible_pslint_settings()` (ansible-test's `pslint/settings.psd1`). Not registered in `steps/__init__.py` (integration does it) |
+| `tests/helpers/`, `tests/fixtures/helpers/` | helper-step tests through a real `Runner` + `SecretRegistry` (`helper_support.py`; `conftest.py` re-exports its fixtures): outputs to a dependent step, secret env vs `scan_outputs`, exit codes, `-I` (a planted `json.py`), dry run, path containment, timeout; pwsh tests (exit 3 through `-File`, `-WhatIf`, refusal, secret env) and PSScriptAnalyzer tests skip without `pwsh` / the module (both on the ubuntu-24.04 runner); fail-closed lint edges use a fake `pwsh` |
 | `schema/` | exported JSON Schema; CI fails if it differs from the models (`schema export --check`) |
 | `src/codeorca/redact/` | redaction pipeline (plan §5.7): `registry.py` (`SecretRegistry`, HMAC placeholders, encodings), `text.py` (`redact_tree`/`redact_text`, key denylist), `terraform.py` (`mask_by_map`, `merge_unknown`, `schema_sensitive_paths`, `mask_by_schema`), `stream.py` (`StreamRedactor`), `gate.py` (`scan_outputs`), `entropy.py` (`entropy_warnings`); residual risk in the package docstring |
 | `examples/reference/` | the offline reference project: project config, a provider-free Terraform stack, `ansible/` (role `app_config` with an argument spec incl. a `no_log` token, playbook-adjacent `group_vars/app.yml` with a denied env lookup, `site.yml`), workflows `plan-only` + `configure-local` (run in CI) and `demo-rollout` (validates only) |
@@ -214,6 +217,24 @@ Phase 2 integration (2026-11-01):
   `run_vars_subprocess` by name, so a test that must prove no subprocess ran patches `codeorca.steps.host_spec`.
 - **Specs render multi-line strings as literal blocks** (`|`, a `SafeRepresenter` subclass in `specs/__init__.py`,
   per the `add_representer` gotcha below), so a rendered template diffs line by line.
+
+Phase 3 helpers (2026-11-02):
+- **`ConvertTo-Json -InputObject $array -AsArray` nests the array** (`[[...]]`), and a parser that skipped
+  non-object entries reported every script as lint-clean. `-InputObject` alone keeps 0- and 1-element arrays arrays;
+  `lint_powershell` turns any unexpected shape into a `pslint-error` finding.
+- **pwsh writes ANSI escapes in error records even when stderr is a pipe** (7.6): the helper child env defaults
+  `NO_COLOR=1` and the lint command sets `$PSStyle.OutputRendering = 'PlainText'`, or `stderr.log` and step errors
+  carry escape codes.
+- **pwsh always adds its default module dirs to `PSModulePath`**, so "PSScriptAnalyzer is missing" cannot be
+  simulated with a real pwsh on a machine that has the module (the runner image does); the test uses a fake `pwsh`.
+- **The `SupportsShouldProcess` check is textual**: comments dropped, only the text before the first `{` is searched
+  (the script-level attribute area), `= $false`/`= 0` does not count. A `#` or `{` inside a string in the header
+  makes it refuse (fails closed). Without the check, `-WhatIf` on a script that does not declare it fails to bind or
+  is ignored while the script makes real changes.
+- **`python -I`** keeps the script's own directory and the cwd off `sys.path` (a planted `json.py` is not
+  imported) and ignores `PYTHON*`/user site; the interpreter's own site-packages still load.
+- PowerShell for local tests: the portable `powershell-7.6.x-osx-arm64.tar.gz` (sha256 from the release's UTF-16LE
+  `hashes.sha256`) plus `Save-PSResource PSScriptAnalyzer -Path <dir>` and `PSModulePath=<dir>`; never brew/sudo.
 
 Terraform (1.14.7):
 - `show -json` (plan and state), `output -json`, plan files, the plan's `variables` block and `TF_LOG` all

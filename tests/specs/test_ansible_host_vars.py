@@ -242,3 +242,82 @@ def test_subprocess_prints_nothing_but_the_document(env):
     )
     assert json.loads(out.stdout)["host"] == "web2"
     assert out.stdout.count("\n") == 1
+
+
+# ------------------------------------------------------------------------------------- review fixes (Phase 2)
+
+
+def run_on(env, inventory: Path, host: str = "h1", **kw) -> dict:
+    pytest.importorskip("ansible")
+    return run_vars_subprocess(
+        sys.executable, inventory, host, None, LOOKUP_DENYLIST, KEY_DENYLIST, kw.pop("templates", []), env, **kw
+    )
+
+
+def test_provenance_matches_ansibles_own_vars_file_selection(env, tmp_path: Path):
+    inv = tmp_path / "inv"
+    (inv / "group_vars" / "web" / "sub").mkdir(parents=True)
+    (inv / "hosts.yml").write_text("web:\n  hosts:\n    h1: {}\n")
+    (inv / "group_vars" / "all").write_text("ext_less: 1\n")  # no extension: Ansible reads it
+    (inv / "group_vars" / "web" / "sub" / "nested.yml").write_text("nested_v: 2\n")  # nested dir: read too
+    doc = run_on(env, inv / "hosts.yml")
+    assert doc["vars"]["ext_less"]["source"] == "group_vars/all"
+    assert doc["vars"]["nested_v"]["source"] == "group_vars/web/sub/nested.yml"
+
+
+def test_a_symlinked_vars_file_keeps_a_checkout_independent_label(env, tmp_path: Path):
+    (tmp_path / "shared").mkdir()
+    (tmp_path / "shared" / "all.yml").write_text("shared_v: 1\n")
+    inv = tmp_path / "inv"
+    (inv / "group_vars").mkdir(parents=True)
+    (inv / "hosts.yml").write_text("all:\n  hosts:\n    h1: {}\n")
+    (inv / "group_vars" / "all.yml").symlink_to(tmp_path / "shared" / "all.yml")
+    doc = run_on(env, inv / "hosts.yml")
+    assert doc["vars"]["shared_v"]["source"] == "group_vars/all.yml"
+
+
+def test_templates_render_like_the_template_action(env, tmp_path: Path):
+    inv = tmp_path / "inv"
+    inv.mkdir()
+    (inv / "hosts.yml").write_text("all:\n  hosts:\n    h1: {name_v: demo}\n")
+    tpl = tmp_path / "role" / "templates"
+    tpl.mkdir(parents=True)
+    (tpl / "partial.j2").write_text("partial {{ name_v }}\n")
+    (tpl / "main.j2").write_text('{% include "partial.j2" %}path={{ template_path }}\n')
+    doc = run_on(env, inv / "hosts.yml", templates=[str(tpl / "main.j2")])
+    assert doc["errors"]["templates"] == {}
+    rendered = doc["templates"][str(tpl / "main.j2")]
+    assert rendered.startswith("partial demo") and rendered.endswith(f"path={tpl / 'main.j2'}\n")
+
+
+def test_extra_vars_file_lookup_resolution_and_play_patterns(env, tmp_path: Path):
+    inv = tmp_path / "inv"
+    (inv / "host_vars").mkdir(parents=True)
+    (inv / "hosts.yml").write_text("web:\n  hosts:\n    h1: {}\ndb:\n  hosts:\n    h2: {}\n")
+    (inv / "host_vars" / "h1.yml").write_text("app_bucket: from-host-vars\n")
+    extra = tmp_path / "extra-vars.json"
+    extra.write_text(json.dumps({"app_bucket": "from-extra"}))
+    doc = run_on(
+        env,
+        inv / "hosts.yml",
+        extra_vars_file=extra,
+        play_hosts=["web", "db", "all:!db", "{{ target }}"],
+        resolve_lookups=["env", "file"],
+    )
+    assert doc["vars"]["app_bucket"] == {"declared": "from-extra", "resolved": "from-extra", "source": "extra_vars"}
+    assert doc["_play_hosts"] == {"web": True, "db": False, "all:!db": True, "{{ target }}": True}
+    assert doc["_lookup_fqcns"] == {"env": "ansible.builtin.env", "file": "ansible.builtin.file"}
+
+
+def test_template_text_with_a_denied_lookup_is_skipped_and_prose_is_not(env, tmp_path: Path):
+    inv = tmp_path / "inv"
+    inv.mkdir()
+    (inv / "hosts.yml").write_text("all:\n  hosts:\n    h1: {}\n")
+    leak = tmp_path / "leak.j2"
+    leak.write_text("home = {{ lookup('ansible.builtin.env', 'HOME') }}\n")
+    prose = tmp_path / "prose.j2"
+    prose.write_text("# reverse DNS lookup (cached) for {{ inventory_hostname }}\n")
+    doc = run_on(env, inv / "hosts.yml", templates=[str(leak), str(prose)])
+    assert doc["templates"][str(leak)] == "<skipped: lookup ansible.builtin.env is a secret source>"
+    assert doc["_skipped_templates"] == [str(leak)]
+    assert doc["templates"][str(prose)] == "# reverse DNS lookup (cached) for h1\n"

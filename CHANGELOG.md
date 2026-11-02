@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- Phase 2 review fixes (host spec, secrets): a listed template whose own text calls a denied lookup is a
+  `<skipped: …>` marker in both scopes; the play scope reads its playbook, its roles' `defaults`/`vars` (every file
+  Ansible reads, `main/` dirs included) and its `vars_files` with `!vault` values opaque (`specs/ansible_files.py`;
+  a file that does not parse fails the step), hands `<vault>` and masked nested trees through `-e`, registers every
+  literal secret leaf before the play, resolves short lookup names to FQCNs through the vars subprocess, and runs
+  with a random vault password (a consumer's vault config never decrypts anything there); nested denylist-named
+  leaves render as markers in templates; argument specs come from every roles dir, `meta/main.yml`'s
+  `argument_specs` counts and `no_log` is OR-ed over roles and entry points.
+- Phase 2 review fixes (host spec, correctness): extra vars are overlaid on top of the inventory scope (they no
+  longer lose to `host_vars` files, and only their names are labelled `extra_vars`); only plays whose `hosts` match
+  the host feed its spec; a play-scope value's `source` names the source that won (`role defaults: <role>`,
+  `play vars: …`, `vars_files: …`, `role vars: …`); one failing template no longer stops the others (tasks never
+  run are `not run`, and template errors fail the step); a YAML date default no longer crashes the subprocess;
+  provenance follows `DataLoader.find_vars_files` and labels are lexical (a symlinked file keeps a relative label);
+  inventory-scope templates render like the `template` action (`{% include %}`, `template_*`, `ansible_managed`).
 - Phase 2 review fixes (secrets): the Ansible adapter forces `ANSIBLE_DEBUG=False`, `ANSIBLE_LOG_PATH=/dev/null`,
   `ANSIBLE_VERBOSITY=0`, `ANSIBLE_KEEP_REMOTE_FILES=False` and `ANSIBLE_CALLBACKS_ENABLED=codeorca_jsonl` instead of
   dropping names a consumer's `ansible.cfg` could set again (the vars subprocess forces the first three too), and

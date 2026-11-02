@@ -20,6 +20,7 @@ from codeorca.project import load_project
 from codeorca.redact import SecretRegistry, scan_outputs
 from codeorca.rundir import RunDir
 from codeorca.runner import Runner
+from codeorca.specs.ansible_files import VarsFileError, VaultValue
 from codeorca.specs.ansible_vars import SECRET_DECLARED, SKIPPED_KEY, VAULT
 from codeorca.steps import default_executors, host_spec
 from codeorca.steps import spec_render as spec_render_step
@@ -71,9 +72,18 @@ def test_playbook_scope_reads_roles_vars_and_vars_files(tmp_path: Path):
     assert roles == ["plain", "ns.col.fq", "by_name", "in_block", "short"]
     assert play_vars == {"a": 2, "b": 3}
     assert vars_files == [str(tmp_path / "vars" / "common.yml"), "/abs/x.yml"]
+    # a !vault play var is opaque, never a reason to read nothing (every other var of the play still counts)
     vaulted = tmp_path / "vaulted.yml"
-    vaulted.write_text("- hosts: all\n  vars:\n    x: !vault |\n      $ANSIBLE_VAULT;1.1;AES256\n", encoding="utf-8")
-    assert host_spec.playbook_scope(vaulted) == ([], {}, [])
+    vaulted.write_text(
+        "- hosts: all\n  vars:\n    db_password: FIXTURE-plain\n    x: !vault |\n      $ANSIBLE_VAULT;1.1;AES256\n",
+        encoding="utf-8",
+    )
+    roles, play_vars, _ = host_spec.playbook_scope(vaulted)
+    assert play_vars["db_password"] == "FIXTURE-plain" and isinstance(play_vars["x"], VaultValue)
+    broken = tmp_path / "broken.yml"
+    broken.write_text("- hosts: all\n  vars: [unclosed\n", encoding="utf-8")
+    with pytest.raises(VarsFileError):  # fail closed: a play we cannot see into is not run
+        host_spec.playbook_scope(broken)
 
 
 def test_handoff_markers_cover_inventory_markers_declared_secrets_names_and_denied_lookups():
@@ -132,7 +142,7 @@ def test_merge_play_scope_overlap_rules(tmp_path: Path):
     assert vars_json["vars"]["both"]["resolved"] is None  # pure: the input is untouched
 
 
-def test_stage_inventory_merges_extra_vars_and_copies_playbook_group_vars(tmp_path: Path):
+def test_stage_inventory_copies_playbook_group_vars_and_never_merges_extra_vars(tmp_path: Path):
     step_dir = tmp_path / "run" / "steps" / "configure"
     step_dir.mkdir(parents=True)
     inventory = step_dir / "inventory.yml"
@@ -141,17 +151,16 @@ def test_stage_inventory_merges_extra_vars_and_copies_playbook_group_vars(tmp_pa
     (vars_dir / "group_vars").mkdir(parents=True)
     (vars_dir / "group_vars" / "app.yml").write_text("x: 1\n", encoding="utf-8")
     staging = tmp_path / "run" / "handoff" / "spec" / "inventory"
-    staged, copied, warnings = host_spec.stage_inventory(inventory, "app-host", {"env": "dev"}, vars_dir, staging)
+    staged, copied, warnings = host_spec.stage_inventory(inventory, "app-host", vars_dir, staging)
     assert staged == staging / "inventory.yml" and copied == vars_dir and warnings == []
     assert stat.S_IMODE(staged.stat().st_mode) == 0o600 and stat.S_IMODE(staging.stat().st_mode) == 0o700
-    assert '"env": "dev"' in staged.read_text() and (staging / "group_vars" / "app.yml").is_file()
-    # nothing to add: the inventory is used in place
-    assert host_spec.stage_inventory(inventory, "app-host", {}, None, staging) == (inventory, None, [])
+    assert staged.read_text() == inventory.read_text() and (staging / "group_vars" / "app.yml").is_file()
+    # nothing to borrow: the inventory is used in place
+    assert host_spec.stage_inventory(inventory, "app-host", None, staging) == (inventory, None, [])
 
-    doc = {"vars": {"env": {"source": "inventory.yml (host entry)"}, "x": {"source": "group_vars/app.yml"}}}
-    host_spec.relabel_sources(
-        doc, extra_names=["env"], producer="configure", copied_from=vars_dir, root=tmp_path / "project"
-    )
+    # the subprocess labels overlaid extra vars "extra_vars"; relabel names the producing step
+    doc = {"vars": {"env": {"source": "extra_vars"}, "x": {"source": "group_vars/app.yml"}}}
+    host_spec.relabel_sources(doc, producer="configure", copied_from=vars_dir, root=tmp_path / "project")
     assert doc["vars"]["env"]["source"] == "extra_vars (step configure)"
     assert doc["vars"]["x"]["source"] == "ansible/group_vars/app.yml"
 
@@ -180,6 +189,11 @@ def test_spec_stack_and_child_env_policy():
 
 @pytest.fixture
 def project_root(tmp_path: Path) -> Path:
+    return make_project_root(tmp_path)
+
+
+def make_project_root(tmp_path: Path) -> Path:
+    """The fixture project (also the ``project_root`` fixture of ``tests/steps/conftest.py``)."""
     root = tmp_path / "project"
     shutil.copytree(FIXTURES, root / "ansible")
     (root / "ansible" / "play.yml").write_text(PLAYBOOK, encoding="utf-8")
@@ -286,9 +300,10 @@ def test_play_scope_on_a_local_playbook(project_root: Path):
         "resolved": 30,
         "role": "app_config",
         "scope": "play",
-        "source": "play: ansible/play.yml",
+        "source": "role defaults: app_config",  # where the value came from, not just "the play"
         "type": "int",
     }
+    assert v["play_only"]["source"] == "play vars: ansible/play.yml"
     assert v["app_config_banner"]["resolved"] == "demo (prod)"  # role default over host_vars/web1 app_env
     assert v["play_only"]["resolved"] == "demo-play" and v["play_only"]["scope"] == "play"
     assert v["play_token"]["resolved"] == SKIPPED_KEY  # a play var named like a secret never renders

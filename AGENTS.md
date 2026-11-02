@@ -20,13 +20,14 @@ Consumers keep their own `codeorca.yaml`, `workflows/`, `specs/` in their own (u
 | `src/codeorca/secrets.py` | run-wide redaction wiring: `build_registry` (HMAC key from `CODEORCA_REDACTION_KEY` in this phase, fail-closed; seeds from `AWS_SECRET_ACCESS_KEY`/`AWS_SESSION_TOKEN` + every stack's `secrets:`/`required_env` values), `seed_inputs` (inputs whose name matches the key denylist), `line_hook` for `Runner(stream=)`, `record_filter` for `Runner(redact=)`, `terraform_stream` (a `StreamRedactor` per channel) for `TerraformRunner(stream=)` |
 | `src/codeorca/doctor.py` | `codeorca doctor`: tiny dependency-free version matcher (`exact`, `>=,<`, `7.6.*`, `*`), injectable probes, table / `--json` / `--lock` output |
 | `src/codeorca/specs/` | spec rendering: `__init__.py` (`render_spec_yaml`, `write_spec` + `.meta.yaml` sidecar + the post-write gate, `build_header`, `NEVER_RENDERED`), `terraform_plan.py` (`seed_registry`, `build_plan_document`: merge_unknown -> placeholder mask -> schema mask -> value scrub + key denylist on value trees only, provenance from `configuration.*.expressions`, `never_render`) |
-| `src/codeorca/specs/ansible_vars.py` | the Ansible host spec's **inventory scope**, run as a subprocess (`python -m codeorca.specs.ansible_vars --inventory … --host … [--roles-path] [--lookup-denylist] [--key-denylist] [--template]`): one JSON document on stdout (fd 1 is parked, ansible's own output goes to stderr), `declared`/`resolved`/`source` per var templated key by key, `<secret: declared>` from `meta/argument_specs.yml` (`no_log`, nested too), `<skipped: key matches denylist>`, `<vault>` (never decrypted), `<skipped: lookup <fqcn> is a secret source>` (lookup denylist by raw name and FQCN, denylist-named arguments, non-literal plugin names), argument-spec enrichment, `--template` files rendered with the markers in place; provenance derived from the `group_vars`/`host_vars` files |
-| `src/codeorca/specs/ansible_host.py` | pure side of the host spec: `run_vars_subprocess` (stdout in memory, stderr to a callback, no redaction key in the child), `build_host_document` (registry scrub + key denylist over value trees only), `header_for`, `render_play_scope_playbook` (**play scope**: check-mode play with `import_role` + `when: false` per role, `template` + `copy content: to_nice_json` of an allow list, markers carried as play vars via `marker_vars`), `parse_play_scope_events` over the adapter's JSONL |
+| `src/codeorca/specs/ansible_vars.py` | the Ansible host spec's **inventory scope**, run as a subprocess (`python -m codeorca.specs.ansible_vars --inventory … --host … [--roles-path …] [--lookup-denylist] [--key-denylist] [--template] [--extra-vars-file] [--play-hosts] [--resolve-lookup]`): one JSON document on stdout (fd 1 is parked, ansible's own output goes to stderr), `declared`/`resolved`/`source` per var templated key by key, `<secret: declared>` from `meta/argument_specs.yml` or `meta/main.yml`'s `argument_specs` (`no_log`, nested too, OR-ed over every role and entry point), `<skipped: key matches denylist>`, `<vault>` (never decrypted), `<skipped: lookup <fqcn> is a secret source>` (lookup denylist by raw name and FQCN, denylist-named arguments, non-literal plugin names), nested denylist-named leaves masked for templating, argument-spec enrichment, `--template` files rendered like the `template` action with the markers in place (a template whose text calls a denied lookup is a marker), extra vars overlaid on top; provenance derived from the `group_vars`/`host_vars` files `DataLoader.find_vars_files` selects; underscore keys (`_play_hosts`, `_lookup_fqcns`, `_skipped_templates`) for the caller only |
+| `src/codeorca/specs/ansible_files.py` | vars files without ansible-core: `load_vars_yaml` (`!vault` -> opaque `VaultValue`, `!unsafe` -> string, other tags plain; a real parse error raises `VarsFileError`), `find_vars_files` (= `DataLoader.find_vars_files`), `role_vars_files` (= `Role._load_role_yaml` for `defaults`/`vars`, `main/` dir included) |
+| `src/codeorca/specs/ansible_host.py` | pure side of the host spec: `run_vars_subprocess` (stdout in memory, stderr to a callback, no redaction key in the child), `build_host_document` (registry scrub + key denylist over value trees only), `header_for`, `render_play_scope_playbook` (**play scope**: check-mode play with `import_role` + `when: false` per role, `template` tasks with `ignore_errors` + `copy content: to_nice_json` of an allow list), `marker_vars`, `parse_play_scope_events` over the adapter's JSONL (`not run` for an expected task with no result) |
 | `src/codeorca/lint/` | `lint_playbooks(paths, key_denylist, lookup_denylist)` -> `{file, line, rule, level, message}`: `no-hostvars-dump`, `debug-secret-name`, `secret-to-plain-param` (module `no_log` from DOCUMENTATION plus a source scan of `argument_spec`; `resolve_module` injectable), `unknown-module` (info), `redundant-task-no-log` (info) |
 | `tests/specs/test_ansible_host*.py`, `tests/lint/`, `tests/fixtures/ansible_host/` | host spec and lint tests; the fixture inventory (2 hosts, templated/int/vaulted/lookup/password-named vars, `roles/app_config` with an argument spec and a template; the vault password is the placeholder `vault-pass.txt`); the subprocess and installed-module tests skip without ansible-core (`pip install -e '.[ansible]'`) |
 | `src/codeorca/steps/terraform.py` | the `terraform` executor (`make_executor(registry)`): stack resolution, per-stack flock, non-secret backend config, pre-plan registration of sensitive `var_overrides` / `TF_VAR_*`, `init` (`-lockfile=readonly` under `CI`), `validate`/`plan`/`output`/`test`; `apply` and `migrate_backend` fail with the Phase 3 message; `open_session` + `plan_stack` are what `codeorca drift` reuses |
 | `src/codeorca/steps/spec_render.py` | the `spec-render` executor (`terraform_plan` and `ansible` sources; `terraform_state` is not implemented) and `render_run` behind `codeorca render` (plan specs from `plan.json`, host specs from `host-vars.json`, nothing re-run) |
-| `src/codeorca/steps/host_spec.py` | `spec-render` with `source.ansible`: staged inventory (producer's kept `extra-vars.json` merged into the host entry, playbook-adjacent `group_vars`/`host_vars` copied) in the 0700 handoff dir, inventory scope via `run_vars_subprocess`, play scope via `AnsibleRunner` (`--check --diff`, markers in a 0600 `-e @` file, output held until clear values are registered), `merge_play_scope` (`scope: inventory`/`play`), `host-vars.json` (0600) + `write_spec` |
+| `src/codeorca/steps/host_spec.py` | `spec-render` with `source.ansible`: the play-scope playbook, its roles' `defaults`/`vars` and `vars_files` read first (vault-aware, fail closed), staged inventory (playbook-adjacent `group_vars`/`host_vars` copied) in the 0700 handoff dir, inventory scope via `run_vars_subprocess` (every roles dir, the producer's kept `extra-vars.json` overlaid on top), play scope via `AnsibleRunner` (only the plays that target the host, `--check --diff`, a random vault password, markers incl. `<vault>` and masked nested trees in a 0600 `-e @` file, secret leaves registered before it runs, output held until clear values are registered), `merge_play_scope` (`scope: inventory`/`play`, `source` = the play-scope source that won), `host-vars.json` (0600) + `write_spec` |
 | `tests/specs/`, `tests/steps/`, `tests/cli/`, `tests/integration/` | plan document + YAML writer over the fixtures; executors without a terraform binary; doctor with injected probes; the reference project end to end through the CLI (skipped without `terraform`) |
 | `src/codeorca/policy.py` | Terraform deny floor as code (`DENY_FLOOR`, `check_argv`), the `Policy` model (narrow-only, `extra='forbid'`) and the plan gate (`plan_gate` -> `GateVerdict`) |
 | `src/codeorca/tfjson.py` | pure parsers for `-json` streams (tolerant of non-JSON lines) and `show -json` plan/state documents: summary, sensitive variables/outputs, prior and previous outputs |
@@ -164,13 +165,32 @@ Phase 2 integration (2026-11-01):
 - **The ansible step's kept inventory has no `group_vars`.** It lives in `<run>/steps/<id>/`, so neither the
   inventory-scope subprocess (`group_vars` next to the inventory) nor a spec play generated in the step dir
   (playbook-adjacent `group_vars`) sees `ansible/group_vars/*`; the host-spec step stages the inventory with a
-  **copy** of those trees. Not a symlink: `ansible_vars` labels provenance with `path.resolve().relative_to(
-  inventory_dir)`, a symlink resolves outside it and the label became an absolute run-dir path (run id in a
-  committed body). When the inventory has `group_vars` of its own, the playbook's are not merged in (residual).
+  **copy** of those trees. (Provenance labels were once `path.resolve().relative_to(inventory_dir)`, so a symlink
+  became an absolute path in a committed body; they are lexical now, `os.path.relpath`, so a symlinked shared
+  `group_vars/all.yml` keeps a relative label too.) When the inventory has `group_vars` of its own, the playbook's
+  are not merged in (residual).
 - **The extra-vars handoff is deleted with the play**, so the host spec could not see `app_environment` & co.:
   the ansible step keeps a redacted 0600 `extra-vars.json` next to its inventory copy and the host-spec step
-  merges it into the host entry (`source: extra_vars (step <id>)`). Markers ride in the play scope's `-e` file,
-  not play `vars`: `-e` outranks role `vars/` and `set_fact`, play vars do not.
+  hands it to the vars subprocess, which overlays it on top of `get_vars` (`source: extra_vars (step <id>)`).
+  Merging it into the host's inventory entry (the first design) was wrong: `host_vars` files outrank the host
+  entry, real `-e` outranks everything, so the spec showed the `host_vars` value labelled `extra_vars`. Markers
+  ride in the play scope's `-e` file, not play `vars`: `-e` outranks role `vars/` and `set_fact`, play vars do not.
+- **A plain YAML loader turns one `!vault` entry into "no candidates at all"**: ruamel's safe loader raises on the
+  unknown tag, and swallowing that error dropped every key of the file (a denylist-named plain value next to one
+  vaulted entry rendered in clear). `specs/ansible_files.py` constructs `!vault` as an opaque `VaultValue`; a file
+  that still does not parse fails the step. `add_constructor` has the `add_representer` trap (a classmethod on a
+  shared dict): subclass `SafeConstructor` and assign `yaml.Constructor`. Ansible also reads `defaults/main/` and
+  `vars/main/` directories, extensionless `group_vars/all` and nested `group_vars/<g>/sub/x.yml`: mirror
+  `find_vars_files`, never a fixed list of names.
+- **The lookup denylist must see template TEXT and every play-scope source**: markers are keyed by var name, so a
+  `lookup()` written in a listed `.j2`, a `vars_files` value or a nested `password:` leaf rendered in clear. The
+  vars subprocess scans each template's Jinja code (`{{ }}`/`{% %}` only: prose like "DNS lookup (cached)" is not a
+  call) and resolves the play scope's lookup names (`aws_ssm` -> `amazon.aws.aws_ssm`, a fake
+  `ansible.builtin.<name>` missed redirects); nested denylist-named leaves are masked before templating.
+- **The play scope inherits the consumer's vault config** (`ANSIBLE_VAULT_IDENTITY_LIST`/`_PASSWORD_FILE` or
+  `ansible.cfg` `vault_identity_list`): a vaulted role default on the allow list rendered decrypted. Vaulted values
+  get a `<vault>` marker through `-e`, and the spec play runs with a random vault password so a missed one fails to
+  decrypt. (An empty `ANSIBLE_VAULT_IDENTITY_LIST=` fails every run: "can not be a directory".)
 - **A literal secret in a playbook's own `vars:` was copied into the kept `play-scope.yml`** (caught by
   `scan_outputs` in the step test): a play var that gets a marker is now left out of the generated play.
 - **Role defaults are invisible to the inventory scope**, so a role template fails there (`AnsibleUndefinedVariable`)
@@ -263,8 +283,8 @@ Ansible (core 2.21.5):
   so provenance is derived by loading `group_vars`/`host_vars` ourselves in precedence order. A static
   `ansible.builtin.import_role` with `when: false` exposes the role's defaults and vars to the play while every
   task is skipped (the play-scope spec play's way to see role defaults without running the role). Play `vars`
-  outrank inventory vars and role defaults but not role `vars/` or `set_fact`: the inventory-scope markers are
-  carried into the play as `vars`, a secret defined in a role's `vars/` still renders and is the redactor's job.
+  outrank inventory vars and role defaults but not role `vars/` or `set_fact`, which is why every marker rides in
+  the `-e` file (a value only `set_fact` produces is still the redactor's job).
 - **Builtin module DOCUMENTATION almost never carries `no_log`** (at 2.21.5 only `expect` does; `user.password`,
   `uri.url_password`, `copy.content` are `no_log` in the code's `argument_spec` only): the lint reads the docs
   *and* scans the module source (`name=dict(... no_log=True)` at the entry's own level), so a lint that trusted
@@ -294,8 +314,10 @@ Container (for the image phase):
    adapter, callback, step, host spec with play scope, `codeorca lint ansible`, reference `configure-local` in CI).
    Left from Phase 2: `vault_password_file` is not a step field yet; Windows/psrp targets are deferred; a project
    that omits `redaction.lookup_denylist` gets an empty one (env/password lookups run in the host spec); play
-   scope reads every play of `play_scope.playbook` regardless of its `hosts:` pattern and scans only roles vendored
-   under a roles dir for denied lookups; playbook-adjacent `group_vars` are not merged with an inventory's own.
+   scope scans only roles vendored under a roles dir (not installed collection roles) for markers and argument
+   specs, cannot read a templated `vars_files` path (a warning) and does not follow `{% include %}` into other
+   templates for the lookup scan; `set_fact` values are the redactor's job; playbook-adjacent `group_vars` are not
+   merged with an inventory's own.
 3. Helpers (python/powershell/shell), gate with TTY + resume, apply bound to the plan sha256, backend bootstrap.
 4. Container image on `ghcr.io/git-cgallagher/ansible-runtime`: the pyproject ranges (`pydantic`, `ruamel.yaml`,
    `jinja2`) must be pinned exactly, with hashes, in `requirements/codeorca.txt` for the image; ranges are for pip users only.

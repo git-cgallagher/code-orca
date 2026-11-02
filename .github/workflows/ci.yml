@@ -32,7 +32,7 @@ jobs:
           whl=$(ls /tmp/wheel/*.whl)
           /tmp/wheel-venv/bin/pip install -q --no-cache-dir "${whl}[ansible]"
           /tmp/wheel-venv/bin/python -c 'import codeorca.adapters.terraform, codeorca.redact, codeorca.specs.terraform_plan, codeorca.steps.terraform, codeorca.cli'
-          /tmp/wheel-venv/bin/python -c 'import codeorca.adapters.ansible, codeorca.steps.ansible, codeorca.steps.host_spec, codeorca.specs.ansible_host, codeorca.specs.ansible_vars, codeorca.lint, codeorca.ansible_plugins.callback.codeorca_jsonl'
+          /tmp/wheel-venv/bin/python -c 'import codeorca.adapters.ansible, codeorca.steps.ansible, codeorca.steps.host_spec, codeorca.specs.ansible_host, codeorca.specs.ansible_vars, codeorca.specs.ansible_files, codeorca.lint, codeorca.ansible_plugins.callback.codeorca_jsonl'
           /tmp/wheel-venv/bin/codeorca --version
       - name: Lint
         run: ruff check . && ruff format --check .

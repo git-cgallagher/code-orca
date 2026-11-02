@@ -19,9 +19,10 @@ Two scopes feed one document per host:
    Running the play is the Ansible step's job (Phase 2 adapter); :func:`parse_play_scope_events` reads the
    adapter's JSONL events back into ``{vars, templates, errors}``. Ansible itself templates there, so without
    help a declared secret or a denied lookup renders in clear: :func:`marker_vars` lifts every marker of the
-   inventory-scope document into play ``vars`` (play vars outrank inventory vars and role defaults, verified),
-   so the play sees ``<secret: declared>`` where the inventory had the value and the denied lookup never runs.
-   Role ``vars/`` and ``set_fact`` outrank play vars: a secret defined there is the adapter's redactor's job.
+   inventory-scope document so the caller can hand it to the play through its ``-e`` file (``-e`` outranks role
+   ``vars/`` and ``set_fact``; ``codeorca.steps.host_spec`` adds the play-scope markers), so the play sees
+   ``<secret: declared>`` where the inventory had the value and the denied lookup never runs. Template tasks run
+   with ``ignore_errors``; :func:`parse_play_scope_events` records ``not run`` for an expected task with no result.
 """
 
 from __future__ import annotations
@@ -170,7 +171,7 @@ def run_vars_subprocess(
     python_executable: str,
     inventory: str | os.PathLike[str],
     host: str,
-    roles_path: str | os.PathLike[str] | None,
+    roles_path: str | os.PathLike[str] | Sequence[str | os.PathLike[str]] | None,
     lookup_denylist: Iterable[str],
     key_denylist: Iterable[str],
     templates: Iterable[str | os.PathLike[str]],
@@ -179,6 +180,9 @@ def run_vars_subprocess(
     stderr: Callable[[str], None] | None = None,
     cwd: str | os.PathLike[str] | None = None,
     timeout: float | None = None,
+    extra_vars_file: str | os.PathLike[str] | None = None,
+    play_hosts: Iterable[str] = (),
+    resolve_lookups: Iterable[str] = (),
 ) -> dict[str, Any]:
     """Run ``python -m codeorca.specs.ansible_vars`` and return its parsed JSON document.
 
@@ -186,11 +190,20 @@ def run_vars_subprocess(
     goes to ``stderr(line)`` as it arrives (the caller's redacting sink). The child environment is ``env`` minus
     ``CODEORCA_REDACTION_KEY``, with ``FORCED_ENV`` and the untrusted-template guard set. A non-zero exit or a
     stdout that is not one JSON object raises :class:`AnsibleVarsError` with the exit code only, never the output.
-    ``timeout`` (seconds) kills the child: an executed lookup (``pipe``, ``url``) can hang.
+    ``timeout`` (seconds) kills the child: an executed lookup (``pipe``, ``url``) can hang. ``roles_path`` may be
+    one directory or several (every roles dir whose argument specs count).
     """
     argv = [str(python_executable), "-m", "codeorca.specs.ansible_vars", "--inventory", str(inventory), "--host", host]
-    if roles_path:
-        argv += ["--roles-path", str(roles_path)]
+    if isinstance(roles_path, str | os.PathLike):
+        roles_path = [roles_path]
+    for directory in roles_path or ():
+        argv += ["--roles-path", str(directory)]
+    if extra_vars_file is not None:
+        argv += ["--extra-vars-file", str(extra_vars_file)]
+    for pattern in play_hosts:
+        argv += ["--play-hosts", pattern]
+    for name in resolve_lookups:
+        argv += ["--resolve-lookup", name]
     for pattern in lookup_denylist:
         argv += ["--lookup-denylist", pattern]
     for pattern in key_denylist:
@@ -292,6 +305,7 @@ def render_play_scope_playbook(
                 "ansible.builtin.template": {"src": src, "dest": str(out / path.name)},
                 "check_mode": True,
                 "diff": True,
+                "ignore_errors": True,  # one failing template must not stop the others or the vars dump
             }
         )
     if vars:
@@ -328,13 +342,17 @@ def render_play_scope_playbook(
     return buf.getvalue()
 
 
-def parse_play_scope_events(events: Iterable[Mapping[str, Any]], host: str | None = None) -> dict[str, Any]:
+def parse_play_scope_events(
+    events: Iterable[Mapping[str, Any]], host: str | None = None, expected: Sequence[str] = ()
+) -> dict[str, Any]:
     """``{vars, templates, errors}`` from the adapter's JSONL events (dicts with ``type``, ``host``, ``task``,
     ``status``, ``result``, ``diff``). Tasks are matched by name, not order; the diff is taken from
-    ``event["diff"]`` or ``result["diff"]``, as a list or a single dict."""
+    ``event["diff"]`` or ``result["diff"]``, as a list or a single dict. Every ``expected`` task name with no result
+    event is recorded as ``not run`` (the play stopped before it)."""
     variables: dict[str, Any] = {}
     templates: dict[str, str] = {}
     errors: dict[str, str] = {}
+    seen: set[str] = set()
     for event in events:
         if not isinstance(event, Mapping) or event.get("type") in NON_RESULT_EVENTS:
             continue
@@ -343,6 +361,7 @@ def parse_play_scope_events(events: Iterable[Mapping[str, Any]], host: str | Non
             continue
         if not (task == VARS_TASK_NAME or task.startswith(TEMPLATE_TASK_PREFIX)):
             continue
+        seen.add(task)
         result = event.get("result") if isinstance(event.get("result"), Mapping) else {}
         status = str(event.get("status") or ("failed" if result.get("failed") else "ok")).lower()
         if status in ("failed", "unreachable"):
@@ -367,6 +386,9 @@ def parse_play_scope_events(events: Iterable[Mapping[str, Any]], host: str | Non
                 errors[task] = "vars dump is not a mapping"
         else:
             templates[task[len(TEMPLATE_TASK_PREFIX) :]] = after
+    for task in expected:
+        if task not in seen:
+            errors[task] = "not run"
     return {"vars": variables, "templates": templates, "errors": errors}
 
 

@@ -21,6 +21,10 @@
   `ANSIBLE_VERBOSITY=0`, `ANSIBLE_KEEP_REMOTE_FILES=False` and `ANSIBLE_CALLBACKS_ENABLED=codeorca_jsonl` instead of
   dropping names a consumer's `ansible.cfg` could set again (the vars subprocess forces the first three too), and
   `project.ansible.env` refuses those names.
+- Phase 2 review fixes (ansible step, secrets): before the play starts the step also registers the literal secret
+  leaves of the vars files it will read (an `inventory.path` file, `group_vars`/`host_vars` next to the inventory
+  and the playbook, the playbook's `vars`/`vars_files`, its roles' `defaults`/`vars`, argument-spec `no_log` vars),
+  so `--dry-run`'s `--diff` no longer prints a denylist-named `group_vars` value into `events.jsonl`.
 - Phase 2 review fixes (runtime): the ansible step writes the live inventory and the extra-vars handoff inside the
   `try` that deletes the handoff dir (a failure after the inventory was written left `ansible_password` on disk),
   and handoff JSON is dumped with str keys (a nested `{80: http, https: 443}` raised under `sort_keys`).

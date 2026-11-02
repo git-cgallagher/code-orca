@@ -9,8 +9,12 @@ What a step does, in order:
    dirs are on Ansible's search path; setting ``ANSIBLE_ROLES_PATH``/``ANSIBLE_COLLECTIONS_PATH`` would replace the
    defaults and any ``ansible.cfg`` paths); a copy is kept as ``<step dir>/playbook.yml``;
 2. register, **before** the process starts, every ``extra_vars`` and inline-inventory leaf whose key matches the
-   key denylist (``ansible_password``, ``db_token`` ...); a value too short for the registry is reported by name
-   under ``unprotected_vars``;
+   key denylist (``ansible_password``, ``db_token`` ...), and the same from the files the play will read: an
+   ``inventory.path`` file and the ``group_vars``/``host_vars`` next to it and next to the playbook, the playbook's
+   ``vars``/``vars_files`` and its roles' ``defaults``/``vars`` (a var declared ``no_log`` by a role's argument
+   spec counts as secret too). Literal values only: a templated value is rendered by the play and is the
+   redactor's residual. ``--check --diff`` (``--dry-run``) puts rendered files in the events, so this matters most
+   there. A value too short for the registry is reported by name under ``unprotected_vars``;
 3. write the inline inventory (``generate_inventory``) and the extra vars (``write_handoff``) as 0600 files under
    ``<run dir>/handoff/<step id>/`` (0700), and the inventory copy the host-spec renderer needs later as
    ``<step dir>/inventory.yml`` (values redacted through the registry and the key denylist before it is written;
@@ -114,6 +118,91 @@ def register_secret_values(registry: SecretRegistry, trees: Mapping[str, Any], d
     return sorted(registered), sorted(tried - registered)
 
 
+def _vars_tree_files(directory: Path) -> list[Path]:
+    """Every vars file under ``<directory>/group_vars`` and ``<directory>/host_vars`` (any group or host: which ones
+    the play reads depends on the inventory; registering more values is harmless)."""
+    from codeorca.specs.ansible_files import VARS_EXTENSIONS
+
+    found: list[Path] = []
+    for name in ("group_vars", "host_vars"):
+        base = directory / name
+        if base.is_dir():
+            found += sorted(
+                p
+                for p in base.rglob("*")
+                if p.is_file() and not p.name.startswith(".") and (p.suffix in VARS_EXTENSIONS or not p.suffix)
+            )
+    return found
+
+
+def register_file_secrets(
+    registry: SecretRegistry, step, root: Path, denylist: tuple[str, ...]
+) -> tuple[list[str], list[str], list[str]]:
+    """Register the literal secret leaves of the vars files the play will read (module docstring, step 2):
+    ``(registered names, unprotected names, warnings)``. A file that is not YAML is skipped with a warning (Ansible
+    reports it itself); a vault-encrypted file holds nothing readable here."""
+    from codeorca.specs.ansible_files import VarsFileError, load_mapping_files, load_vars_yaml
+    from codeorca.steps import host_spec
+
+    warnings: list[str] = []
+    trees: dict[str, list[tuple[int, str, Any]]] = {}
+
+    def add(name: str, value: Any) -> None:
+        trees.setdefault(str(name), []).append((0, "", value))
+
+    files: list[Path] = []
+    roles_dirs: list[Path] = []
+    playbook = None
+    if step.inventory.path:
+        inventory = Path(str(step.inventory.path))
+        inventory = (inventory if inventory.is_absolute() else root / inventory).resolve()
+        if inventory.is_file():
+            try:
+                add("inventory", load_vars_yaml(inventory))
+            except VarsFileError as e:
+                warnings.append(f"not checked for secret values: {e}")
+            files += _vars_tree_files(inventory.parent)
+        elif inventory.is_dir():
+            files += _vars_tree_files(inventory)
+    if step.playbook:
+        playbook = Path(str(step.playbook))
+        playbook = (playbook if playbook.is_absolute() else root / playbook).resolve()
+        if playbook.is_file():
+            files += _vars_tree_files(playbook.parent)
+            roles_dirs.append(playbook.parent / "roles")
+    roles_dirs += [root / "roles", root / "ansible" / "roles"]
+    roles_dirs = [d for d in dict.fromkeys(roles_dirs) if d.is_dir()]
+    for path in dict.fromkeys(files):
+        try:
+            for _path, data in load_mapping_files([path]):
+                for key, value in data.items():
+                    add(key, value)
+        except VarsFileError as e:
+            warnings.append(f"not checked for secret values: {e}")
+    try:
+        if playbook is not None and playbook.is_file():
+            plays = host_spec.read_playbook(playbook)
+            candidates, _ = host_spec.play_candidates(plays, roles_dirs, root, "")
+        elif step.role:
+            candidates = host_spec.role_sources([str(step.role)], roles_dirs)
+        else:
+            candidates = {}
+    except VarsFileError as e:
+        warnings.append(f"not checked for secret values: {e}")
+        candidates = {}
+    for key, values in candidates.items():
+        trees.setdefault(key, []).extend(values)
+    specs = host_spec.argument_specs(roles_dirs)
+    registered: set[str] = set()
+    tried: set[str] = set()
+    for name, values in trees.items():
+        for value in host_spec.secret_values({name: values}, specs, denylist):
+            tried.add(name)
+            if registry.add(value) or registry.count_matches(value) > 0:
+                registered.add(name)
+    return sorted(registered), sorted(tried - registered), warnings
+
+
 def _root(project: Project | None) -> Path:
     if project is not None and project.root is not None:
         return project.root
@@ -174,6 +263,9 @@ def execute(step, ctx: StepContext, registry: SecretRegistry) -> StepResult:
     registered, unprotected = register_secret_values(
         registry, {"extra_vars": extra_vars, "inventory": inline or {}}, denylist
     )
+    more, more_unprotected, file_warnings = register_file_secrets(registry, step, root, denylist)
+    registered = sorted(set(registered) | set(more))
+    unprotected = sorted((set(unprotected) | set(more_unprotected)) - set(registered))
 
     env = dict(ctx.env)
     env.update({k: str(v) for k, v in config.env.items()})
@@ -186,7 +278,7 @@ def execute(step, ctx: StepContext, registry: SecretRegistry) -> StepResult:
         kept_playbook.write_text(text, encoding="utf-8")
         playbook = handoff_dir / GENERATED_PLAYBOOK  # written inside the try below, next to its search-path links
 
-    warnings: list[str] = []
+    warnings: list[str] = list(file_warnings)
     if unprotected:
         warnings.append(
             "secret-named variable value(s) shorter than the registry minimum are not scrubbed: "

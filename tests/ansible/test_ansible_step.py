@@ -364,3 +364,38 @@ def test_gather_facts_is_for_role_steps_only():
     step = ansible(role="ns.c.r", gather_facts=False)
     del step["playbook"]
     assert workflow([step]).steps[0].gather_facts is False
+
+
+DRY_PLAYBOOK = """\
+- hosts: app
+  gather_facts: false
+  tasks:
+    - name: render the db config
+      ansible.builtin.template:
+        src: templates/db.conf.j2
+        dest: "{{ scratch_dir }}/db.conf"
+        mode: "0600"
+"""
+
+
+@requires_ansible
+def test_dry_run_diff_never_shows_a_denylist_named_group_vars_value(project_root, tmp_path):
+    (project_root / "ansible" / "group_vars").mkdir()
+    (project_root / "ansible" / "group_vars" / "app.yml").write_text(
+        "db_password: FIXTURE-PLAINTEXT-dbpass-0004\napp_db: {user: app, password: FIXTURE-NESTED-dbpass-0004}\n"
+    )
+    (project_root / "ansible" / "templates").mkdir()
+    (project_root / "ansible" / "templates" / "db.conf.j2").write_text(
+        "db_password = {{ db_password }}\nnested = {{ app_db.password }}\n"
+    )
+    (project_root / "ansible" / "dry.yml").write_text(DRY_PLAYBOOK)
+    project = load_project(project_root / "codeorca.yaml")
+    step = ansible(playbook="ansible/dry.yml", extra_vars={"scratch_dir": str(tmp_path)})
+    rc, r = run(project, workflow([step]), tmp_path, registry(), dry_run=True)
+    assert rc == EXIT_OK, r.states["cfg"].get("error")
+    events = (r.run_dir.steps_dir / "cfg" / "events.jsonl").read_text()
+    assert "render the db config" in events and "db_password = " in events  # the diff is there, scrubbed
+    leaked = [p for p in r.run_dir.path.rglob("*") if p.is_file() and "dbpass-0004" in p.read_text(errors="ignore")]
+    assert leaked == []
+    result = json.loads((r.run_dir.steps_dir / "cfg" / "result.json").read_text())
+    assert {"db_password", "app_db"} <= set(result["registered_vars"])

@@ -20,8 +20,7 @@ What a step does, in order:
    - ``output`` -> ``output -json`` seeded and redacted into ``tf-outputs.json`` (sensitive values become their
      placeholder);
    - ``test`` -> ``terraform test`` in plan mode only;
-   - ``apply`` and ``migrate_backend`` -> failed with the Phase 3 message (apply needs the gate and the plan
-     sha256 binding; migrate_backend needs the backend bootstrap).
+   - ``apply`` -> see "Apply" below; ``migrate_backend`` -> see "migrate_backend" below.
 
 Every Terraform stdout/stderr line goes through a ``StreamRedactor`` before it reaches ``stdout.log`` /
 ``stderr.log`` (the ``-json`` documents the adapter parses in memory are never streamed at all, and the
@@ -37,6 +36,31 @@ changes: every action here is already read-only.
 ``plan``'s stderr (diagnostics) is held back the same way: a diagnostic can quote a state-held value too.
 Every other command's stderr streams live through the redactor, which at that point knows the pre-registered
 values only (inputs, ``TF_VAR_*`` of sensitive or denylist-named variables, env tokens).
+
+Apply (plan sections 5.4 and 5.9), refused (``failed``, nothing run) unless every check holds:
+
+1. ``plan_file`` resolves inside ``<run>/steps/<id>/plan.tfplan`` of a ``terraform`` ``plan`` step of the same
+   stack in THIS workflow that succeeded and whose result names that file (a relative path is relative to the
+   run dir); under ``--dry-run`` the step stops here as ``skipped`` (plan only, nothing applied);
+2. the step (transitively) needs a ``gate`` that succeeded with ``decision: approve`` and recorded this plan
+   file's current sha256 (a dry-run approval never counts in a real run); the newest such approval wins;
+3. that approval is younger than ``project.gate.max_age``;
+4. ``show -json`` of the plan seeds the registry (a resumed run is a fresh process: the plan's sensitive values
+   are registered before anything streams), the plan is applyable/complete/not errored, and the plan gate,
+   run again with the approving gate's ``allow_delete_of``, passes.
+
+Then ``TerraformRunner.apply(plan_file, sha256)`` (the adapter refuses a mismatch again), streamed through the
+redactor; on success ``output -json`` gives the redacted ``tf_outputs`` (``tf-outputs.json``) and the plan file is
+deleted. Retries: an attempt after the first runs only when the previous attempt failed with ``Error acquiring
+the state lock`` before Terraform reported any change (``apply-attempt.json`` in the step dir records it);
+anything else is refused whatever ``retry:`` says.
+
+migrate_backend (plan section 5.11): needs an approving gate upstream (as above, no plan binding), then probes the
+NEW backend from a temporary copy of the stack dir (``init -reconfigure -backend-config`` + ``state list``; the
+state file is never read) and refuses when the target already holds a state with resources; then ``init
+-migrate-state -force-copy -backend-config=<rendered>`` in the stack dir, the one argv ``check_argv`` lets through
+with ``allow_migrate_state=True``. It runs without ``-json`` (``-json`` and ``-migrate-state`` are mutually
+exclusive on 1.14.7). ``backend.type: local`` renders no backend config and is refused.
 """
 
 from __future__ import annotations
@@ -50,6 +74,7 @@ import time
 from collections.abc import Callable, Mapping
 from contextlib import ExitStack
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -60,7 +85,9 @@ from codeorca.adapters.terraform import (
     TerraformRunner,
     TerraformTimeout,
     plan_file_sha256,
+    render_backend_hcl,
 )
+from codeorca.models import _ancestors
 from codeorca.project import Project, Stack
 from codeorca.redact import SecretRegistry, compile_key_denylist, redact_tree
 from codeorca.rundir import RunDir, StackLocked, stack_lock
@@ -73,8 +100,13 @@ from codeorca.specs.terraform_plan import build_plan_document, seed_registry
 PLAN_FILE = "plan.tfplan"
 PLAN_JSON = "plan.json"
 TF_OUTPUTS_JSON = "tf-outputs.json"
-PHASE3_APPLY = "apply needs the gate (Phase 3): the apply step binds to an approved plan sha256 and is not wired yet"
-PHASE3_MIGRATE = "migrate_backend needs the backend bootstrap (Phase 3) and is not wired yet"
+APPLY_MARKER = "apply-attempt.json"
+LOCK_ERROR = "Error acquiring the state lock"
+DEFAULT_MAX_AGE = "24h"
+# -json message types that mean Terraform started changing something (a retry after one of these is refused)
+CHANGE_MESSAGE_TYPES = frozenset(
+    {"apply_start", "apply_progress", "apply_complete", "apply_errored", "provision_start", "provision_complete"}
+)
 
 _VARIABLE_BLOCK = re.compile(r'variable\s+"([^"]+)"\s*\{', re.MULTILINE)
 _SENSITIVE_TRUE = re.compile(r"^\s*sensitive\s*=\s*true\s*(#.*|//.*)?$", re.MULTILINE)
@@ -493,9 +525,9 @@ def make_executor(registry: SecretRegistry) -> Executor:
 def execute(step, ctx: StepContext, registry: SecretRegistry) -> StepResult:
     action = step.action
     if action == "apply":
-        return StepResult("failed", error=PHASE3_APPLY)
+        return apply_step(step, ctx, registry)
     if action == "migrate_backend":
-        return StepResult("failed", error=PHASE3_MIGRATE)
+        return migrate_step(step, ctx, registry)
     project = ctx.project
     stack_name = str(step.stack)
     with ExitStack() as resources:
@@ -578,3 +610,350 @@ def _test(session: StackSession) -> StepResult:
     if doc["passed"]:
         return StepResult("succeeded", result=result)
     return StepResult("failed", result=result, error=f"terraform test exited {doc['exit_code']}")
+
+
+# --- apply + migrate_backend (Phase 3) ------------------------------------------------------------------------------
+
+
+class Refused(Exception):
+    """A precondition of apply/migrate_backend does not hold; the step fails and nothing ran."""
+
+
+@dataclass
+class Approval:
+    gate_id: str
+    decided_at: str
+    approver: str
+    allow_delete_of: list[str]
+    plan_sha256: str | None = None
+
+
+def _workflow_steps(ctx: StepContext) -> dict[str, Any]:
+    if ctx.workflow is None:
+        raise Refused("this step needs the workflow graph (StepContext.workflow) to find its gate")
+    return {s.id: s for s in ctx.workflow.steps}
+
+
+def resolve_plan_file(step, ctx: StepContext) -> tuple[Path, str]:
+    """``(plan file, producing step id)``; refuses anything but this run's own ``plan`` output for this stack."""
+    steps = _workflow_steps(ctx)
+    run_root = ctx.run_dir.path.resolve()
+    steps_root = (run_root / "steps").resolve()
+    raw = Path(str(step.plan_file))
+    path = (raw if raw.is_absolute() else run_root / raw).resolve()
+    if not path.is_relative_to(steps_root):
+        raise Refused(f"plan_file {raw} is outside this run's directory; only a plan this run produced is applied")
+    parts = path.relative_to(steps_root).parts
+    if len(parts) != 2 or parts[1] != PLAN_FILE:
+        raise Refused(f"plan_file {raw} is not a step's {PLAN_FILE} in this run")
+    producer = steps.get(parts[0])
+    if producer is None or producer.type != "terraform" or producer.action != "plan":
+        raise Refused(f"plan_file {raw} was not produced by a terraform plan step of this workflow")
+    if str(producer.stack) != str(step.stack):
+        raise Refused(f"plan_file {raw} is a plan of stack {producer.stack!r}, not {step.stack!r}")
+    state = (ctx.context.get("steps") or {}).get(producer.id) or {}
+    if state.get("status") != "succeeded":
+        raise Refused(f"plan step {producer.id} did not succeed (status {state.get('status')!r})")
+    result = ctx.run_dir.read_result(producer.id) or {}
+    named = ((result.get("files") or {}) if isinstance(result.get("files"), dict) else {}).get("plan_file")
+    if not named or Path(str(named)).resolve() != path:
+        raise Refused(f"plan step {producer.id} does not name {raw} as its plan file")
+    if not path.is_file():
+        raise Refused(f"plan file {path} is gone (already applied, or removed); re-plan in a new run")
+    return path, producer.id
+
+
+def find_approval(step, ctx: StepContext, plan_path: Path | None = None) -> Approval:
+    """The newest approving gate this step transitively needs (bound to ``plan_path``'s current sha256 when
+    given). Refuses when there is none."""
+    steps = _workflow_steps(ctx)
+    ancestors = _ancestors(ctx.workflow.graph(), step.id)  # type: ignore[union-attr]
+    current = plan_file_sha256(plan_path) if plan_path is not None else None
+    reasons: list[str] = []
+    found: list[Approval] = []
+    for gid in sorted(ancestors):
+        gate = steps.get(gid)
+        if gate is None or gate.type != "gate":
+            continue
+        status = ((ctx.context.get("steps") or {}).get(gid) or {}).get("status")
+        result = ctx.run_dir.read_result(gid) or {}
+        if status != "succeeded" or result.get("decision") != "approve":
+            reasons.append(f"gate {gid} is {status!r} (decision {result.get('decision')!r})")
+            continue
+        if result.get("dry_run") and not ctx.dry_run:
+            reasons.append(f"gate {gid} was auto-approved by --dry-run")
+            continue
+        sha = None
+        if plan_path is not None:
+            entries = [e for e in (result.get("plans") or {}).values() if Path(str(e.get("path"))) == plan_path]
+            if not entries:
+                reasons.append(f"gate {gid} did not see plan file {plan_path}")
+                continue
+            sha = entries[0].get("sha256")
+            if sha != current:
+                reasons.append(f"plan file {plan_path} changed after gate {gid} approved it")
+                continue
+        found.append(
+            Approval(
+                gid,
+                str(result.get("decided_at") or ""),
+                str(result.get("approver") or ""),
+                [str(a) for a in (result.get("allow_delete_of") or [])],
+                sha,
+            )
+        )
+    if not found:
+        detail = "; ".join(reasons) or "the step needs no gate"
+        raise Refused(f"step {step.id} needs an approving gate upstream ({detail})")
+    return max(found, key=lambda a: a.decided_at)
+
+
+def check_approval_age(project: Project | None, approval: Approval) -> None:
+    from codeorca.runner import parse_duration
+    from codeorca.steps.gate import parse_utc
+
+    max_age = project.gate.max_age if project is not None else DEFAULT_MAX_AGE
+    try:
+        decided = parse_utc(approval.decided_at)
+    except ValueError:
+        raise Refused(f"gate {approval.gate_id} recorded no valid decision time") from None
+    age = (datetime.now(UTC) - decided).total_seconds()
+    if age > parse_duration(max_age):
+        raise Refused(
+            f"the approval of gate {approval.gate_id} is older than gate.max_age {max_age}; re-plan and re-approve"
+        )
+
+
+def _marker(ctx: StepContext) -> Path:
+    return ctx.step_dir / APPLY_MARKER
+
+
+def _check_retry(ctx: StepContext) -> None:
+    if ctx.attempt <= 1:
+        return
+    try:
+        previous = json.loads(_marker(ctx).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        previous = {}
+    if not previous.get("lock_error_before_change"):
+        raise Refused(
+            "apply is retried only after a state-lock error before any change; the previous attempt failed with: "
+            + str(previous.get("error") or "an error before Terraform ran")
+        )
+
+
+def apply_step(step, ctx: StepContext, registry: SecretRegistry) -> StepResult:
+    try:
+        _check_retry(ctx)
+        plan_path, producer = resolve_plan_file(step, ctx)
+        if ctx.dry_run:
+            return StepResult(
+                "skipped",
+                result={
+                    "dry_run": True,
+                    "applied": False,
+                    "plan_file": str(plan_path),
+                    "note": "plan only (--dry-run)",
+                },
+                outputs={"stack": str(step.stack)},
+            )
+        approval = find_approval(step, ctx, plan_path)
+        check_approval_age(ctx.project, approval)
+    except Refused as e:
+        return StepResult("failed", error=f"apply refused: {e}")
+    _write_json(_marker(ctx), {"attempt": ctx.attempt, "lock_error_before_change": False, "error": None})
+    with ExitStack() as resources:
+        try:
+            session = open_session(
+                ctx.project,
+                str(step.stack),
+                registry,
+                ctx.step_dir,
+                ctx.env,
+                resources,
+                run_dir=ctx.run_dir,
+                step_id=step.id,
+                line_filter=ctx.line_filter,
+                timeout=ctx.timeout,
+            )
+        except StepError as e:
+            _write_json(_marker(ctx), {"attempt": ctx.attempt, "lock_error_before_change": False, "error": str(e)})
+            raise
+        try:
+            session.init()
+            result = _apply(session, ctx, plan_path, producer, approval)
+        except policy.PolicyError as e:
+            raise StepError(f"policy: {e}") from None
+        except TerraformTimeout as e:
+            raise StepTimeout(f"step {step.id}: {registry.redact(str(e))}") from None
+        except TerraformError as e:
+            raise StepError(registry.redact(str(e))) from None
+        finally:
+            session.record()
+        result.outputs.setdefault("stack", str(step.stack))
+        return result
+
+
+def _apply(session: StackSession, ctx: StepContext, plan_path: Path, producer: str, approval: Approval) -> StepResult:
+    registry, project = session.registry, session.project
+    denylist = project_key_denylist(project)
+    plan_json = session.timed("show", lambda: session.runner.show_plan(plan_path))
+    seed_registry(registry, plan_json, denylist)  # before anything of the apply streams
+    base: dict[str, Any] = {
+        "plan_file": str(plan_path),
+        "plan_step": producer,
+        "plan_sha256": approval.plan_sha256,
+        "gate": approval.gate_id,
+        "approver": approval.approver,
+        "applied": False,
+    }
+    problems = [
+        text
+        for flag, text in (
+            (plan_json.get("applyable") is False, "the plan is not applyable"),
+            (plan_json.get("errored") is True, "the plan errored"),
+            (plan_json.get("complete") is False, "the plan is incomplete (complete=false)"),
+        )
+        if flag
+    ]
+    if problems:
+        return StepResult("failed", result=base, error="apply refused: " + "; ".join(problems))
+    verdict = policy.plan_gate(
+        plan_json,
+        policy.Policy(
+            stateful_types=project.policy.stateful_types,
+            critical_tag=project.policy.critical_tag,
+            transient_errors=project.policy.transient_errors,
+        ),
+        approval.allow_delete_of,
+    )
+    base["gate_verdict"] = verdict.model_dump()
+    if not verdict.passed:
+        blocked = ", ".join(f"{b.address} ({b.reason})" for b in verdict.blocked)
+        return StepResult(
+            "failed",
+            result=base,
+            error=f"apply refused by the plan gate: {blocked}; list the address in gate {approval.gate_id}'s "
+            "allow_delete_of to waive it",
+        )
+    applied = session.timed("apply", lambda: session.runner.apply(plan_path, approval.plan_sha256 or ""))
+    text = registry.redact("\n".join([*applied.stdout_lines, *applied.stderr_lines]))
+    changed = any(m.get("type") in CHANGE_MESSAGE_TYPES for m in applied.messages)
+    base["exit_code"] = applied.exit_code
+    if applied.exit_code != 0:
+        lock_error = LOCK_ERROR in text and not changed
+        detail = "; ".join(_diagnostic_text(d) for d in applied.errors) or applied.stderr
+        error = f"apply failed (exit {applied.exit_code}){_tail(registry.redact(detail))}"
+        if lock_error and LOCK_ERROR not in error:
+            error += f" ({LOCK_ERROR})"
+        _write_json(_marker(ctx), {"attempt": ctx.attempt, "lock_error_before_change": lock_error, "error": error})
+        return StepResult("failed", result={**base, "lock_error": lock_error}, error=error)
+    _write_json(_marker(ctx), {"attempt": ctx.attempt, "lock_error_before_change": False, "error": None})
+    plan_path.unlink(missing_ok=True)  # it embeds sensitive values and prior state in clear: gone once applied
+    outputs = output_stack(session)
+    return StepResult("succeeded", result={**base, "applied": True, "plan_deleted": True, **outputs})
+
+
+def migrate_step(step, ctx: StepContext, registry: SecretRegistry) -> StepResult:
+    try:
+        approval = find_approval(step, ctx)
+        check_approval_age(ctx.project, approval)
+        if ctx.dry_run:
+            return StepResult(
+                "skipped", result={"dry_run": True, "migrated": False}, outputs={"stack": str(step.stack)}
+            )
+    except Refused as e:
+        return StepResult("failed", error=f"migrate_backend refused: {e}")
+    with ExitStack() as resources:
+        session = open_session(
+            ctx.project,
+            str(step.stack),
+            registry,
+            ctx.step_dir,
+            ctx.env,
+            resources,
+            run_dir=ctx.run_dir,
+            step_id=step.id,
+            line_filter=ctx.line_filter,
+            timeout=ctx.timeout,
+        )
+        try:
+            config = backend_config(session.project, session.stack)
+            if not config:
+                raise Refused(f"backend.type {session.project.backend.type} renders no backend config to migrate to")
+            result = migrate_stack(session, config)
+        except Refused as e:
+            return StepResult("failed", error=f"migrate_backend refused: {e}", outputs={"stack": str(step.stack)})
+        except policy.PolicyError as e:
+            raise StepError(f"policy: {e}") from None
+        except TerraformTimeout as e:
+            raise StepTimeout(f"step {step.id}: {registry.redact(str(e))}") from None
+        except TerraformError as e:
+            raise StepError(registry.redact(str(e))) from None
+        finally:
+            session.record()
+        result["gate"] = approval.gate_id
+        result["approver"] = approval.approver
+        return StepResult("succeeded", result=result, outputs={"stack": str(step.stack)})
+
+
+_COPY_IGNORE = shutil.ignore_patterns(".terraform", "terraform.tfstate", "terraform.tfstate.*", "*.tfplan")
+
+
+def target_state_resources(session: StackSession, config: Mapping[str, object]) -> list[str]:
+    """``state list`` against the backend ``config`` from a temporary copy of the stack dir initialised with
+    ``-reconfigure`` (the stack's own ``.terraform`` and local state are not copied). Empty = no state there."""
+    tmp = Path(tempfile.mkdtemp(prefix="codeorca-migrate-probe-"))
+    try:
+        copy = tmp / "stack"
+        shutil.copytree(session.workdir, copy, ignore=_COPY_IGNORE, symlinks=True)
+        probe = TerraformRunner(
+            copy,
+            session.runner.env,
+            plugin_cache_dir=session.runner.env.get("TF_PLUGIN_CACHE_DIR"),
+            deadline=session.runner.deadline,
+        )
+        init = session.timed("probe_init", lambda: probe.init(config, reconfigure=True))
+        if init.exit_code != 0:
+            detail = "; ".join(_diagnostic_text(d) for d in tfjson.diagnostics(init.messages)) or init.stderr
+            raise TerraformError(f"probe init of the target backend failed{_tail(session.registry.redact(detail))}")
+        listed = session.timed(
+            "probe_state_list",
+            lambda: probe._run(["state", "list", "-no-color"], stream_stdout=False, stream_stderr=False),
+        )
+        if listed.exit_code == 0:
+            return [line.strip() for line in listed.stdout_lines if line.strip()]
+        if "No state file was found" in listed.stdout + listed.stderr:
+            return []
+        raise TerraformError(
+            f"state list against the target backend failed (exit {listed.exit_code})"
+            f"{_tail(session.registry.redact(listed.stderr))}"
+        )
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def migrate_stack(session: StackSession, config: Mapping[str, object]) -> dict[str, Any]:
+    """Refuse when the target already holds a state; otherwise ``init -migrate-state -force-copy`` (no ``-json``:
+    the two are mutually exclusive on 1.14.7) with ``config`` rendered into a temporary 0600 ``.hcl``."""
+    existing = target_state_resources(session, config)
+    if existing:
+        raise Refused(
+            f"the target backend already holds a state ({len(existing)} resources); refusing to overwrite it "
+            "(no silent overwrite: point the stack at an empty key or adopt that state instead)"
+        )
+    hcl = render_backend_hcl(config)  # refuses credential-looking keys before anything is written
+    tmp = tempfile.mkdtemp(prefix="codeorca-backend-")
+    try:
+        hcl_path = Path(tmp, "backend.hcl")
+        hcl_path.write_text(hcl, encoding="utf-8")
+        hcl_path.chmod(0o600)
+        args = ["init", "-no-color", "-input=false", "-migrate-state", "-force-copy", f"-backend-config={hcl_path}"]
+        result = session.timed("migrate", lambda: session.runner._run(args, allow_migrate_state=True))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    if result.exit_code != 0:
+        raise TerraformError(
+            f"init -migrate-state failed (exit {result.exit_code}){_tail(session.registry.redact(result.stderr))}"
+        )
+    return {"migrated": True, "exit_code": 0, "backend": dict(config), "target_was_empty": True}

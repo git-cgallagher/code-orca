@@ -155,8 +155,9 @@ def is_marker(value: Any) -> bool:
 
 
 def marker_vars(vars_json: Mapping[str, Any]) -> dict[str, str]:
-    """``{var name: marker}`` for every inventory-scope var whose ``resolved`` is a marker, to pass as
-    ``play_vars`` to :func:`render_play_scope_playbook` so the play never renders those values either."""
+    """``{var name: marker}`` for every inventory-scope var whose ``resolved`` is a marker, for the play scope's
+    ``-e`` file (it outranks role ``vars/`` and ``set_fact``; play ``vars`` would not), so the play never renders
+    those values either."""
     out: dict[str, str] = {}
     for name, entry in (vars_json.get("vars") or {}).items():
         if isinstance(entry, Mapping) and is_marker(entry.get("resolved")):

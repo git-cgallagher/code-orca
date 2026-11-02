@@ -141,7 +141,7 @@ def register_file_secrets(
     """Register the literal secret leaves of the vars files the play will read (module docstring, step 2):
     ``(registered names, unprotected names, warnings)``. A file that is not YAML is skipped with a warning (Ansible
     reports it itself); a vault-encrypted file holds nothing readable here."""
-    from codeorca.specs.ansible_files import VarsFileError, load_mapping_files, load_vars_yaml
+    from codeorca.specs.ansible_files import VARS_EXTENSIONS, VarsFileError, load_mapping_files, load_vars_yaml
     from codeorca.steps import host_spec
 
     warnings: list[str] = []
@@ -157,10 +157,11 @@ def register_file_secrets(
         inventory = Path(str(step.inventory.path))
         inventory = (inventory if inventory.is_absolute() else root / inventory).resolve()
         if inventory.is_file():
-            try:
-                add("inventory", load_vars_yaml(inventory))
-            except VarsFileError as e:
-                warnings.append(f"not checked for secret values: {e}")
+            if inventory.suffix in VARS_EXTENSIONS:  # an INI or executable (dynamic) inventory is not YAML
+                try:
+                    add("inventory", load_vars_yaml(inventory))
+                except VarsFileError as e:
+                    warnings.append(f"not checked for secret values: {e}")
             files += _vars_tree_files(inventory.parent)
         elif inventory.is_dir():
             files += _vars_tree_files(inventory)

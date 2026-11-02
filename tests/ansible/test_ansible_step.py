@@ -399,3 +399,19 @@ def test_dry_run_diff_never_shows_a_denylist_named_group_vars_value(project_root
     assert leaked == []
     result = json.loads((r.run_dir.steps_dir / "cfg" / "result.json").read_text())
     assert {"db_password", "app_db"} <= set(result["registered_vars"])
+
+
+def test_an_ini_inventory_is_not_parsed_as_yaml_for_secret_values(project_root, tmp_path):
+    from codeorca.models import Ansible
+
+    (project_root / "inv").mkdir()
+    (project_root / "inv" / "hosts.ini").write_text("[app]\napp-host ansible_connection=local\n")
+    (project_root / "inv" / "group_vars").mkdir()
+    (project_root / "inv" / "group_vars" / "app.yml").write_text("db_password: FIXTURE-INI-groupvars-0001\n")
+    step = Ansible.model_validate(
+        {"id": "cfg", "type": "ansible", "playbook": "ansible/site.yml", "inventory": {"path": "inv/hosts.ini"}}
+    )
+    reg = registry()
+    registered, unprotected, warnings = ansible_step.register_file_secrets(reg, step, project_root, DENYLIST)
+    assert warnings == [] and "db_password" in registered and unprotected == []
+    assert reg.count_matches("FIXTURE-INI-groupvars-0001") == 1

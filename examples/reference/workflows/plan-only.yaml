@@ -1,7 +1,8 @@
 # yaml-language-server: $schema=../../../schema/codeorca-workflow.schema.json
-# Runs end to end in Phase 1 (read-only): plan the app stack, render the plan spec, print its path.
-# `codeorca run plan-only -p examples/reference/codeorca.yaml` needs `terraform` on PATH and
-# CODEORCA_REDACTION_KEY in the environment (the HMAC key for placeholders; an SSM-backed key arrives in Phase 3).
+# Read-only: plan the app stack, render the plan spec, print its path (run in CI).
+# `codeorca run plan-only -p examples/reference/codeorca.yaml` needs `terraform` on PATH and the HMAC redaction key:
+# CODEORCA_REDACTION_KEY in the environment (what CI uses, a placeholder), else the SSM SecureString named by
+# redaction.hmac_key (needs the aws extra and AWS credentials).
 api: codeorca/v1
 kind: workflow
 name: plan-only

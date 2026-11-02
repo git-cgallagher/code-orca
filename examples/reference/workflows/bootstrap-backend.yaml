@@ -1,17 +1,23 @@
 # yaml-language-server: $schema=../../../schema/codeorca-workflow.schema.json
-# Create and converge the S3 state backend named by codeorca.yaml's `backend:` block (plan section 5.11), then
-# write each stack's backend.hcl. Idempotent: re-run it as the bucket's drift check (`--dry-run` writes nothing and
-# reports the would-be diff).
+# Create and converge the S3 state backend named by codeorca.yaml's `backend:` block (plan section 5.11), write each
+# stack's backend.hcl, then `terraform init` + `validate` every stack against it. Idempotent: re-run it as the
+# bucket's drift check (`--dry-run` writes nothing and reports the would-be diff; the validate steps still run).
 #
-# It applies to projects whose backend.type is s3: it refuses unless `sts get-caller-identity` is
-# backend.account_id, refuses a bucket with an Object Lock default retention, and never reads state objects.
+# It applies to projects whose backend.type is s3: the helper refuses unless `sts get-caller-identity` is
+# backend.account_id, refuses a bucket with an Object Lock default retention, and never reads state objects. Each
+# stack's configuration must declare an empty `backend "s3" {}` block; the terraform step passes the same settings
+# backend.hcl holds (`codeorca.bootstrap.s3.backend_settings`) as -backend-config.
 # The reference project keeps `backend.type: local` so CI needs no AWS account: there the helper refuses with
-# "a local backend has nothing to bootstrap", so this workflow VALIDATES in CI but is not run there.
+# "a local backend has nothing to bootstrap" and the validate steps are omitted, so this workflow VALIDATES in CI
+# (and a test runs the refusal through the real python step) but is not run against AWS there.
 # Needs the aws extra (pip install 'code-orca[aws]') and AWS credentials in the environment, passed by name.
+#
+# The bucket's converged settings are recorded by the helper's `diff` output (run.json and the step's result.json);
+# a rendered `specs/backend.yaml` is a follow-up (AGENTS.md TODO).
 api: codeorca/v1
 kind: workflow
 name: bootstrap-backend
-description: Create and converge the S3 state bucket and write every stack's backend.hcl.
+description: Create and converge the S3 state bucket, write every stack's backend.hcl, init + validate each stack.
 
 steps:
   - id: bootstrap
@@ -23,3 +29,12 @@ steps:
       created: "${{ result.output.created }}"
       changed: "${{ result.output.changed }}"
       backend_files: "${{ result.output.backend_files }}"
+      diff: "${{ result.output.diff }}"                  # every setting compared, before -> after (the bucket's spec)
+
+  # one validate per stack, in depends_on order (init runs first, against the backend just converged)
+  - id: validate_app
+    type: terraform
+    needs: [bootstrap]
+    stack: app
+    action: validate
+    timeout: 5m

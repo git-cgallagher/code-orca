@@ -4,8 +4,10 @@ What a step does, in order:
 
 1. resolve ``project.stacks[step.stack]`` (unknown stack = error), ``workdir = project.root / stack.dir``;
 2. take the per-stack ``flock`` under ``state_dir`` (``StackLocked`` becomes an errored step);
-3. build the child environment (the runner's env, ``TF_PLUGIN_CACHE_DIR`` honoured when set) and the non-secret
-   backend configuration (``local``: none; ``s3``: bucket, key, region, ``use_lockfile``, ``encrypt``);
+3. build the child environment (the runner's env, ``TF_PLUGIN_CACHE_DIR`` honoured when set, plus the stack's
+   ``secrets:`` resolved through the SSM resolver into the child env only and registered first) and the non-secret
+   backend configuration (``local``: none; ``s3``: ``codeorca.bootstrap.s3.backend_settings``: bucket, key, region,
+   ``use_lockfile``, ``encrypt``, ``kms_key_id`` under ``encryption: kms:<arn>``);
 4. check every ``required_env`` name is set (names only in the message), then register, **before** any
    Terraform process starts, the values of ``var_overrides`` and of every ``TF_VAR_<name>`` in the environment
    whose variable the stack declares ``sensitive = true`` (found by reading the ``*.tf`` / ``*.tf.json`` files:
@@ -97,6 +99,8 @@ from codeorca.secrets import key_denylist as project_key_denylist
 from codeorca.specs import META_KEY
 from codeorca.specs.terraform_plan import build_plan_document, seed_registry
 
+SecretResolver = Callable[[str], str]
+
 PLAN_FILE = "plan.tfplan"
 PLAN_JSON = "plan.json"
 TF_OUTPUTS_JSON = "tf-outputs.json"
@@ -131,17 +135,42 @@ def resolve_stack(project: Project | None, name: str) -> tuple[Stack, Path]:
 
 
 def backend_config(project: Project, stack: Stack) -> dict[str, object]:
-    """Non-secret ``-backend-config`` values; credentials never travel this way (the adapter refuses them)."""
-    backend = project.backend
-    if backend.type == "local":
+    """Non-secret ``-backend-config`` values; credentials never travel this way (the adapter refuses them).
+    ``local``: none; ``s3``: exactly what the bootstrap writes into ``backend.hcl``
+    (:func:`codeorca.bootstrap.s3.backend_settings`, ``kms_key_id`` under ``encryption: kms:<arn>``)."""
+    if project.backend.type == "local":
         return {}
-    return {
-        "bucket": backend.bucket,
-        "key": stack.key,
-        "region": backend.region,
-        "use_lockfile": True,
-        "encrypt": True,
-    }
+    from codeorca.bootstrap.s3 import backend_settings
+
+    return backend_settings(project, stack)
+
+
+def resolve_stack_secrets(
+    stack_name: str, stack: Stack, registry: SecretRegistry, resolve_secret: SecretResolver | None
+) -> dict[str, str]:
+    """``stacks.<name>.secrets`` (``{ENV_NAME: ssm:/path}``) resolved for the CHILD env only, each value registered
+    before it is returned (the resolver registers; this registers again, harmlessly, so an injected resolver that
+    does not still cannot leak). No provider (boto3 missing): ``NO_PROVIDER_MESSAGE``; an ``SSMError`` keeps its
+    value-free message. A stack without secrets never touches the resolver."""
+    if not stack.secrets:
+        return {}
+    from codeorca.providers import NO_PROVIDER_MESSAGE, SSMError
+
+    if resolve_secret is None:
+        raise StepError(f"stack {stack_name!r}: {NO_PROVIDER_MESSAGE}")
+    resolved: dict[str, str] = {}
+    for name, ref in sorted(stack.secrets.items()):
+        try:
+            value = resolve_secret(str(ref))
+        except SSMError as e:
+            raise StepError(f"stack {stack_name!r}: secret {name}: {e}") from None
+        except Exception as e:  # noqa: BLE001 - value-free: the exception class only
+            raise StepError(f"stack {stack_name!r}: secret {name}: cannot resolve {ref}: {type(e).__name__}") from None
+        if value is None:
+            raise StepError(f"stack {stack_name!r}: secret {name}: {ref} resolved to nothing")
+        registry.add(str(value))
+        resolved[str(name)] = str(value)
+    return resolved
 
 
 def declared_sensitive_variables(workdir: Path) -> set[str]:
@@ -334,11 +363,16 @@ def open_session(
     line_filter: Callable[[str], Callable[[str], str] | None] | None = None,
     lock: bool | None = None,
     timeout: float | None = None,
+    resolve_secret: SecretResolver | None = None,
 ) -> StackSession:
     """Lock the stack, open the redacted log sinks and build the runner. Resources are released by ``stack_ctx``.
-    ``timeout`` (seconds) becomes the session deadline for every Terraform command."""
+    ``timeout`` (seconds) becomes the session deadline for every Terraform command. The stack's ``secrets:`` are
+    resolved through ``resolve_secret`` into the child env only (registered before any Terraform process starts),
+    then ``required_env`` is checked against that env (a name listed in both is satisfied by the secret)."""
     stack, workdir = resolve_stack(project, stack_name)
     assert project is not None and project.root is not None
+    secret_env = resolve_stack_secrets(stack_name, stack, registry, resolve_secret)
+    env = {**env, **secret_env}
     check_required_env(stack, env)
     state_dir = project.root / project.state_dir
     try:
@@ -512,22 +546,25 @@ def output_stack(session: StackSession) -> dict[str, Any]:
     return {"tf_outputs": tf_outputs, "files": {"tf_outputs": str(path)}}
 
 
-def make_executor(registry: SecretRegistry) -> Executor:
-    """The ``terraform`` executor bound to the run's registry."""
+def make_executor(registry: SecretRegistry, resolve_secret: SecretResolver | None = None) -> Executor:
+    """The ``terraform`` executor bound to the run's registry and the SSM resolver (``None``: a stack with
+    ``secrets:`` fails its step with ``NO_PROVIDER_MESSAGE``)."""
 
     def run_terraform(step, ctx: StepContext) -> StepResult:
-        return execute(step, ctx, registry)
+        return execute(step, ctx, registry, resolve_secret)
 
     run_terraform.__name__ = "run_terraform"
     return run_terraform
 
 
-def execute(step, ctx: StepContext, registry: SecretRegistry) -> StepResult:
+def execute(
+    step, ctx: StepContext, registry: SecretRegistry, resolve_secret: SecretResolver | None = None
+) -> StepResult:
     action = step.action
     if action == "apply":
-        return apply_step(step, ctx, registry)
+        return apply_step(step, ctx, registry, resolve_secret)
     if action == "migrate_backend":
-        return migrate_step(step, ctx, registry)
+        return migrate_step(step, ctx, registry, resolve_secret)
     project = ctx.project
     stack_name = str(step.stack)
     with ExitStack() as resources:
@@ -542,6 +579,7 @@ def execute(step, ctx: StepContext, registry: SecretRegistry) -> StepResult:
             step_id=step.id,
             line_filter=ctx.line_filter,
             timeout=ctx.timeout,
+            resolve_secret=resolve_secret,
         )
         overrides = dict(step.var_overrides or {})
         registered = register_overrides(
@@ -742,7 +780,9 @@ def _check_retry(ctx: StepContext) -> None:
         )
 
 
-def apply_step(step, ctx: StepContext, registry: SecretRegistry) -> StepResult:
+def apply_step(
+    step, ctx: StepContext, registry: SecretRegistry, resolve_secret: SecretResolver | None = None
+) -> StepResult:
     try:
         _check_retry(ctx)
         plan_path, producer = resolve_plan_file(step, ctx)
@@ -775,6 +815,7 @@ def apply_step(step, ctx: StepContext, registry: SecretRegistry) -> StepResult:
                 step_id=step.id,
                 line_filter=ctx.line_filter,
                 timeout=ctx.timeout,
+                resolve_secret=resolve_secret,
             )
         except StepError as e:
             _write_json(_marker(ctx), {"attempt": ctx.attempt, "lock_error_before_change": False, "error": str(e)})
@@ -854,7 +895,9 @@ def _apply(session: StackSession, ctx: StepContext, plan_path: Path, producer: s
     return StepResult("succeeded", result={**base, "applied": True, "plan_deleted": True, **outputs})
 
 
-def migrate_step(step, ctx: StepContext, registry: SecretRegistry) -> StepResult:
+def migrate_step(
+    step, ctx: StepContext, registry: SecretRegistry, resolve_secret: SecretResolver | None = None
+) -> StepResult:
     try:
         approval = find_approval(step, ctx)
         check_approval_age(ctx.project, approval)
@@ -876,6 +919,7 @@ def migrate_step(step, ctx: StepContext, registry: SecretRegistry) -> StepResult
             step_id=step.id,
             line_filter=ctx.line_filter,
             timeout=ctx.timeout,
+            resolve_secret=resolve_secret,
         )
         try:
             config = backend_config(session.project, session.stack)

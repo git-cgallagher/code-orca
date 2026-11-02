@@ -229,7 +229,7 @@ def test_non_interactive_fail_fails_the_gate(tmp_path):
 
 
 @pytest.mark.parametrize(
-    ("on_timeout", "status", "rc"), [("fail", "failed", 1), ("cancel", "cancelled", 0), ("warn", "skipped", 0)]
+    ("on_timeout", "status", "rc"), [("fail", "failed", 1), ("cancel", "cancelled", 1), ("warn", "skipped", 0)]
 )
 def test_timeout_never_approves(tmp_path, on_timeout, status, rc):
     calls: list[str] = []
@@ -333,3 +333,29 @@ def test_run_json_carries_no_typed_secret_from_the_prompt(tmp_path):
     # must stay JSON (no Path objects or datetimes leak into it)
     rc, r = make_run(tmp_path, workflow(GATED), prompt=scripted("approve"))
     json.loads(r.run_dir.run_json.read_text(encoding="utf-8"))
+
+
+def test_cancelled_gate_fails_the_run_and_cancels_unrelated_work(tmp_path):
+    """A gate cancelled by ``on_timeout: cancel`` is not success: run status failed, exit 1; an unrelated step is
+    cancelled, a finally step sees ``cancelled()``."""
+    calls: list[str] = []
+    wf = Workflow.model_validate(
+        {
+            "api": "codeorca/v1",
+            "kind": "workflow",
+            "name": "t",
+            "steps": [
+                {"id": "approve", "type": "gate", "message": "m", "timeout": "5s", "on_timeout": "cancel"},
+                {"id": "after", "type": "shell", "needs": ["approve"], "run": ["true"]},
+                {"id": "unrelated", "type": "shell", "run": ["true"]},
+            ],
+            "finally": [{"id": "notify", "type": "shell", "when": "cancelled()", "run": ["true"]}],
+        }
+    )
+    code, r = make_run(tmp_path, wf, prompt=scripted(TimeoutError()), calls=calls)
+    assert code == 1 and r.status == "failed"
+    assert r.states["approve"]["status"] == "cancelled" and "on_timeout: cancel" in r.states["approve"]["error"]
+    assert r.states["after"]["status"] == "omitted"
+    assert r.states["unrelated"]["status"] == "cancelled"
+    assert r.states["notify"]["status"] == "succeeded"
+    assert r.run_dir.read_run()["exit_code"] == 1

@@ -171,7 +171,7 @@ def _resume_locked(
     elif fields:
         raise ResumeRefused("--field is for --approve only")
 
-    remaining = [s for s in [*workflow.steps, *workflow.finally_] if (states.get(s.id) or {}).get("status") is None]
+    remaining = remaining_steps(workflow, record)
     inputs, needed_vars = _resolve_inputs(workflow, record, remaining, secret_inputs, registry)
 
     runner = Runner.restore(
@@ -300,6 +300,32 @@ def _references(texts: Iterable[str], namespace: str) -> set[str] | object:
     return names
 
 
+def remaining_steps(workflow: Workflow, record: Mapping[str, Any]) -> list:
+    """The steps (``finally`` included) that have no status in run.json yet."""
+    states = record.get("steps") or {}
+    return [s for s in [*workflow.steps, *workflow.finally_] if (states.get(s.id) or {}).get("status") is None]
+
+
+def _used_names(workflow: Workflow, remaining: list) -> tuple[set[str], set[str]]:
+    """(input names, var names) the remaining steps reference, directly or through a var."""
+    step_texts = [t for s in remaining for t in _strings(s)]
+    var_refs = _references(step_texts, "vars")
+    var_names = set(workflow.vars) if var_refs is _WHOLE else set(var_refs) & set(workflow.vars)  # type: ignore[arg-type]
+    var_texts = [t for name in var_names for t in _strings(workflow.vars[name])]
+    input_refs = _references([*step_texts, *var_texts], "inputs")
+    used = set(workflow.inputs) if input_refs is _WHOLE else set(input_refs)  # type: ignore[arg-type]
+    return used, var_names
+
+
+def needed_secret_inputs(workflow: Workflow, record: Mapping[str, Any]) -> list[str]:
+    """The inputs run.json holds redacted that a remaining step (or a var it uses) references: what a resume must
+    be given again (``secret_inputs``). The CLI asks for them on the terminal, never through a flag."""
+    persisted = dict(record.get("inputs") or {})
+    redacted = {name for name, value in persisted.items() if is_redacted(value)}
+    used, _ = _used_names(workflow, remaining_steps(workflow, record))
+    return sorted(used & redacted & set(workflow.inputs))
+
+
 def _resolve_inputs(
     workflow: Workflow,
     record: Mapping[str, Any],
@@ -318,12 +344,7 @@ def _resolve_inputs(
         raise ResumeRefused(
             f"input(s) {', '.join(not_redacted)} were recorded in clear; a resume replays them and cannot change them"
         )
-    step_texts = [t for s in remaining for t in _strings(s)]
-    var_refs = _references(step_texts, "vars")
-    var_names = set(workflow.vars) if var_refs is _WHOLE else set(var_refs) & set(workflow.vars)  # type: ignore[arg-type]
-    var_texts = [t for name in var_names for t in _strings(workflow.vars[name])]
-    input_refs = _references([*step_texts, *var_texts], "inputs")
-    used = set(workflow.inputs) if input_refs is _WHOLE else set(input_refs)  # type: ignore[arg-type]
+    used, var_names = _used_names(workflow, remaining)
     missing = sorted((used & redacted) - set(secret_inputs))
     if missing:
         raise ResumeRefused(
@@ -361,4 +382,4 @@ def _rerender_vars(runner: Runner, workflow: Workflow, names: set[str]) -> None:
             raise ResumeRefused(f"vars.{name}: {e}") from None
 
 
-__all__ = ["ResumeRefused", "TTY_REFUSAL", "is_redacted", "resume"]
+__all__ = ["ResumeRefused", "TTY_REFUSAL", "is_redacted", "needed_secret_inputs", "remaining_steps", "resume"]

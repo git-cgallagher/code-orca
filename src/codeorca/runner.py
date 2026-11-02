@@ -9,7 +9,9 @@ Step statuses and their propagation (the plan's step-semantics table):
 - ``skipped``: ``when`` evaluated to ``False``.
 - ``cancelled``: ``fail_fast`` stopped scheduling after a blocking failure; dependents of the failed step are
   ``omitted``, unrelated steps are ``cancelled``; a step whose ``when`` names an override function is still
-  evaluated and runs if it is ``True``.
+  evaluated and runs if it is ``True``. A step whose *executor* returns ``cancelled`` (a gate's
+  ``on_timeout: cancel``) cancels the run: later unrelated steps are ``cancelled``, ``cancelled()`` is true, and
+  the run is ``failed`` (exit 1): a cancelled approval is not success.
 - ``waiting``: an executor (a gate) asked the run to stop; scheduling stops, the run is persisted, exit 3.
   ``finally`` steps do NOT run at a wait: the run is not over, and they run once, at its real end, after
   ``codeorca resume`` (``codeorca.resume``) decided the gate.
@@ -156,6 +158,12 @@ class StepContext:
 
 
 Executor = Callable[[Any, StepContext], StepResult]
+
+
+def executor_cancelled(state: Mapping[str, Any]) -> bool:
+    """A step its executor cancelled (status ``cancelled`` with an error: a gate's ``on_timeout: cancel``), as
+    opposed to one the runner cancelled without running it (``fail_fast``: no error recorded)."""
+    return state.get("status") == "cancelled" and bool(state.get("error"))
 
 
 def _render_obj(obj: Any, ctx: Mapping[str, Any]) -> Any:
@@ -347,6 +355,8 @@ class Runner:
             st = self.states[s.id]["status"]
             if st in ("failed", "errored") and s.on_failure != "continue" and self.workflow.fail_fast:
                 self.cancelled = True
+            if executor_cancelled(self.states[s.id]):
+                self.cancelled = True
 
     def _render_vars(self) -> dict[str, Any]:
         """Workflow ``vars`` rendered over ``inputs``/``run``/``project`` (never ``steps``: a var is fixed for the
@@ -448,10 +458,13 @@ class Runner:
         return self.exit_code
 
     def _blocked(self) -> bool:
-        """True when a step failed or errored without ``on_failure: continue``."""
+        """True when a step failed or errored without ``on_failure: continue``, or its executor cancelled it (a
+        gate's ``on_timeout: cancel``: a cancelled approval is not success, so the run exits 1)."""
         for s in [*self.workflow.steps, *self.workflow.finally_]:
-            st = self.states[s.id]["status"]
-            if st in ("failed", "errored") and s.on_failure != "continue":
+            state = self.states[s.id]
+            if state["status"] in ("failed", "errored") and s.on_failure != "continue":
+                return True
+            if executor_cancelled(state):
                 return True
         return False
 
@@ -565,9 +578,12 @@ class Runner:
         return status
 
     def _after_step(self, step) -> None:
-        st = self.states[step.id]["status"]
+        state = self.states[step.id]
+        st = state["status"]
         if st in ("failed", "errored") and step.on_failure != "continue" and self.workflow.fail_fast:
             self.cancelled = True
+        if executor_cancelled(state):
+            self.cancelled = True  # the run was cancelled (a gate's on_timeout: cancel): cancelled() is true
         self.persist()
 
     def _render_step(self, step):

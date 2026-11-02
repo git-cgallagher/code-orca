@@ -129,9 +129,11 @@ def child_env(
         ref = _secret_ref(value)
         if ref is not None:
             if resolve_secret is None:
+                from codeorca.providers import NO_PROVIDER_MESSAGE
+
                 raise HelperError(
                     f"step {step.id}: env {name!r} is a secret reference ({ref}) but no secret resolver is "
-                    "configured for this run"
+                    f"configured for this run: {NO_PROVIDER_MESSAGE}"
                 )
             try:
                 resolved = resolve_secret(ref)

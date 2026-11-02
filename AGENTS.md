@@ -66,9 +66,9 @@ Consumers keep their own `codeorca.yaml`, `workflows/`, `specs/` in their own (u
 - **Deny floor in code.** The Terraform `action` enum and the `apply` -> `plan_file` rule live in the
   models. A workflow file can only narrow policy, never widen it. Do not add `destroy`, `import`,
   `state`, `taint` or an auto-approve flag to the enum. The floor covers the `terraform` step type; helpers
-  (`shell` today, `python`/`powershell` later) are trusted code, but the `shell` executor still runs
+  (`shell`, `python`, `powershell`) are trusted code, but the `shell` executor still runs
   `policy.check_argv` over an argv whose program is `terraform`/`tofu`, so `run: [terraform, destroy]` is
-  refused too. The adapter drops `TF_CLI_ARGS*` from every child environment (the one other way onto the
+  refused too (a `python`/`powershell` helper's own child processes are not inspected: review bounds them). The adapter drops `TF_CLI_ARGS*` from every child environment (the one other way onto the
   command line).
 - **Model rules with a negative test each** (`tests/test_models.py`): duplicate step ids across `steps` and
   `finally`; `needs` on a finally step is refused (finally steps always run last; their status functions

@@ -164,10 +164,15 @@ def test_drift_on_the_fresh_stack_exits_2_and_writes_the_spec(project: Path, cap
     assert cli.main(["drift", "-p", p, "--stack", "nope"]) == 1
 
 
-def test_missing_redaction_key_fails_closed(project: Path, monkeypatch, capsys):
+def test_missing_redaction_key_fails_closed(project: Path, monkeypatch, capsys, no_boto3_session):
+    """No CODEORCA_REDACTION_KEY: the CLI tries the SSM key named by redaction.hmac_key, and boto3 session creation
+    is refused here (``no_boto3_session``), so the test never reaches AWS; the run fails closed before anything
+    exists on disk, naming the parameter and the override variable (never a value)."""
     monkeypatch.delenv("CODEORCA_REDACTION_KEY")
     assert cli.main(["run", "plan-only", "-p", str(project / "codeorca.yaml")]) == 1
-    assert "CODEORCA_REDACTION_KEY" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "CODEORCA_REDACTION_KEY" in err and "ssm:/codeorca/redaction-key" in err
+    assert len(no_boto3_session) == 1  # one attempt, refused before any request
     assert not (project / ".codeorca").exists()
 
 

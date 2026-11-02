@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Phase 3 (gate, resume, apply): the `gate` step (dry-run auto-approval; on a terminal: message, staged specs and
+  plan sha256s, approve/reject and typed `fields`, approver/decision/timestamp/plan binding recorded; no terminal:
+  `wait` -> exit 3 or `fail`; no timeout ever approves), `codeorca.resume.resume` (terminal required with no
+  bypass, `gate.max_age`, plan tamper check, changed-workflow check, re-supplied secret inputs, completed steps
+  replayed, `finally` once), the runner no longer runs `finally` at a wait (`Runner.restore`/`settle`, run.json
+  `workflow_sha256`/`resumes`), Terraform `apply` bound to an approved plan of this run (max_age, plan gate with
+  `allow_delete_of`, lock-only retry, redacted `tf_outputs`, plan file deleted, `--dry-run` skips) and
+  `migrate_backend` (approving gate, refuses a non-empty target, `init -migrate-state -force-copy`). Models: typed
+  `GateField`, gate fields are outputs, no `on_failure: continue` on a gate, no `var_overrides` on apply/migrate.
 - Phase 2 review fixes (host spec, secrets): a listed template whose own text calls a denied lookup is a
   `<skipped: …>` marker in both scopes; the play scope reads its playbook, its roles' `defaults`/`vars` (every file
   Ansible reads, `main/` dirs included) and its `vars_files` with `!vault` values opaque (`specs/ansible_files.py`;

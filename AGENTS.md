@@ -25,7 +25,10 @@ Consumers keep their own `codeorca.yaml`, `workflows/`, `specs/` in their own (u
 | `src/codeorca/specs/ansible_host.py` | pure side of the host spec: `run_vars_subprocess` (stdout in memory, stderr to a callback, no redaction key in the child), `build_host_document` (registry scrub + key denylist over value trees only), `header_for`, `render_play_scope_playbook` (**play scope**: check-mode play with `import_role` + `when: false` per role, `template` tasks with `ignore_errors` + `copy content: to_nice_json` of an allow list), `marker_vars`, `parse_play_scope_events` over the adapter's JSONL (`not run` for an expected task with no result) |
 | `src/codeorca/lint/` | `lint_playbooks(paths, key_denylist, lookup_denylist)` -> `{file, line, rule, level, message}`: `no-hostvars-dump`, `debug-secret-name`, `secret-to-plain-param` (module `no_log` from DOCUMENTATION plus a source scan of `argument_spec`; `resolve_module` injectable), `unknown-module` (info), `redundant-task-no-log` (info) |
 | `tests/specs/test_ansible_host*.py`, `tests/lint/`, `tests/fixtures/ansible_host/` | host spec and lint tests; the fixture inventory (2 hosts, templated/int/vaulted/lookup/password-named vars, `roles/app_config` with an argument spec and a template; the vault password is the placeholder `vault-pass.txt`); the subprocess and installed-module tests skip without ansible-core (`pip install -e '.[ansible]'`) |
-| `src/codeorca/steps/terraform.py` | the `terraform` executor (`make_executor(registry)`): stack resolution, per-stack flock, non-secret backend config, pre-plan registration of sensitive `var_overrides` / `TF_VAR_*`, `init` (`-lockfile=readonly` under `CI`), `validate`/`plan`/`output`/`test`; `apply` and `migrate_backend` fail with the Phase 3 message; `open_session` + `plan_stack` are what `codeorca drift` reuses |
+| `src/codeorca/steps/terraform.py` | the `terraform` executor (`make_executor(registry)`): stack resolution, per-stack flock, non-secret backend config, pre-plan registration of sensitive `var_overrides` / `TF_VAR_*`, `init` (`-lockfile=readonly` under `CI`), `validate`/`plan`/`output`/`test`; `apply` (`apply_step`: `resolve_plan_file` = this run's own plan output for the stack, `find_approval` = an approving gate the step transitively needs whose recorded sha256 matches, `check_approval_age` against `gate.max_age`, `show -json` seeds the registry, applyable/complete check, plan gate again with the gate's `allow_delete_of`, adapter apply, redacted `tf_outputs`, plan file deleted; retries only after a lock error before any change, via `apply-attempt.json`; `--dry-run` = skipped) and `migrate_backend` (`migrate_step`/`migrate_stack`: approving gate, `state list` probe of the target from a temp copy of the stack, then `init -migrate-state -force-copy` without `-json`); `open_session` + `plan_stack` are what `codeorca drift` reuses |
+| `src/codeorca/steps/gate.py` | the `gate` executor (`make_executor(registry, *, prompt, isatty, out, getuser)`): `--dry-run` auto-approves (`approver: dry-run`); on a terminal (stdin AND stdout) prints the redacted message, staged specs and plan files + sha256, asks approve/reject and the typed `fields`, records approver/decision/`decided_at`/`plans` (the binding); no terminal: `non_interactive: wait` -> `waiting` (exit 3), `fail` -> failed; `timeout` bounds the prompt, no `on_timeout` approves; helpers `collect_plans`, `plan_binding_problems`, `coerce_fields`, `is_terminal`, `terminal_prompt` |
+| `src/codeorca/resume.py` | `resume(project, run_dir, decision, *, fields, executors, isatty, secret_inputs, workflow, env, stream, redact, registry, …)`: terminal required (no env var or keyword bypass), refuses non-waiting runs, a changed workflow (`workflow_sha256`), on approve a gate older than `gate.max_age` or a changed/missing plan file; redacted inputs a remaining step needs must be re-supplied (`secret_inputs`); settles the gate, replays completed steps, runs the rest and `finally` once; `ResumeRefused` |
+| `tests/gate/`, `tests/apply/` | gate executor + model rules + resume (injected prompt/terminal, counting executors); apply on a fake engine (binding, max_age, plan gate, lock-only retry, dry-run), the reference stack plan -> wait -> resume -> apply with real Terraform, `migrate_backend` over two local backends (`path=`) |
 | `src/codeorca/steps/spec_render.py` | the `spec-render` executor (`terraform_plan` and `ansible` sources; `terraform_state` is not implemented) and `render_run` behind `codeorca render` (plan specs from `plan.json`, host specs from `host-vars.json`, nothing re-run) |
 | `src/codeorca/steps/host_spec.py` | `spec-render` with `source.ansible`: the play-scope playbook, its roles' `defaults`/`vars` and `vars_files` read first (vault-aware, fail closed), staged inventory (playbook-adjacent `group_vars`/`host_vars` copied) in the 0700 handoff dir, inventory scope via `run_vars_subprocess` (every roles dir, the producer's kept `extra-vars.json` overlaid on top), play scope via `AnsibleRunner` (only the plays that target the host, `--check --diff`, a random vault password, markers incl. `<vault>` and masked nested trees in a 0600 `-e @` file, secret leaves registered before it runs, output held until clear values are registered), `merge_play_scope` (`scope: inventory`/`play`, `source` = the play-scope source that won), `host-vars.json` (0600) + `write_spec` |
 | `tests/specs/`, `tests/steps/`, `tests/cli/`, `tests/integration/` | plan document + YAML writer over the fixtures; executors without a terraform binary; doctor with injected probes; the reference project end to end through the CLI (skipped without `terraform`) |
@@ -42,7 +45,7 @@ Consumers keep their own `codeorca.yaml`, `workflows/`, `specs/` in their own (u
 | `src/codeorca/project.py` | Pydantic models for the project file `codeorca.yaml` (`load_project`, `project_json_schema`): s3 backend needs bucket/region/account_id, stack `depends_on` DAG, `max_parallel` must be 1 |
 | `src/codeorca/expr.py` | `${{ … }}` expressions: sandboxed Jinja2 + StrictUndefined, `render`/`render_value`/`render_tree`, `evaluate_when` (must be a bool), GHA-style `success()`/`always()`/`failure()`/`cancelled()` |
 | `src/codeorca/rundir.py` | `RunDir` (`<state_dir>/<run_id>/{run.json, steps/<id>/, outputs/, handoff/ (0700), specs/}`), run id format, `stack_lock` (flock), `list_runs`, `gc` |
-| `src/codeorca/runner.py` | `Runner`: sequential graphlib DAG, status propagation, retry/backoff, timeouts, inputs, outputs from the typed `result`, `finally`, run.json; `StepContext`/`StepResult`/`Executor` |
+| `src/codeorca/runner.py` | `Runner`: sequential graphlib DAG, status propagation, retry/backoff, timeouts, inputs, outputs from the typed `result`, `finally` (never at a wait: once, at the real end), run.json (`workflow_sha256`, `resumes`/`resumed_at`/`decision`); `Runner.restore` (replay a persisted run) + `settle` (decide a waiting step) for resume; `StepContext` (carries the `workflow`)/`StepResult`/`Executor` |
 | `src/codeorca/steps/` | executor registry (`register`/`lookup`/`default_executors`), the `shell` executor (argv only, logs via line sink + stream hook), "not implemented in this phase" placeholders for the other types |
 | `tests/core/` | project model, expressions, run directory and runner tests (shell-step workflows on `sys.executable`) |
 | `schema/` | exported JSON Schema; CI fails if it differs from the models (`schema export --check`) |
@@ -75,6 +78,11 @@ Consumers keep their own `codeorca.yaml`, `workflows/`, `specs/` in their own (u
   YAML 1.1 boolean tokens as keys regardless of loader.
 - Actions in workflows are SHA-pinned with a `# vX.Y.Z` comment; workflow-level `permissions: contents: read`;
   `pull_request`, never `pull_request_target`.
+- **The approval invariant** (plan 5.9, owner decision 2026-11-01): an agent-launched run can reach exit 3 at a
+  gate and nothing further. The gate asks only when stdin AND stdout are terminals; `resume` refuses otherwise,
+  for either decision, and there is no environment variable or keyword that skips the check (tests assert both;
+  `isatty` is injectable for tests only and the CLI must never pass it). An apply runs only a plan file whose
+  sha256 an approving gate recorded, within `gate.max_age`; a dry-run approval never counts in a real run.
 - One PR at a time against `main`; merge by hand once every check is green (`gh pr merge --admin`
   satisfies the "external contributor review" ruleset for the owner's own PRs).
 
@@ -214,6 +222,29 @@ Phase 2 integration (2026-11-01):
   `run_vars_subprocess` by name, so a test that must prove no subprocess ran patches `codeorca.steps.host_spec`.
 - **Specs render multi-line strings as literal blocks** (`|`, a `SafeRepresenter` subclass in `specs/__init__.py`,
   per the `add_representer` gotcha below), so a rendered template diffs line by line.
+
+Phase 3 gate / resume / apply (2026-11-02):
+- **`finally` used to run when a run stopped at a gate** (exit 3), so a resumed run would have run it twice; it now
+  runs only at the real end (the old waiting test asserted the opposite and was changed with the reason in the
+  commit). A run.json from before the change whose finally already ran is not run again on resume.
+- **A redacted input cannot be replayed.** `record_filter` key-denylists `inputs`, so `api_token` persists as
+  `<redacted:key>` (no placeholder to check a re-supplied value against); an input that is only *registered*
+  persists as `<redacted:hmac:…>` and is checked. Resume therefore keeps inputs verbatim (never re-coerces them:
+  `<redacted:key>` is not an int) and asks again only for redacted inputs a remaining step (or a var it uses)
+  references; a var built from one is rendered again. Step outputs that were redacted stay placeholders.
+- **The runner's retry cannot be vetoed by an executor**, and `retry.policy: transient` matches any
+  `policy.transient_errors` entry (`Throttling`, `429`), so the apply step keeps `apply-attempt.json` in its step
+  dir and refuses attempt 2+ unless attempt 1 failed with `Error acquiring the state lock` before any
+  `apply_start`/`apply_progress` message; the lock failure's error text carries that phrase so `transient` fires.
+- **A resumed apply runs in a fresh registry**: nothing from the first process is registered, so the apply runs
+  `show -json` first and `seed_registry` over it before the apply streams (the plan file carries the variables,
+  so no input needs re-supplying for an apply).
+- **`terraform state list` with no state exits 1** with "No state file was found!" on stderr (1.14.7); the
+  `migrate_backend` probe treats exactly that as empty. A state that exists but lists **no resources** is
+  treated as empty too and would be overwritten by `-force-copy` (residual). `init -backend-config=path=…` works
+  only when the configuration declares `backend "local" {}` explicitly; `-migrate-state -force-copy` from local
+  path A to B copies and leaves A in place.
+- **`n` is a YAML 1.1 boolean token**: a gate field (or any key) named `n` fails validation; name it `count`.
 
 Terraform (1.14.7):
 - `show -json` (plan and state), `output -json`, plan files, the plan's `variables` block and `TF_LOG` all

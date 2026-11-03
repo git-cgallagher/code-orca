@@ -11,6 +11,8 @@ Refusals (``ResumeRefused``, nothing is written):
 - no terminal; the run is not ``waiting``; another resume holds the run (``<run>/.resume.lock``);
 - the workflow changed since the run stopped (``workflow_sha256`` in run.json), or the project did
   (``project_sha256``: the plan gate's policy, ``gate.max_age`` and the backend come from it);
+- the redaction key differs from the one the run used (``redaction_key_id``: ``env:<sha8>`` or
+  ``<ssm ref>@<version>``), so placeholders before and after the gate would disagree;
 - approve only: the gate has waited longer than ``project.gate.max_age`` (a fresh plan is needed: start a new
   run), or a plan file the gate recorded is gone or no longer matches its sha256 (tamper check);
 - a typed field is unknown, mistyped, or required and missing;
@@ -157,6 +159,12 @@ def _resume_locked(
     if recorded_project and recorded_project != digest_project(project):
         # the plan gate's policy, gate.max_age and the migrate target come from the project at resume time
         raise ResumeRefused(f"the project (codeorca.yaml) changed since run {run_dir.run_id} stopped; start a new run")
+    recorded_key = record.get("redaction_key_id")
+    if registry is not None and recorded_key and recorded_key != registry.key_id:
+        raise ResumeRefused(
+            f"run {run_dir.run_id} was redacted with key {recorded_key}, this resume has {registry.key_id}: resume "
+            "with the same redaction key (the same CODEORCA_REDACTION_KEY, or the same SSM parameter version)"
+        )
     states = record.get("steps") or {}
     waiting = [sid for sid, st in states.items() if (st or {}).get("status") == "waiting"]
     steps = {s.id: s for s in [*workflow.steps, *workflow.finally_]}

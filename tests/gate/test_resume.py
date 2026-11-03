@@ -491,3 +491,19 @@ def test_a_waiting_step_in_finally_is_an_error_not_exit_0(tmp_path):
     assert Runner(PROJECT, wf, {}, rd, ex).run() == EXIT_FAILED
     record = rd.read_run()
     assert record["status"] == "failed" and record["steps"]["z"]["status"] == "errored"
+
+
+def test_resume_refuses_another_redaction_key(tmp_path):
+    """Review finding: run and resume could use different keys (an env override at run, SSM at resume, or a
+    rotated parameter) and every post-gate placeholder silently changed."""
+    registry = SecretRegistry(KEY, "env:aaaa1111")
+    calls = Calls()
+    rd = RunDir(tmp_path / "runs")
+    runner = Runner(PROJECT, WF, {}, rd, executors(calls, registry), key_id=registry.key_id)
+    assert runner.run() == EXIT_WAITING
+    assert rd.read_run()["redaction_key_id"] == "env:aaaa1111"
+    with pytest.raises(ResumeRefused, match="redacted with key env:aaaa1111"):
+        go(rd, calls, SecretRegistry(b"another-not-secret-key", "ssm:/example/redaction-key@2"))
+    assert rd.read_run()["status"] == "waiting"
+    assert go(rd, calls, SecretRegistry(KEY, "env:aaaa1111")) == EXIT_OK
+    assert rd.read_run()["redaction_key_id"] == "env:aaaa1111"

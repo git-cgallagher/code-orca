@@ -275,6 +275,7 @@ class Runner:
         redact: Callable[[Any], Any] | None = None,
         sleep: Callable[[float], None] = time.sleep,
         cwd: Path | None = None,
+        key_id: str | None = None,
         _restored: Mapping[str, Any] | None = None,
     ):
         self.project = project
@@ -304,6 +305,9 @@ class Runner:
         self.workflow_sha256 = workflow_sha256(workflow)
         self.project_sha256 = project_sha256(project)
         self.resumes: list[dict[str, Any]] = []
+        # which redaction key made the run's placeholders (``SecretRegistry.key_id``, never the key): a resume
+        # with another key would make post-gate placeholders disagree with pre-gate ones, so it refuses
+        self.key_id = key_id
         if _restored is not None:
             self._restore(_restored)
             return  # nothing is persisted until the resumed run starts (run.json stays the waiting record)
@@ -356,6 +360,7 @@ class Runner:
         self.git_sha = record.get("git_sha")
         self.vars = dict(record.get("vars") or {})
         self.resumes = list(record.get("resumes") or [])
+        self.key_id = record.get("redaction_key_id") or self.key_id
         persisted = record.get("steps") or {}
         for sid, state in self.states.items():
             if isinstance(persisted.get(sid), dict):
@@ -691,6 +696,7 @@ class Runner:
             "workflow": self.workflow.name,
             "workflow_sha256": self.workflow_sha256,
             "project_sha256": self.project_sha256,
+            "redaction_key_id": self.key_id,
             "project": self.project.project if self.project else None,
             "git_sha": self.git_sha,
             "dry_run": self.dry_run,

@@ -200,6 +200,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             stream=line_hook(registry),
             redact=record_filter(registry, denylist),
             cwd=project.root,
+            key_id=registry.key_id,
         )
     except RunError as e:
         shutil.rmtree(run_dir.path, ignore_errors=True)  # nothing ran and no run.json exists: leave no empty run

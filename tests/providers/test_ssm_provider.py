@@ -13,7 +13,7 @@ import pytest
 from codeorca import providers
 from codeorca.project import load_project
 from codeorca.providers import ssm as ssm_mod
-from codeorca.providers.ssm import SSMError, SSMSecrets, fetch_parameter, parse_ref
+from codeorca.providers.ssm import SSMError, SSMSecrets, SSMTimeout, fetch_parameter, parse_ref
 from codeorca.redact import SecretRegistry
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -222,3 +222,45 @@ def test_declared_refs_and_region():
         update={"type": "s3", "bucket": "b", "region": "eu-west-1", "account_id": "123456789012"}
     )
     assert providers.project_region(project.model_copy(update={"backend": backend})) == "eu-west-1"
+
+
+def test_after_one_hang_the_run_starts_no_further_credential_process():
+    """Review finding: each fetch after a hang built a new session and started another credential_process child
+    (abandoned, never killed). One session per run, and a latch: later fetches fail at once."""
+    started: list[int] = []
+
+    class HungSession:
+        def client(self, *_a, **_k):
+            started.append(1)  # stands in for botocore spawning the credential_process
+            time.sleep(5)
+
+    factory_calls: list[int] = []
+
+    def factory():
+        factory_calls.append(1)
+        return HungSession()
+
+    secrets = SSMSecrets(None, session_factory=factory, timeout_s=0.05, deadline_s=0.2)
+    with pytest.raises(SSMTimeout):
+        secrets.resolve_secret("ssm:/example/a")
+    begin = time.monotonic()
+    with pytest.raises(SSMTimeout, match="an earlier AWS call in this run hung"):
+        secrets.resolve_secret("ssm:/example/b")
+    assert time.monotonic() - begin < 0.1
+    assert started == [1] and factory_calls == [1]
+
+
+def test_one_session_serves_every_fetch_of_a_run():
+    class Client:
+        def get_parameter(self, Name, **_):
+            return {"Parameter": {"Value": f"value-of-{Name}", "Type": "String", "Version": 1}}
+
+    class Session:
+        def client(self, *_a, **_k):
+            return Client()
+
+    made: list[int] = []
+    secrets = SSMSecrets(None, session_factory=lambda: made.append(1) or Session())
+    assert secrets.get("ssm:/example/a") == "value-of-/example/a"
+    assert secrets.get("ssm:/example/b") == "value-of-/example/b"
+    assert made == [1]

@@ -16,7 +16,14 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from codeorca.providers.ssm import SSMError, SSMSecrets, SSMUnavailable, boto3_available, fetch_parameter
+from codeorca.providers.ssm import (
+    SSMError,
+    SSMSecrets,
+    SSMTimeout,
+    SSMUnavailable,
+    boto3_available,
+    fetch_parameter,
+)
 
 NO_PROVIDER_MESSAGE = (
     "this step needs an ssm:/ secret but boto3 is not installed; install the aws extra: pip install 'code-orca[aws]'"
@@ -26,6 +33,7 @@ __all__ = [
     "NO_PROVIDER_MESSAGE",
     "SSMError",
     "SSMSecrets",
+    "SSMTimeout",
     "SSMUnavailable",
     "boto3_available",
     "declared_secret_refs",

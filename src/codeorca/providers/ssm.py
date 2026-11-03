@@ -12,7 +12,10 @@ returned, so a value can never reach a log, a spec or an output file ahead of th
 - Every AWS call is time-limited twice over: botocore's ``connect_timeout``/``read_timeout`` with
   ``retries={'max_attempts': 2}``, and a wall-clock deadline around the whole call (credential resolution
   included: a ``credential_process`` such as aws-vault hangs silently once the macOS keychain locks, and no botocore
-  timeout covers that). On expiry the call is abandoned on a daemon thread and :class:`SSMError` is raised.
+  timeout covers that). On expiry the call is abandoned on a daemon thread and :class:`SSMTimeout` is raised.
+  The abandoned ``credential_process`` child keeps running until it exits on its own (botocore's ``Popen`` is out of
+  reach); so :class:`SSMSecrets` shares one session per run (credentials resolve once) and, after a first hang,
+  fails every later fetch of the run at once instead of starting another child.
 - Errors name the parameter and the error code only: never the value, never the service's message or response.
 - boto3 is imported lazily (it is the ``aws`` extra); :func:`boto3_available` says whether it is installed.
 
@@ -40,6 +43,10 @@ class SSMError(RuntimeError):
 
 class SSMUnavailable(SSMError):
     """boto3 is not installed (``pip install 'code-orca[aws]'``)."""
+
+
+class SSMTimeout(SSMError):
+    """An AWS call (credential resolution included) gave no answer within its wall-clock deadline."""
 
 
 def boto3_available() -> bool:
@@ -88,7 +95,7 @@ def call_with_deadline(
     thread.start()
     thread.join(deadline_s)
     if thread.is_alive():
-        raise (error or SSMError)(f"{what}: no answer within {deadline_s:g} s (credential provider or endpoint hung)")
+        raise (error or SSMTimeout)(f"{what}: no answer within {deadline_s:g} s (credential provider or endpoint hung)")
     if "error" in box:
         raise box["error"]
     return box.get("value")
@@ -170,9 +177,11 @@ class SSMSecrets:
         "_cache",
         "_deadline_s",
         "_factory",
+        "_hung",
         "_region",
         "_registry",
         "_secret_refs",
+        "_session",
         "timeout_s",
         "unprotected",
     )
@@ -188,7 +197,12 @@ class SSMSecrets:
         secret_refs: Iterable[str] = (),
     ) -> None:
         self._registry = registry  # None only for the redaction-key fetch, before the registry exists
-        self._factory = session_factory or default_session_factory(region)
+        factory = session_factory or default_session_factory(region)
+        self._session: Any = None
+        self._factory = self._one_session(factory)
+        # the first deadline hit: an abandoned call leaves its credential_process child running (nothing can kill
+        # botocore's Popen from here), so later fetches in this run fail fast instead of starting another one
+        self._hung: str | None = None
         self._region = region
         self.timeout_s = timeout_s
         self._deadline_s = deadline_s
@@ -215,17 +229,33 @@ class SSMSecrets:
         if flag_short and len(value.strip()) < self._registry.min_length and ref not in self.unprotected:
             self.unprotected.append(ref)  # too short to register: nothing scrubs it (reported by name only)
 
+    def _one_session(self, factory: SessionFactory) -> SessionFactory:
+        """One boto3 session per run: credentials resolve (a credential_process runs) once, not once per fetch."""
+
+        def shared():
+            if self._session is None:
+                self._session = factory()
+            return self._session
+
+        return shared
+
     def fetch(self, ref: str, *, as_secret: bool = False) -> Fetched:
         """The parameter (value, type, version), registered per the rules in the module docstring, then cached."""
         cached = self._cache.get(ref)
         if cached is None:
-            cached = fetch_parameter(
-                ref,
-                session_factory=self._factory,
-                region=self._region,
-                timeout_s=self.timeout_s,
-                deadline_s=self._deadline_s,
-            )
+            if self._hung is not None:
+                raise SSMTimeout(f"ssm {parse_ref(ref)}: not tried, an earlier AWS call in this run hung")
+            try:
+                cached = fetch_parameter(
+                    ref,
+                    session_factory=self._factory,
+                    region=self._region,
+                    timeout_s=self.timeout_s,
+                    deadline_s=self._deadline_s,
+                )
+            except SSMTimeout as e:
+                self._hung = str(e)
+                raise
         if as_secret or cached.type == "SecureString" or ref in self._secret_refs:
             self._register(ref, cached.value)  # BEFORE the value leaves this object
             if cached.type == "StringList":

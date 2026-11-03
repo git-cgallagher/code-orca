@@ -129,8 +129,9 @@ Change visibility, Public. After the first push from
 t=$(curl -fsS "https://ghcr.io/token?scope=repository:git-cgallagher/code-orca-runtime:pull" | python3 -c 'import json, sys; print(json.load(sys.stdin)["token"])')
 curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $t" \
   -H 'Accept: application/vnd.oci.image.index.v1+json' https://ghcr.io/v2/git-cgallagher/code-orca-runtime/manifests/main
-``` While it is private the pipeline itself still works (it logs in with
-`GITHUB_TOKEN`); anonymous pulls (consumers, `bin/codeorca` on a machine without a GHCR login) do not.
+```
+
+While it is private the pipeline itself still works (it logs in with `GITHUB_TOKEN`); anonymous pulls (consumers, `bin/codeorca` on a machine without a GHCR login) do not.
 
 ansible-runtime's package is public today (an anonymous token and manifest fetch for `:1.3.0` succeeded on
 2026-11-03), but its AGENTS.md, README and CHANGELOG do not record how or when it was made public, so whether

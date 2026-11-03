@@ -354,3 +354,57 @@ def test_a_previous_backend_hcl_is_recorded_by_digest_never_by_content(tmp_path)
     assert entry["after"] == hcl.read_text() and "secret_key" not in entry["after"]
     assert any("backend_file:app" in n and "credential-looking" in n for n in doc["notes"])
     assert doc["diff"]["backend_file:net"]["before"] is None  # a new file
+
+
+class _SlowClients:
+    """A session whose client creation hangs: what botocore does while a credential_process runs."""
+
+    def client(self, *args, **kwargs):
+        import time
+
+        time.sleep(5)
+
+
+class _NoCredentials(Exception):
+    pass
+
+
+class _FailingClients:
+    def client(self, *args, **kwargs):
+        raise _NoCredentials("credential_process said: FIXTURE-SECRET-provider-stderr-0001")
+
+
+def test_a_hung_client_creation_hits_the_deadline(tmp_path):
+    """Review finding: only the bare Session() ran under the deadline; client creation (where the credential
+    chain resolves) did not."""
+    import time
+
+    start = time.monotonic()
+    with pytest.raises(BootstrapError, match="no answer within"):
+        bootstrap(load_project(write_project(tmp_path)), session_factory=_SlowClients, timeout_s=0.05)
+    assert time.monotonic() - start < 3
+
+
+def test_a_credential_error_at_client_creation_is_value_free(tmp_path):
+    with pytest.raises(BootstrapError) as e:
+        bootstrap(load_project(write_project(tmp_path)), session_factory=_FailingClients, timeout_s=1)
+    assert "_NoCredentials" in str(e.value) and "FIXTURE-SECRET" not in str(e.value)
+
+
+def test_a_hung_credential_process_hits_the_deadline(tmp_path, monkeypatch):
+    """The real chain: a boto3 Session on a profile whose credential_process hangs (a locked aws-vault)."""
+    import time
+
+    config = tmp_path / "aws-config"
+    config.write_text("[profile hung]\ncredential_process = /bin/sleep 5\n")
+    monkeypatch.setenv("AWS_CONFIG_FILE", str(config))
+    for name in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_SECURITY_TOKEN"):
+        monkeypatch.delenv(name, raising=False)
+    start = time.monotonic()
+    with pytest.raises(BootstrapError, match="no answer within"):
+        bootstrap(
+            load_project(write_project(tmp_path)),
+            session_factory=lambda: boto3.Session(profile_name="hung"),
+            timeout_s=0.1,
+        )
+    assert time.monotonic() - start < 3

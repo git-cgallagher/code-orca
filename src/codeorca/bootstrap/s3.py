@@ -203,15 +203,25 @@ class _Aws:
     def __init__(self, session_factory: Callable[[], Any], region: str, timeout_s: float) -> None:
         self.timeout_s = timeout_s
         self.deadline_s = 4 * timeout_s
+        self.config = aws_config(timeout_s)
+
+        def connect() -> tuple[Any, Any, Any]:
+            # client creation resolves the credential chain (botocore's create_client calls get_credentials, and a
+            # credential_process such as aws-vault runs right then, with no timeout of its own): it must sit
+            # inside the deadline, not only the bare Session()
+            session = session_factory()
+            s3 = session.client("s3", region_name=region, config=self.config)
+            sts = session.client("sts", region_name=region, config=self.config)
+            return session, s3, sts
+
         try:
-            self.session = call_with_deadline(session_factory, self.deadline_s, "aws session", BootstrapError)
+            self.session, self.s3, self.sts = call_with_deadline(
+                connect, self.deadline_s, "aws session", BootstrapError
+            )
         except BootstrapError:
             raise
         except Exception as e:  # noqa: BLE001 - a profile or credential error, by class name only
             raise BootstrapError(f"could not create an AWS session: {describe_error(e)}") from None
-        self.config = aws_config(timeout_s)
-        self.s3 = self.session.client("s3", region_name=region, config=self.config)
-        self.sts = self.session.client("sts", region_name=region, config=self.config)
 
     def s3_call(self, op: str, **kwargs) -> Any:
         return self.call(self.s3, "s3", op, **kwargs)

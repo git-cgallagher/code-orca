@@ -463,7 +463,8 @@ Container (for the image phase):
 - A `paths:` filter on `pull_request` and a required check do not mix: a skipped workflow leaves the check
   "Expected" and the PR unmergeable. `image.yml` filters only its `push` trigger.
 - A container package pushed to GHCR from Actions starts private for a personal account; making it public is a
-  UI-only step in the package settings (Chris). Check with an anonymous pull after the first push.
+  UI-only step in the package settings (Chris). Check with an anonymous token + manifest fetch after the first
+  push (`docs/CONTAINER.md`), not `docker logout`.
 - On Docker Desktop for macOS, files a root container writes into a bind mount already show as the host user, so
   `bin/codeorca`'s chown is a no-op there; it matters on Linux.
 

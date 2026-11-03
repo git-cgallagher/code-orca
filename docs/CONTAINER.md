@@ -122,9 +122,14 @@ built from the same pins. Pin consumers by tag and digest: `code-orca-runtime:X.
 
 GitHub's documentation says a newly published package starts **private**; for a personal account only the owner
 can change that, in the UI: GitHub, Your profile, Packages, `code-orca-runtime`, Package settings, Danger Zone,
-Change visibility, Public (there is no API for it). After the first push from
-`main`, check it with an anonymous pull (`docker logout ghcr.io; docker pull ghcr.io/git-cgallagher/code-orca-runtime:main`)
-and make it public if that fails. While it is private the pipeline itself still works (it logs in with
+Change visibility, Public. After the first push from
+`main`, check it anonymously (this leaves any GHCR login alone), and make it public if it prints anything but 200:
+
+```bash
+t=$(curl -fsS "https://ghcr.io/token?scope=repository:git-cgallagher/code-orca-runtime:pull" | python3 -c 'import json, sys; print(json.load(sys.stdin)["token"])')
+curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $t" \
+  -H 'Accept: application/vnd.oci.image.index.v1+json' https://ghcr.io/v2/git-cgallagher/code-orca-runtime/manifests/main
+``` While it is private the pipeline itself still works (it logs in with
 `GITHUB_TOKEN`); anonymous pulls (consumers, `bin/codeorca` on a machine without a GHCR login) do not.
 
 ansible-runtime's package is public today (an anonymous token and manifest fetch for `:1.3.0` succeeded on

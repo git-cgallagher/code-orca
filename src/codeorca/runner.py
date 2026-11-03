@@ -450,7 +450,12 @@ class Runner:
             for step in self.workflow.finally_:
                 if self.states[step.id]["status"] is not None:
                     continue  # ran before a stop (a run.json written before finally moved to the real end)
-                self._run_step(step, final=True)
+                if self._run_step(step, final=True) == "waiting":
+                    # the model refuses a gate in finally; should a waiting step get here anyway, it is an error,
+                    # never a silent exit 0 with an unanswered gate
+                    state = self.states[step.id]
+                    state.update({"status": "errored", "error": "a step cannot wait in finally (no gate there)"})
+                    self.persist()
             if self._blocked():
                 self.status = "failed"
         self.exit_code = {"succeeded": EXIT_OK, "failed": EXIT_FAILED, "waiting": EXIT_WAITING}[self.status]

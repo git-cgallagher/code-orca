@@ -466,3 +466,18 @@ def test_a_partially_redacted_input_resupplied_exactly_resumes(tmp_path):
     code = go(rd, calls, fresh, wf=WF_CONN, secret_inputs=supplied)
     assert code == EXIT_OK
     assert calls.argv["use"] == ["use", f"u:{SECRET}@h", f"h1,{SECRET}"]
+
+
+def test_a_waiting_step_in_finally_is_an_error_not_exit_0(tmp_path):
+    """Defence behind the model rule: a finally step that returns 'waiting' fails the run."""
+    wf = workflow(
+        [{"id": "a", "type": "shell", "run": ["a"]}],
+        **{"finally": [{"id": "z", "type": "shell", "run": ["z"]}]},
+    )
+    calls = Calls()
+    ex = executors(calls, SecretRegistry(KEY, "env:test"))
+    ex["shell"] = lambda step, ctx: StepResult("waiting") if step.id == "z" else calls.shell(step, ctx)
+    rd = RunDir(tmp_path / "runs")
+    assert Runner(PROJECT, wf, {}, rd, ex).run() == EXIT_FAILED
+    record = rd.read_run()
+    assert record["status"] == "failed" and record["steps"]["z"]["status"] == "errored"

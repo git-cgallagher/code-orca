@@ -293,6 +293,9 @@ class Workflow(BaseModel):
                 if n not in ids:
                     raise ValueError(f"{s.id}: needs unknown step {n}")
         for s in self.finally_:
+            if s.type == "gate":
+                # a gate there would leave the run 'succeeded' (exit 0) with an unanswered gate nobody can resume
+                raise ValueError(f"finally step {s.id}: a gate is not allowed in finally (put it in steps)")
             if s.needs:
                 # finally steps always run after the main graph; their status functions describe the run
                 raise ValueError(f"finally step {s.id}: needs is not allowed on a finally step (they always run last)")

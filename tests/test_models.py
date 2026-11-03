@@ -83,6 +83,12 @@ STEP = {"type": "shell", "run": ["true"]}
             },
             "spec-render output 'specs/plan.yaml' is written by steps a and b",
         ),
+        # review findings: a gate in finally left the run 'succeeded' (exit 0) with the gate waiting and
+        # unresumable; retry on a gate re-asked after a typed reject or a timeout
+        (
+            {"steps": [{"id": "a", **STEP}], "finally": [{"id": "g", "type": "gate", "message": "m"}]},
+            "finally step g: a gate is not allowed in finally",
+        ),
     ],
 )
 def test_model_rules_reject_with_field_precise_messages(data: dict, message: str):

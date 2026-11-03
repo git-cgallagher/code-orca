@@ -62,6 +62,10 @@ Consumers keep their own `codeorca.yaml`, `workflows/`, `specs/` in their own (u
 | `tests/cli/test_cli_phase3.py`, `tests/steps/test_stack_secrets.py`, `tests/integration/test_reference_demo_rollout.py` | CLI wiring (executors, resolver closures, key fetcher, no AWS call with the env key, `resume` refusal + no bypass option, `lint powershell`); stack secrets (unit + live `drift`/`run` with a fake resolver); `demo-rollout` wait -> refused CLI resume -> approve (all steps, finally once, plan deleted, no placeholder anywhere) and reject |
 | `tests/` | pytest; `tests/negative/` holds workflow files that must fail validation, each for a named reason |
 | `tests/redact/` | redaction tests (no terraform/ansible binary needed); `fixtures/` holds a hand-scrubbed plan/state/output JSON, a providers-schema excerpt and two log captures, all with `FIXTURE-SECRET-*` placeholders; regeneration recipe in `conftest.py` |
+| `.github/workflows/image.yml` | the image pipeline (modelled on ansible-runtime's `build.yml`): `image (amd64)` / `image (arm64)` on native runners build `container/Dockerfile` `--target runtime` with no build-args (the ARG defaults are the pins), run `container/tests/smoke.sh` from the checkout, check the checkout stayed clean, grype (amd64, fixable critical) and, on `main` or a tag only (`PUBLISH`), push by digest; `manifest` makes `:main` (+ `:sha-<short>` on a push) or `:X.Y.Z`/`:X.Y`/`:latest` (tag must equal pyproject's version; an existing `:X.Y.Z` is never re-pointed), then build provenance + SPDX SBOM attestations on the index. No path filter on `pull_request` (the two image jobs are to become required checks) |
+| `bin/codeorca` | local launch wrapper (bash 3.2-safe; header lists every mount and env name): `docker run --rm` of `CODEORCA_IMAGE` (default `code-orca-runtime:latest`) with `$PWD` at `/work`, `-it` only when stdin and stdout are TTYs, AWS/`CODEORCA_*`/`TF_VAR_*` by name only (`compgen -e`; `CODEORCA_IMAGE`/`CODEORCA_DOCKER_SOCKET` not passed), ssh agent, `known_hosts` ro, plugin cache, the Docker socket only with `CODEORCA_DOCKER_SOCKET=1`; then chowns the project's state dir + `specs_dir` (from `-p`'s file; relative, no `..`, no symlink) back to the caller; exit code is codeorca's. Never runs aws-vault |
+| `tests/wrapper/` | `bin/codeorca` against a fake `docker` on PATH recording argv: no secret value on any argv, names only, `-it` needs both TTY ends (pty), socket only on `=1`, exit codes propagate (a failed chown never masks one), chown targets per `-p` form; clean env per test; skipped on Windows |
+| `docs/CONTAINER.md` | what the image holds and why, local arm64 build + smoke, `bin/codeorca`, the trigger table, releasing (tag == pyproject version), pulling + `gh attestation verify`, GHCR visibility (manual), bumping the base / Terraform / PowerShell / PSScriptAnalyzer |
 
 ## Conventions
 
@@ -451,6 +455,17 @@ Container (for the image phase):
 - OpenTofu images are `COPY --from` sources only (direct use unsupported since 1.10).
 - aws-vault's `--ecs-server` cannot serve a container (SDKs refuse non-loopback credential URLs); pass
   `AWS_*` by name on `docker run -e`, never `--env-file` or a value on the argv.
+- Dependabot's docker updater reads literal `FROM image:tag@sha256:...` lines only (`docker/file_parser.rb`'s
+  `FROM_LINE`): `ARG BASE_IMAGE=...` + `FROM ${BASE_IMAGE}` is invisible to it. A literal pinned stage that the ARG
+  default names works (`ARG BASE_IMAGE=pinned-base` BEFORE the first `FROM`, then `FROM <image>@sha256:... AS
+  pinned-base`, `FROM ${BASE_IMAGE}`): BuildKit resolves an ARG naming a stage, but a global ARG declared after
+  the first `FROM` is blank in later `FROM` lines ("base name should not be blank").
+- A `paths:` filter on `pull_request` and a required check do not mix: a skipped workflow leaves the check
+  "Expected" and the PR unmergeable. `image.yml` filters only its `push` trigger.
+- A container package pushed to GHCR from Actions starts private for a personal account; making it public is a
+  UI-only step in the package settings (Chris). Check with an anonymous pull after the first push.
+- On Docker Desktop for macOS, files a root container writes into a bind mount already show as the host user, so
+  `bin/codeorca`'s chown is a no-op there; it matters on Linux.
 
 ## TODO (phases, from the design plan)
 

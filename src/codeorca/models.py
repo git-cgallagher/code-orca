@@ -173,6 +173,9 @@ class Gate(StepBase):
         if self.on_failure == "continue":
             # a rejected gate must block its dependents; `continue` would count a rejection as met
             raise ValueError("a gate cannot use on_failure: continue (a rejection must block its dependents)")
+        if self.retry.limit:
+            # a typed reject or a timeout is final; a retry would ask again (and restart the timeout)
+            raise ValueError("a gate cannot use retry (a rejection or a timeout is final)")
         clash = sorted(set(self.fields) & IMPLICIT_OUTPUTS["gate"])
         if clash:
             raise ValueError(f"gate fields may not be named {', '.join(clash)} (implicit gate outputs)")

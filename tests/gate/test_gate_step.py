@@ -359,3 +359,24 @@ def test_cancelled_gate_fails_the_run_and_cancels_unrelated_work(tmp_path):
     assert r.states["unrelated"]["status"] == "cancelled"
     assert r.states["notify"]["status"] == "succeeded"
     assert r.run_dir.read_run()["exit_code"] == 1
+
+
+def test_a_rejection_is_final_even_where_retry_would_apply():
+    """Review finding: retry on a gate re-asked after a typed reject (and restarted the timeout); the model now
+    refuses retry on a gate, so a rejection always blocks its dependents."""
+    from pydantic import ValidationError
+
+    from codeorca.models import Workflow
+
+    with pytest.raises(ValidationError, match="a gate cannot use retry"):
+        Workflow.model_validate(
+            {
+                "api": "codeorca/v1",
+                "kind": "workflow",
+                "name": "t",
+                "steps": [
+                    {"id": "approve", "type": "gate", "message": "m", "retry": {"limit": 1, "policy": "failure"}},
+                    {"id": "use", "type": "shell", "needs": ["approve"], "run": ["use"]},
+                ],
+            }
+        )

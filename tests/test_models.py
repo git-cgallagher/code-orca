@@ -89,6 +89,10 @@ STEP = {"type": "shell", "run": ["true"]}
             {"steps": [{"id": "a", **STEP}], "finally": [{"id": "g", "type": "gate", "message": "m"}]},
             "finally step g: a gate is not allowed in finally",
         ),
+        (
+            {"steps": [{"id": "g", "type": "gate", "message": "m", "retry": {"limit": 1, "policy": "failure"}}]},
+            "a gate cannot use retry",
+        ),
     ],
 )
 def test_model_rules_reject_with_field_precise_messages(data: dict, message: str):

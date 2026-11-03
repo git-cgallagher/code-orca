@@ -524,7 +524,10 @@ Container (for the image phase):
      through a helper or a `no_log` extra var today); a model field for it is a design decision, not done here.
    - **`specs/backend.yaml`** (plan 5.11): not rendered; the bootstrap step's `diff` output (run.json/result.json) is
      the record until a `source.backend` spec renderer (model field, schema, kind) exists.
-4. Container image on `ghcr.io/git-cgallagher/ansible-runtime` (in progress, Phase 4): the pyproject ranges are for
-   pip users only; in the image the base's `constraints.txt` fixes every version, and anything the base lacks is
-   hash-pinned in `container/requirements/codeorca.txt` (nothing today). amd64 is verified only in CI.
+4. ~~Container image~~ done (Phase 4): `container/Dockerfile` on `ansible-runtime` 1.3.0, `bin/codeorca`, the
+   `image` workflow. The pyproject ranges are for pip users only; in the image the base's `constraints.txt` fixes
+   every version, and anything the base lacks is hash-pinned in `container/requirements/codeorca.txt` (nothing
+   today). Residuals: amd64 is verified only in CI; the GHCR package starts private (Chris makes it public in its
+   settings); `image (amd64)` and `image (arm64)` join the required checks after their first run; the image is
+   about 1.24 GB, 279 MB of it PSScriptAnalyzer's compatibility profiles (kept for the PSUseCompatible* rules).
 5. Reference project end to end in CI; consumer guide; v0.1.0.

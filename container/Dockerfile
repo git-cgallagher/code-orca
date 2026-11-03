@@ -8,9 +8,14 @@
 # fails when the image disagrees with them. Keep each ARG line free of trailing comments (the value would
 # include them).
 
+# BASE_IMAGE names the stage below by default, so the pinned base sits on a LITERAL `FROM image:tag@digest` line:
+# Dependabot's docker updater reads only literal FROM lines (never `FROM ${ARG}`), so it can bump this one. A local
+# override still works: --build-arg BASE_IMAGE=<image ref>.
+ARG BASE_IMAGE=pinned-base
+
 # The base's multi-arch INDEX digest (linux/amd64 + linux/arm64), ansible-runtime 1.3.0: Debian 13 trixie,
 # Python 3.13, ansible-core 2.21.5. Bumping it can move any Python pin: rerun container/requirements/lock.sh.
-ARG BASE_IMAGE=ghcr.io/git-cgallagher/ansible-runtime:1.3.0@sha256:81a0a154784d4d72efedb2b1070c8ebf31aab28a85862ab48480e8554c6aec05
+FROM ghcr.io/git-cgallagher/ansible-runtime:1.3.0@sha256:81a0a154784d4d72efedb2b1070c8ebf31aab28a85862ab48480e8554c6aec05 AS pinned-base
 
 FROM ${BASE_IMAGE} AS base
 

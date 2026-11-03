@@ -18,8 +18,8 @@ updates:
         patterns: ['*']
   # The image's FROM lines. Dependabot's docker parser reads literal `FROM image:tag@sha256:...` lines only:
   # `FROM ${BASE_IMAGE}` is invisible to it (checked against dependabot-core's docker/file_parser.rb,
-  # 2026-11-03). It bumps the base only while the Dockerfile names it in a literal FROM (a pinned stage the
-  # BASE_IMAGE default points at); otherwise the base bump is manual (docs/CONTAINER.md).
+  # 2026-11-03). The Dockerfile names the base on a literal pinned stage (`FROM ...ansible-runtime:X.Y.Z@sha256:...
+  # AS pinned-base`, which the BASE_IMAGE default points at), so this entry can bump it.
   - package-ecosystem: docker
     directory: /container
     schedule:

@@ -141,24 +141,15 @@ that took the same manual step is not documented there.
 
 All bumps go through a PR; the image workflow's two jobs prove the result on both architectures.
 
-**The base (`BASE_IMAGE`).** Dependabot's docker updater reads literal `FROM image:tag@sha256:...` lines only
-(dependabot-core's `docker/file_parser.rb`); it does not see an image that arrives through
-`ARG BASE_IMAGE=...` + `FROM ${BASE_IMAGE}`, so with that shape the bump is manual:
-
-```bash
-v=X.Y.Z   # the new ansible-runtime release
-docker buildx imagetools inspect ghcr.io/git-cgallagher/ansible-runtime:$v --format '{{json .Manifest.Digest}}'
-docker buildx imagetools inspect ghcr.io/git-cgallagher/ansible-runtime:$v   # must list linux/amd64 and linux/arm64
-gh attestation verify oci://ghcr.io/git-cgallagher/ansible-runtime:$v --owner git-cgallagher
-```
-
-Put `ghcr.io/git-cgallagher/ansible-runtime:$v@<index digest>` in the Dockerfile's `BASE_IMAGE` default, then
-re-check every pin that must agree with the base: `container/requirements/` (resolved under the new base's
-`/usr/share/ansible-runtime/constraints.txt`), and `examples/reference/codeorca.yaml`'s `runtime:` block
-(`ansible_core`, `python`). If the Dockerfile names the base in a literal pinned stage that the `BASE_IMAGE`
-default points at (`ARG BASE_IMAGE=pinned-base` before the first `FROM`, then
-`FROM ghcr.io/git-cgallagher/ansible-runtime:X.Y.Z@sha256:... AS pinned-base` and `FROM ${BASE_IMAGE} AS ...`;
-BuildKit resolves an ARG naming a stage), the `docker` entry in `.github/dependabot.yml` opens that PR instead.
+**The base.** The Dockerfile names the base on a literal, digest-pinned stage
+(`FROM ghcr.io/git-cgallagher/ansible-runtime:X.Y.Z@sha256:<index digest> AS pinned-base`) and the `BASE_IMAGE`
+argument defaults to that stage (`ARG BASE_IMAGE=pinned-base` before the first `FROM`, then
+`FROM ${BASE_IMAGE} AS base`). Dependabot's docker updater reads only literal `FROM` lines, so the `docker` entry
+in `.github/dependabot.yml` (directory `/container`) opens the bump PR for this line; a local build can still
+override it with `--build-arg BASE_IMAGE=<ref>`. A base bump can move any Python pin and the reference project's
+`runtime:` block (`ansible_core`, `python`): rerun `container/requirements/lock.sh` and the smoke test in the same
+PR. To bump by hand: `docker buildx imagetools inspect ghcr.io/git-cgallagher/ansible-runtime:<ver>` prints the
+index digest to paste into that `FROM` line.
 
 **Terraform (`TF_VERSION`).** Change it together with `.github/workflows/ci.yml`'s `terraform_version`, the
 reference project's `runtime.terraform`, and the captured fixtures (`tests/fixtures/terraform/regenerate.py`):

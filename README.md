@@ -6,14 +6,15 @@ redacted configuration specs** rendered from Terraform plan/state JSON and from 
 resolution, and Python or PowerShell helpers where neither tool fits. It ships as one container
 holding Terraform, Ansible, Python, PowerShell and itself.
 
-Status: **Phase 3 (gates, apply, helpers, secrets, backend bootstrap).** Phase 1 (core, read-only): workflow and
+Status: **Phase 4 (container image).** Phase 1 (core, read-only): workflow and
 project models, the sequential DAG runner, the Terraform adapter, the policy floor and plan gate, the redaction
 pipeline, the Terraform plan-spec renderer and the `run`, `drift`, `doctor`, `render`, `summary` commands. Phase 2:
 the `ansible` step (`ansible-playbook` with a redacting JSONL stdout callback), the Ansible host spec (inventory +
 play scope) and `codeorca lint ansible`. Phase 3: the approval `gate` + `codeorca resume`, Terraform `apply` bound
 to the approved plan's sha256, `migrate_backend`, the `python`/`powershell` helpers + `codeorca lint powershell`,
-SSM secrets and the SSM-backed redaction key, and the S3 state-backend bootstrap. The container image follows (see
-`AGENTS.md`, TODO).
+SSM secrets and the SSM-backed redaction key, and the S3 state-backend bootstrap. Phase 4: the
+`ghcr.io/git-cgallagher/code-orca-runtime` image (Terraform, ansible-core, PowerShell + PSScriptAnalyzer and
+code-orca on `ansible-runtime`) and the `bin/codeorca` wrapper; see "Container" below and `docs/CONTAINER.md`.
 
 ```bash
 pip install -e '.[dev,ansible,aws]'    # ansible-core 2.21 (Ansible steps) and boto3 (SSM, S3 bootstrap); tests
@@ -244,5 +245,23 @@ a state).
 - **Config is YAML, validated fail-closed** against Pydantic models that also export the JSON Schema.
 - **The execution environment is built elsewhere and verified here** (`codeorca doctor`).
 - **Specs are deterministic and committed**, so `git diff specs/` is the change and drift record.
+
+## Container
+
+`ghcr.io/git-cgallagher/code-orca-runtime` holds everything a run needs: ansible-core 2.21.5 and Python 3.13 from
+the `ansible-runtime` base, Terraform 1.14.7 (from HashiCorp's GPG-verified release zip, license included),
+PowerShell 7.6 with PSScriptAnalyzer, and code-orca itself, installed under the base's `constraints.txt` so the
+estate keeps one version of every Python package. `bin/codeorca` runs it in the current directory:
+
+```bash
+export CODEORCA_REDACTION_KEY=example-not-secret-local
+bin/codeorca run plan-only -p examples/reference/codeorca.yaml
+aws-vault exec <profile> -- bin/codeorca drift -p codeorca.yaml   # credentials come from the caller, by name only
+```
+
+The wrapper passes AWS, `CODEORCA_*` and `TF_VAR_*` variables by **name** (never a value on the command line),
+forwards the SSH agent and `known_hosts`, keeps a Terraform plugin cache, mounts the Docker socket only with
+`CODEORCA_DOCKER_SOCKET=1`, and asks for a terminal only when it has one, so a gate still refuses an agent's
+approval. Building, smoke-testing, releases, provenance verification and version bumps: `docs/CONTAINER.md`.
 
 See `AGENTS.md` for conventions and the gotchas this design is built on.

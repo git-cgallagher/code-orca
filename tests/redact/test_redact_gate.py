@@ -50,3 +50,13 @@ def test_unreadable_file_raises_rather_than_passing(tmp_path, registry):
             scan_outputs(tmp_path, registry)
     finally:
         p.chmod(0o600)
+
+
+def test_scan_outputs_reads_utf16_files(tmp_path):
+    from codeorca.redact import SecretRegistry, scan_outputs
+
+    registry = SecretRegistry(b"example-not-secret-key", "env:test")
+    registry.add("FIXTURE-SECRET-utf16-value-0001")
+    (tmp_path / "le.json").write_bytes('{"t": "FIXTURE-SECRET-utf16-value-0001"}'.encode("utf-16"))
+    (tmp_path / "be.json").write_bytes(b"\x00" + "x FIXTURE-SECRET-utf16-value-0001".encode("utf-16-be"))
+    assert [rel for rel, _ in scan_outputs(tmp_path, registry)] == ["be.json", "le.json"]

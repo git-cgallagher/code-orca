@@ -24,6 +24,8 @@
 
 from __future__ import annotations
 
+import codecs
+import contextlib
 import json
 import os
 import signal
@@ -152,8 +154,8 @@ def run_argv(
         _rewrite_output_file(output_file, scrub)
     output = None
     if output_file and os.path.exists(output_file):
-        with open(output_file, encoding="utf-8") as fh:
-            text = fh.read()
+        with open(output_file, "rb") as fh:
+            text = decode_output(fh.read())
         try:
             output = json.loads(text)
         except json.JSONDecodeError as e:
@@ -176,7 +178,32 @@ def _rewrite_output_file(output_file: str | None, scrub: Callable[[str], str] | 
     hook would have scrubbed from a log line. Runs whatever happened to the child."""
     if not output_file or scrub is None or not os.path.exists(output_file):
         return
-    with open(output_file, encoding="utf-8") as fh:
-        text = fh.read()
-    with open(output_file, "w", encoding="utf-8") as fh:
-        fh.write(scrub(text))
+    try:
+        with open(output_file, "rb") as fh:
+            text = decode_output(fh.read())
+        with open(output_file, "w", encoding="utf-8", errors="surrogateescape") as fh:
+            fh.write(scrub(text))
+    except BaseException:
+        # whatever failed, the child's raw file must not stay behind unscrubbed
+        with contextlib.suppress(OSError):
+            os.unlink(output_file)
+        raise
+
+
+def decode_output(data: bytes) -> str:
+    """The helper's output file as text: UTF-8, else UTF-16/UTF-32 by its BOM (PowerShell 5.1's ``Out-File``
+    default is UTF-16LE with a BOM), else UTF-8 with ``surrogateescape`` (a Latin-1 byte survives the rewrite as
+    the same byte, and the registry still sees every UTF-8 secret around it). Never raises."""
+    for bom, codec in (
+        (codecs.BOM_UTF32_LE, "utf-32"),
+        (codecs.BOM_UTF32_BE, "utf-32"),
+        (codecs.BOM_UTF8, "utf-8-sig"),
+        (codecs.BOM_UTF16_LE, "utf-16"),
+        (codecs.BOM_UTF16_BE, "utf-16"),
+    ):
+        if data.startswith(bom):
+            try:
+                return data.decode(codec)
+            except UnicodeDecodeError:
+                break
+    return data.decode("utf-8", "surrogateescape")

@@ -17,7 +17,8 @@ def scan_outputs(
 
     Returns ``[(relative_posix_path, match_count)]`` for the files that hit, sorted by path. The report never
     carries a matched value, so it is safe to print and to put in a result file. Files are read as UTF-8 with
-    replacement, so a binary file is scanned for the textual forms it may embed. An unreadable file raises:
+    replacement, so a binary file is scanned for the textual forms it may embed, and a file holding NUL bytes is
+    also read as UTF-16 (both byte orders): a PowerShell ``Out-File`` writes UTF-16LE. An unreadable file raises:
     a tree the gate cannot read in full cannot be declared clean.
     """
     root_path = Path(root)
@@ -28,9 +29,23 @@ def scan_outputs(
         for name in sorted(filenames):
             path = Path(dirpath) / name
             rel = path.relative_to(root_path).as_posix()
-            text = path.read_bytes().decode("utf-8", "replace")
-            n = registry.count_matches(text) + sum(1 for p in extras for _ in p.finditer(text))
+            data = path.read_bytes()
+            n = 0
+            for text in _decodings(data):
+                n += registry.count_matches(text) + sum(1 for p in extras for _ in p.finditer(text))
             if n:
                 hits.append((rel, n))
     hits.sort()
     return hits
+
+
+def _decodings(data: bytes) -> list[str]:
+    """The text forms a file may carry a value in: UTF-8 (with replacement, so binary files are scanned too) and,
+    when the bytes hold NULs (a UTF-16 file such as PowerShell 5.1's ``Out-File`` default), both UTF-16 byte
+    orders at both alignments."""
+    texts = [data.decode("utf-8", "replace")]
+    if b"\x00" in data:
+        for chunk in (data, data[1:]):
+            for codec in ("utf-16-le", "utf-16-be"):
+                texts.append(chunk[: len(chunk) // 2 * 2].decode(codec, "replace"))
+    return texts

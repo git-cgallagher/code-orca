@@ -174,3 +174,36 @@ def test_secret_never_reaches_the_child_argv_or_env_names_values(run_workflow, r
     argv_text = (r.run_dir.steps_dir / "a" / "argv.json").read_text()
     assert SECRET not in argv_text and PLACEHOLDER_RE.search(argv_text)
     assert scan_outputs(r.run_dir.path, registry) == []
+
+
+@pytest.mark.parametrize("encoding", ["latin-1", "utf-16"], ids=["latin1", "utf16-bom"])
+def test_a_non_utf8_output_file_is_rewritten_scrubbed_not_left_in_clear(run_workflow, project_root, registry, encoding):
+    """Review finding: a strict UTF-8 read raised before the scrubbed rewrite, leaving the child's raw file (and
+    the secret it echoed) in the run dir."""
+    (project_root / "scripts" / "enc.py").write_text(
+        "import json, os\n"
+        "doc = {'token': os.environ['HELPER_SECRET'], 'city': 'M\\u00fcnchen'}\n"
+        f"data = json.dumps(doc, ensure_ascii=False).encode({encoding!r})\n"
+        "open(os.environ['CODEORCA_OUTPUT_FILE'], 'wb').write(data)\n"
+    )
+    rc, r = run_workflow([py("a", script="scripts/enc.py", env={"HELPER_SECRET": {"secret": SECRET_REF}})])
+    raw = (r.run_dir.steps_dir / "a" / "output.json").read_bytes()
+    for form in ("utf-8", "utf-16-le", "utf-16-be"):
+        assert SECRET.encode(form) not in raw
+    assert rc == EXIT_OK, r.states
+    assert PLACEHOLDER_RE.fullmatch(output(r, "a")["token"])
+    assert scan_outputs(r.run_dir.path, registry) == []
+
+
+def test_an_output_file_that_cannot_be_rewritten_is_removed(tmp_path, monkeypatch):
+    from codeorca.steps import shell
+
+    target = tmp_path / "output.json"
+    target.write_text('{"token": "FIXTURE-SECRET-unwritable-0001"}', encoding="utf-8")
+
+    def boom(text: str) -> str:
+        raise RuntimeError("scrub failed")
+
+    with pytest.raises(RuntimeError):
+        shell._rewrite_output_file(str(target), boom)
+    assert not target.exists()

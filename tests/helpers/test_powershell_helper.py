@@ -117,3 +117,20 @@ def test_missing_pwsh_errors_the_step(run_workflow):
 )
 def test_declares_should_process_textual_check(text, declared):
     assert declares_should_process(text) is declared
+
+
+@needs_pwsh
+def test_a_utf16_out_file_is_rewritten_scrubbed(run_workflow, project_root, registry):
+    """Review finding: ``Out-File -Encoding unicode`` (UTF-16LE + BOM, PowerShell 5.1's default) made the strict
+    UTF-8 rewrite raise, and output.json kept the secret in clear."""
+    (project_root / "ps" / "utf16.ps1").write_text(
+        "[CmdletBinding(SupportsShouldProcess)]\nparam()\n"
+        "@{ token = $env:HELPER_SECRET } | ConvertTo-Json |\n"
+        "  Out-File -Encoding unicode -FilePath $env:CODEORCA_OUTPUT_FILE\n"
+    )
+    rc, r = run_workflow([ps("a", script="ps/utf16.ps1", env={"HELPER_SECRET": {"secret": SECRET_REF}})])
+    raw = (r.run_dir.steps_dir / "a" / "output.json").read_bytes()
+    assert SECRET.encode("utf-16-le") not in raw and SECRET.encode() not in raw
+    assert rc == EXIT_OK, r.states
+    assert PLACEHOLDER_RE.fullmatch(output(r, "a")["token"])
+    assert scan_outputs(r.run_dir.path, registry) == []

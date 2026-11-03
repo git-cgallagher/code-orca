@@ -38,7 +38,7 @@
 # run, a second container chowns back to the caller's uid:gid the ROOT-OWNED files (find -uid 0) under the
 # project's state dir (the first component of state_dir below the project root, e.g. .codeorca/) and its specs
 # dir; nothing else in the tree is touched, and the project root itself never is. Skipped when the caller is
-# root, under rootless Docker (container root IS the caller there, so a chown would hand the files to a
+# root, under rootless Docker or Podman (container root IS the caller there, so a chown would hand the files to a
 # subordinate uid), and when the run container never started. On Docker Desktop for macOS the files already show
 # as the caller's.
 #
@@ -129,7 +129,9 @@ if ! command -v docker > /dev/null 2>&1; then
   echo "codeorca wrapper: docker is not on PATH" >&2
   exit 69
 fi
-if ! secopts=$(docker info --format '{{json .SecurityOptions}}' 2> /dev/null); then
+# The whole info document: Docker reports rootless as SecurityOptions "name=rootless", Podman (aliased as docker) as
+# host.security "rootless":true, and Podman has no .SecurityOptions field to ask for by name.
+if ! info=$(docker info --format '{{json .}}' 2> /dev/null); then
   echo "codeorca wrapper: cannot reach the Docker daemon (is Docker running? check DOCKER_HOST / docker context)" >&2
   exit 69
 fi
@@ -180,7 +182,7 @@ case $rc in
     exit "$rc" ;;
 esac
 [ "$(id -u)" = 0 ] && exit "$rc"
-case $secopts in *name=rootless*) exit "$rc" ;; esac
+case $info in *name=rootless*|*'"rootless":true'*|*'"rootless": true'*) exit "$rc" ;; esac
 [ -f "$project" ] || exit "$rc"
 
 targets=()

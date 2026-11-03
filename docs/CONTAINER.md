@@ -9,7 +9,7 @@ closed on any mismatch.
 
 | Layer | Source | Why |
 |---|---|---|
-| Base | `ghcr.io/git-cgallagher/ansible-runtime` (the Dockerfile's `BASE_IMAGE` default, pinned by tag **and** multi-arch index digest) | Debian 13 trixie, Python 3.13, ansible-core and the shared collections. Layered on, not forked, so the estate has one source of truth for Ansible and Python pins (`/usr/share/ansible-runtime/constraints.txt`). Runs as root deliberately, as the base does: the forwarded ssh-agent socket and the Docker socket need it. Entrypoint is the base's `tini`. |
+| Base | `ghcr.io/git-cgallagher/ansible-runtime` (the Dockerfile's literal `FROM … AS pinned-base` line, which `BASE_IMAGE` defaults to; pinned by tag **and** multi-arch index digest) | Debian 13 trixie, Python 3.13, ansible-core and the shared collections. Layered on, not forked, so the estate has one source of truth for Ansible and Python pins (`/usr/share/ansible-runtime/constraints.txt`). Runs as root deliberately, as the base does: the forwarded ssh-agent socket and the Docker socket need it. Entrypoint is the base's `tini`. |
 | Terraform | the HashiCorp release zip (`TF_VERSION`), GPG-verified against HashiCorp's key (fingerprint `C874 011F 0AB4 0511 0D02 1055 3436 5D94 72D7 468F`) and its `SHA256SUMS` | Not the `hashicorp/terraform` image: it ships no `LICENSE.txt`, and BSL 1.1 wants the license to travel with the binary. The license is installed at `/usr/share/licenses/terraform/LICENSE.txt`. The image is labelled `org.opencontainers.image.licenses="MIT AND BUSL-1.1 AND GPL-3.0-or-later"`: the main components (code-orca and PowerShell MIT, Terraform BUSL-1.1, ansible-core and ansible-lint GPL-3.0-or-later); the base's collections and Debian packages carry their own licenses, which the SBOM attestation lists. |
 | PowerShell | Microsoft's apt repo for Debian 13 (`packages-microsoft-prod.deb`), `powershell=<PWSH_VERSION>-1.deb`, on both arches | The `powershell` helper step and `codeorca lint powershell`. Pinned to the 7.6 LTS line (7.4 and 7.5 are end of life). Trixie's apt rejects Microsoft's legacy `microsoft.asc` key, so the repo comes from the `.deb`. |
 | PSScriptAnalyzer | PowerShell Gallery, `PSSA_VERSION`, `Install-PSResource -Scope AllUsers` | `codeorca lint powershell`. The smoke test proves it with `Invoke-ScriptAnalyzer` (`Get-InstalledPSResource` reports nothing even after a good install). |
@@ -31,8 +31,9 @@ git status --porcelain   # must print nothing: the smoke test leaves the checkou
 ```
 
 The smoke test needs no network beyond what the reference project needs (none) and exits 0 on success. The
-build arguments `BASE_IMAGE`, `TF_VERSION`, `PWSH_VERSION` and `PSSA_VERSION` have defaults in the Dockerfile;
-pass `--build-arg` only to try a bump.
+build arguments `BASE_IMAGE` (default: the `pinned-base` stage), `TF_VERSION`, `PWSH_VERSION` and `PSSA_VERSION`
+have defaults in the Dockerfile; pass `--build-arg` only to try a bump (`BASE_IMAGE=<image>@sha256:<digest>`).
+`IMAGE_VERSION` and `IMAGE_REVISION` only set labels (CI passes them; a local build is labelled `dev`).
 
 - **Apple silicon builds `linux/arm64` natively; that is the only architecture to verify locally.** amd64
   emulation (binfmt) is broken on this Mac and is deliberately not being reinstalled; CI builds and tests amd64
@@ -78,8 +79,10 @@ CODEORCA_IMAGE=ghcr.io/git-cgallagher/code-orca-runtime:X.Y.Z bin/codeorca docto
   under the project's state dir (the first component of `state_dir` below the project root, normally
   `.codeorca`) and `specs_dir`, nothing else: never the project root itself (`specs_dir: .`), never through a
   symlink, never a path that is absolute or leaves the project root. Skipped for a root caller, under rootless
-  Docker (`docker info` reports `name=rootless`: container root is the caller there, so a chown would hand the
-  files to a subordinate uid; Podman is not tested), and when the run container never started. Terraform's own
+  Docker or Podman (`docker info --format '{{json .}}'` reports Docker's `name=rootless` security option or
+  Podman's `"rootless":true`: container root is the caller there, so a chown would hand the files to a subordinate
+  uid; both shapes are tested with a fake `docker`, never against a real rootless engine), and when the run
+  container never started. Terraform's own
   working files (`.terraform/`, `.terraform.lock.hcl`) and the plugin cache stay root-owned on rootful Linux. On
   Docker Desktop for macOS files already show as the caller's.
 - **Exit codes:** codeorca's (0, 1 failed, 2 drift, 3 waiting at a gate), whatever the chown does; docker's
@@ -124,7 +127,9 @@ checks on the "main protection" ruleset once they have run once.
    them). Only a registry "not found" counts as absent: any other registry error fails the job. The one exception
    is a re-run whose two platform digests equal the existing index's (the tags went out, then an attestation
    failed): the tags are re-pointed at the existing index as a carbon copy (same digest) and the attestations run
-   again. A broken release is fixed by releasing the next version.
+   again. That re-run must come within a day: the per-arch digest artifacts it compares are kept for one day
+   (`retention-days: 1`), after which it fails at the download step. A broken release is fixed by releasing the
+   next version.
 
 `pyproject.toml` still says `0.0.1` while the reference project names `code-orca-runtime:0.1.0`, so the first
 release needs the version bump in step 1.

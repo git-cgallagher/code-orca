@@ -30,7 +30,8 @@ SECRETS = {
 }
 
 # Records each call as one JSON line: argv, plus its kind ("info", "chown" or "run"). `docker info` answers from
-# FAKE_DOCKER_DAEMON (down -> exit 1) and FAKE_DOCKER_ROOTLESS; the codeorca run exits FAKE_DOCKER_RC, the chown
+# FAKE_DOCKER_DAEMON (down -> exit 1) and FAKE_DOCKER_ROOTLESS (docker: Docker's SecurityOptions shape; podman:
+# Podman's host.security shape, which has no SecurityOptions at all); the codeorca run exits FAKE_DOCKER_RC, the chown
 # FAKE_CHOWN_RC, so exit-code propagation is tested on the run that matters.
 FAKE_DOCKER = f"""#!{sys.executable}
 import json, os, sys
@@ -47,8 +48,14 @@ if kind == "info":
     if os.environ.get("FAKE_DOCKER_DAEMON") == "down":
         print("failed to connect to the docker API", file=sys.stderr)
         sys.exit(1)
-    opts = ["name=seccomp,profile=builtin"] + (["name=rootless"] if os.environ.get("FAKE_DOCKER_ROOTLESS") else [])
-    print(json.dumps(opts))
+    assert argv[1:] == ["--format", "{{{{json .}}}}"], argv
+    rootless = os.environ.get("FAKE_DOCKER_ROOTLESS")
+    if rootless == "podman":
+        info = {{"host": {{"security": {{"rootless": True}}}}, "version": {{"Version": "5.4.0"}}}}
+    else:
+        opts = ["name=seccomp,profile=builtin"] + (["name=rootless"] if rootless == "docker" else [])
+        info = {{"SecurityOptions": opts, "ServerVersion": "28.0.0"}}
+    print(json.dumps(info, separators=(",", ":")))
     sys.exit(0)
 sys.exit(int(os.environ.get("FAKE_CHOWN_RC" if kind == "chown" else "FAKE_DOCKER_RC", "0")))
 """
@@ -385,12 +392,16 @@ def test_no_chown_without_a_project_file(sandbox):
     assert chown_targets(calls) is None
 
 
-def test_no_chown_for_a_root_caller_or_under_rootless_docker(sandbox):
+def test_no_chown_for_a_root_caller_or_under_rootless_docker_or_podman(sandbox):
     (sandbox["project"] / "codeorca.yaml").write_text("api: codeorca/v1\n")
     (sandbox["project"] / ".codeorca").mkdir()
     _, calls = run(sandbox, "run", "x")
     assert chown_targets(calls) == [".codeorca"]
-    for extra in ({"FAKE_UID": "0", "FAKE_GID": "0"}, {"FAKE_DOCKER_ROOTLESS": "1"}):
+    for extra in (
+        {"FAKE_UID": "0", "FAKE_GID": "0"},
+        {"FAKE_DOCKER_ROOTLESS": "docker"},
+        {"FAKE_DOCKER_ROOTLESS": "podman"},
+    ):
         sandbox["log"].unlink()
         proc, calls = run(sandbox, "run", "x", extra_env=dict(extra, FAKE_DOCKER_RC="3"))
         assert proc.returncode == 3

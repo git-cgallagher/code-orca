@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Phase 4 review fixes: `container/requirements/lock.sh` locks inside the image on the Dockerfile's literal
+  `AS pinned-base` line again (it had read `ARG BASE_IMAGE=`, which names the stage since the Dependabot refactor,
+  and ran `docker run pinned-base`); a `BASE_IMAGE` override must be digest-pinned; `--print-base`.
 - Container image (Phase 4): `container/Dockerfile` builds `code-orca-runtime` on ansible-runtime 1.3.0 with
   Terraform 1.14.7 (GPG-verified release zip + its BSL 1.1 license), PowerShell 7.6.9 LTS + PSScriptAnalyzer 1.25.0
   and the code-orca wheel under the base's pins (no venv, `pip check` in the build); `container/tests/smoke.sh`

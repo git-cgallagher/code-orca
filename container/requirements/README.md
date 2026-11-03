@@ -9,13 +9,16 @@ Python pins for `container/Dockerfile`, generated, never edited by hand.
 | `build.in` / `build.txt` | the wheel's build backend (setuptools), hash-pinned, for the builder stage only (never shipped) |
 | `lock.sh` | regenerates both `.txt` files |
 
-Regenerate after editing a `.in` file or bumping `BASE_IMAGE` (the base's pins can move):
+Regenerate after editing a `.in` file or bumping the base (the Dockerfile's literal `FROM <image>@sha256:<digest> AS
+pinned-base` line; the base's pins can move):
 
 ```bash
 container/requirements/lock.sh
 ```
 
-It runs, inside the image `ARG BASE_IMAGE=` names (so the hashes and markers resolve for that Python on Linux):
+It runs, inside the image on that `AS pinned-base` line (so the hashes and markers resolve for that Python on Linux;
+`ARG BASE_IMAGE=` names the stage, not an image; `BASE_IMAGE=<image>@sha256:<digest>` in the environment overrides
+it, and `lock.sh --print-base` prints the image it would use):
 
 ```bash
 pip install pip-tools

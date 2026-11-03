@@ -165,6 +165,16 @@ def test_resume_refuses_a_gate_older_than_max_age(tmp_path):
     assert rd.read_run()["status"] == "waiting"
 
 
+def test_resume_refuses_a_plan_older_than_max_age(tmp_path):
+    rd, calls, registry = start(tmp_path)
+    path = rd.steps_dir / "approve" / "result.json"
+    result = json.loads(path.read_text(encoding="utf-8"))
+    result["plans"]["plan"]["planned_at"] = (datetime.now(UTC) - timedelta(hours=30)).isoformat(timespec="seconds")
+    path.write_text(json.dumps(result), encoding="utf-8")
+    with pytest.raises(ResumeRefused, match="fresh plan is needed"):
+        go(rd, calls, registry)
+
+
 def test_a_gate_within_max_age_resumes(tmp_path):
     rd, calls, registry = start(tmp_path)
     _age_gate(rd, 23)

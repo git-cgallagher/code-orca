@@ -237,7 +237,12 @@ def _check_age(project: Project | None, gate_id: str, gate_result: Mapping[str, 
     if not since_text:
         raise ResumeRefused(f"gate {gate_id}: no waiting time recorded; start a new run")
     max_age_text = project.gate.max_age if project is not None else DEFAULT_MAX_AGE
-    age = (datetime.now(UTC) - parse_utc(str(since_text))).total_seconds()
+    # the oldest of: when the gate started waiting, and when each plan it recorded was made
+    times = [parse_utc(str(since_text))]
+    for entry in (gate_result.get("plans") or {}).values():
+        if isinstance(entry, Mapping) and entry.get("planned_at"):
+            times.append(parse_utc(str(entry["planned_at"])))
+    age = (datetime.now(UTC) - min(times)).total_seconds()
     if age > parse_duration(max_age_text):
         raise ResumeRefused(
             f"gate {gate_id} has waited {age / 3600:.1f}h, longer than gate.max_age {max_age_text}: the plan it "

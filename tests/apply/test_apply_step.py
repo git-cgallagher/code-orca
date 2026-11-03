@@ -233,6 +233,50 @@ def test_an_approval_older_than_max_age_is_refused(project, engine, monkeypatch)
     assert calls(engine, "apply") == 0
 
 
+def test_a_plan_older_than_max_age_is_refused_even_when_approved_just_now(project, engine, monkeypatch):
+    """Review finding: only the decision time was checked, so an interactive prompt (no timeout) left open for
+    days approved a days-old plan. The plan step's own finish time is bound by gate.max_age too."""
+    from codeorca import runner as runner_mod
+
+    real_now = runner_mod._now
+    old = (datetime.now(UTC) - timedelta(days=3)).isoformat(timespec="seconds")
+    monkeypatch.setattr(runner_mod, "_now", lambda: old)  # the plan step finishes "3 days ago"
+
+    def answer_now(text, timeout):
+        monkeypatch.setattr(runner_mod, "_now", real_now)  # the approver answers today
+        return "approve"
+
+    r = run(project, workflow([PLAN, GATE, APPLY]), engine, extra={"gate": _gate(answer_now)})
+    assert r.states["plan"]["finished"] == old
+    assert r.run_dir.read_result("approve")["plans"]["plan"]["planned_at"] == old
+    assert r.states["apply"]["status"] == "failed"
+    assert "the plan behind gate approve is older than gate.max_age 24h" in r.states["apply"]["error"]
+    assert calls(engine, "apply") == 0
+
+
+def test_a_gate_that_recorded_no_plan_time_is_refused(project, engine):
+    def drop_plan_time(step, ctx):
+        result = gate_step.make_executor(
+            SecretRegistry(b"example-not-secret-key", "env:test"),
+            prompt=lambda text, t: "approve",
+            isatty=lambda fd: True,
+            out=lambda text: None,
+        )(step, ctx)
+        for entry in result.result["plans"].values():
+            entry.pop("planned_at", None)
+        return result
+
+    r = run(project, workflow([PLAN, GATE, APPLY]), engine, extra={"gate": drop_plan_time})
+    assert "recorded no time for the plan it approved" in r.states["apply"]["error"]
+    assert calls(engine, "apply") == 0
+
+
+def _gate(prompt):
+    return gate_step.make_executor(
+        SecretRegistry(b"example-not-secret-key", "env:test"), prompt=prompt, isatty=lambda fd: True, out=lambda t: None
+    )
+
+
 def test_the_plan_gate_blocks_a_delete_the_gate_did_not_waive(project, engine):
     engine["FAKE_STDOUT_show"] = json.dumps({**PLAN_DOC, "resource_changes": [DELETE]})
     r = run(project, workflow([PLAN, GATE, APPLY]), engine)

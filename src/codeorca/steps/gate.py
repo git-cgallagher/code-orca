@@ -79,8 +79,11 @@ def is_terminal(isatty: Callable[[int], bool]) -> bool:
 
 
 def collect_plans(run_dir: RunDir, states: Mapping[str, Mapping[str, Any]]) -> dict[str, dict[str, str]]:
-    """``{step_id: {path, sha256}}`` for every succeeded step whose result names a plan file that exists."""
+    """``{step_id: {path, sha256, planned_at}}`` for every succeeded step whose result names a plan file that
+    exists. ``planned_at`` is when the runner recorded that step finished (run.json): ``gate.max_age`` bounds the
+    plan's own age as well as the decision's, so a prompt left open for days cannot approve a stale plan."""
     plans: dict[str, dict[str, str]] = {}
+    finished = {sid: (st or {}).get("finished") for sid, st in ((run_dir.read_run() or {}).get("steps") or {}).items()}
     for sid, state in states.items():
         if (state or {}).get("status") != "succeeded":
             continue
@@ -91,7 +94,10 @@ def collect_plans(run_dir: RunDir, states: Mapping[str, Mapping[str, Any]]) -> d
             continue
         path = Path(str(plan_file)).resolve()
         if path.is_file():
-            plans[sid] = {"path": str(path), "sha256": plan_file_sha256(path)}
+            entry = {"path": str(path), "sha256": plan_file_sha256(path)}
+            if finished.get(sid):
+                entry["planned_at"] = str(finished[sid])
+            plans[sid] = entry
     return plans
 
 
@@ -208,6 +214,8 @@ def _base_result(step, ctx: StepContext, registry: SecretRegistry) -> dict[str, 
         "plans": collect_plans(ctx.run_dir, ctx.context.get("steps") or {}),
         "specs": collect_specs(ctx.run_dir),
         "allow_delete_of": [str(a) for a in (step.allow_delete_of or [])],
+        # when the gate started asking (or waiting): gate.max_age is measured from here too, on both paths
+        "waiting_since": now_utc(),
     }
 
 

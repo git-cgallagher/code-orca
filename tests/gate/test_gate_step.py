@@ -203,7 +203,13 @@ def test_non_interactive_wait_persists_the_run_and_exits_3(tmp_path):
     assert result["resume"] == f"codeorca resume {r.run_dir.run_id} --approve"
     assert result["waiting_since"]
     plan = r.run_dir.step_dir("plan") / "plan.tfplan"
-    assert result["plans"] == {"plan": {"path": str(plan.resolve()), "sha256": gate_step.plan_file_sha256(plan)}}
+    assert result["plans"] == {
+        "plan": {
+            "path": str(plan.resolve()),
+            "sha256": gate_step.plan_file_sha256(plan),
+            "planned_at": run["steps"]["plan"]["finished"],
+        }
+    }
 
 
 @pytest.mark.parametrize("tty", [lambda fd: fd == 0, lambda fd: fd == 1, lambda fd: False])

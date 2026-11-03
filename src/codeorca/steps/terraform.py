@@ -664,6 +664,8 @@ class Approval:
     approver: str
     allow_delete_of: list[str]
     plan_sha256: str | None = None
+    waiting_since: str | None = None  # when the gate started asking (interactive) or waiting (resume)
+    planned_at: str | None = None  # when the plan step finished (the plan's own age)
 
 
 def _workflow_steps(ctx: StepContext) -> dict[str, Any]:
@@ -721,13 +723,14 @@ def find_approval(step, ctx: StepContext, plan_path: Path | None = None) -> Appr
         if result.get("dry_run") and not ctx.dry_run:
             reasons.append(f"gate {gid} was auto-approved by --dry-run")
             continue
-        sha = None
+        sha = planned_at = None
         if plan_path is not None:
             entries = [e for e in (result.get("plans") or {}).values() if Path(str(e.get("path"))) == plan_path]
             if not entries:
                 reasons.append(f"gate {gid} did not see plan file {plan_path}")
                 continue
             sha = entries[0].get("sha256")
+            planned_at = entries[0].get("planned_at")
             if sha != current:
                 reasons.append(f"plan file {plan_path} changed after gate {gid} approved it")
                 continue
@@ -738,6 +741,8 @@ def find_approval(step, ctx: StepContext, plan_path: Path | None = None) -> Appr
                 str(result.get("approver") or ""),
                 [str(a) for a in (result.get("allow_delete_of") or [])],
                 sha,
+                str(result["waiting_since"]) if result.get("waiting_since") else None,
+                str(planned_at) if planned_at else None,
             )
         )
     if not found:
@@ -751,15 +756,27 @@ def check_approval_age(project: Project | None, approval: Approval) -> None:
     from codeorca.steps.gate import parse_utc
 
     max_age = project.gate.max_age if project is not None else DEFAULT_MAX_AGE
-    try:
-        decided = parse_utc(approval.decided_at)
-    except ValueError:
-        raise Refused(f"gate {approval.gate_id} recorded no valid decision time") from None
-    age = (datetime.now(UTC) - decided).total_seconds()
-    if age > parse_duration(max_age):
-        raise Refused(
-            f"the approval of gate {approval.gate_id} is older than gate.max_age {max_age}; re-plan and re-approve"
-        )
+    limit = parse_duration(max_age)
+    now = datetime.now(UTC)
+    if approval.plan_sha256 is not None and not approval.planned_at:
+        raise Refused(f"gate {approval.gate_id} recorded no time for the plan it approved; re-plan and re-approve")
+    # the decision, the moment the gate started asking (a prompt left open over a weekend), and the plan itself
+    for what, text in (
+        ("approval", approval.decided_at),
+        ("wait", approval.waiting_since),
+        ("plan", approval.planned_at),
+    ):
+        if text is None and what != "approval":
+            continue
+        try:
+            when = parse_utc(str(text))
+        except ValueError:
+            raise Refused(f"gate {approval.gate_id} recorded no valid {what} time") from None
+        if (now - when).total_seconds() > limit:
+            raise Refused(
+                f"the {what} behind gate {approval.gate_id} is older than gate.max_age {max_age}: the plan is "
+                "stale; re-plan and re-approve"
+            )
 
 
 def _marker(ctx: StepContext) -> Path:

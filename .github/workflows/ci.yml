@@ -43,7 +43,8 @@ jobs:
       - name: Validate the reference workflows
         run: codeorca validate examples/reference/workflows/*.yaml
       # The PowerShell helper and lint tests skip without pwsh/PSScriptAnalyzer; both ship on the ubuntu-24.04 image,
-      # and CI must actually run them, so a missing pwsh fails here and a pwsh-related skip fails the Tests step.
+      # and CI must actually run them, so a missing pwsh fails here. Every other optional tool the suite skips
+      # without (terraform, ansible-core, moto, boto3) is installed above, so ANY skip fails the Tests step.
       - name: PowerShell is on the runner
         run: |
           pwsh -v
@@ -52,8 +53,11 @@ jobs:
         run: |
           set -o pipefail
           pytest -q -rs 2>&1 | tee /tmp/pytest.log
-          if grep -iE '^SKIPPED .*(pwsh|PSScriptAnalyzer|powershell)' /tmp/pytest.log; then
-            echo "PowerShell tests were skipped in CI (see above); they must run here"
+          # The approve -> apply proof, the apply/migrate_backend tests and the SSM, redaction-key and bootstrap
+          # suites all skip quietly when a tool is missing (terraform, ansible-playbook, moto): in CI a skip is a
+          # failure, whatever its reason, so a broken install can never merge green with those tests unrun.
+          if grep -E '^SKIPPED' /tmp/pytest.log; then
+            echo "tests were skipped in CI (see above); every test must run here: fix the install, not the guard"
             exit 1
           fi
       # The reference project end to end. The redaction key and the stack's sensitive input are PLACEHOLDERS

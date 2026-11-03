@@ -15,7 +15,9 @@ Refusals (``ResumeRefused``, nothing is written):
 - a typed field is unknown, mistyped, or required and missing;
 - a remaining step needs an input that run.json holds redacted (an input whose name matched the key denylist,
   or whose value was registered) and ``secret_inputs`` does not supply it again; a supplied value that does not
-  match the placeholder the run recorded, or names an input that was not redacted, is refused too.
+  match what the run recorded (part by part for a partially redacted string or a list/map input:
+  ``matches_recorded``), or names an input that was not redacted, is refused too; the refusal never quotes a
+  typed value.
 
 On approve the gate becomes ``succeeded`` (``decision``, ``approver``, ``decided_at``, ``fields``; outputs
 ``approved``/``approver``/the fields); on reject it becomes ``failed`` and its dependents are ``omitted``. Then
@@ -367,15 +369,72 @@ def _resolve_inputs(
                 + (" (or not one of its enum values)" if workflow.inputs[name].enum is not None else "")
             ) from None
         recorded = persisted.get(name)
-        if registry is not None and isinstance(recorded, str) and PLACEHOLDER_RE.fullmatch(recorded):
-            if registry.placeholder(str(value)) != recorded:
-                raise ResumeRefused(f"input {name!r} does not match the value the run started with")
+        if registry is not None and not matches_recorded(value, recorded, registry):
+            raise ResumeRefused(f"input {name!r} does not match the value the run started with")
         if registry is not None:
             for leaf in _leaves(value):
                 registry.add(leaf)
         inputs[name] = value
     needed_vars = {name for name in var_names if is_redacted((record.get("vars") or {}).get(name))}
     return inputs, needed_vars
+
+
+def matches_recorded(value: Any, recorded: Any, registry: SecretRegistry) -> bool:
+    """True when ``value`` is what the run persisted as ``recorded`` (the same shape, every clear part equal, every
+    ``<redacted:hmac:...>`` standing for the matching part of ``value``). A ``<redacted:key>`` leaf (redacted by
+    its NAME) cannot be checked and matches anything; a partially redacted string (``u:<redacted:...>@h``) or a
+    list/map input is checked part by part, so a re-supplied value cannot differ from the one the plan was made
+    with."""
+    if isinstance(recorded, str) and recorded == KEY_PLACEHOLDER:
+        return True
+    if isinstance(recorded, dict):
+        if not isinstance(value, dict) or len(value) != len(recorded):
+            return False
+        unmatched = dict(recorded)
+        for key, item in value.items():
+            rkey = key if key in unmatched else None
+            if rkey is None:
+                rkey = next(
+                    (rk for rk in unmatched if isinstance(rk, str) and _matches_text(str(key), rk, registry)), None
+                )
+            if rkey is None or not matches_recorded(item, unmatched.pop(rkey), registry):
+                return False
+        return not unmatched
+    if isinstance(recorded, list):
+        return (
+            isinstance(value, list)
+            and len(value) == len(recorded)
+            and all(matches_recorded(v, r, registry) for v, r in zip(value, recorded, strict=True))
+        )
+    if isinstance(recorded, str) and PLACEHOLDER_RE.search(recorded):
+        return isinstance(value, str) and _matches_text(value, recorded, registry)
+    return value == recorded
+
+
+def _matches_text(text: str, template: str, registry: SecretRegistry) -> bool:
+    """``text`` matches ``template`` (literal parts plus placeholders); every split is tried."""
+    tokens: list[tuple[bool, str]] = []
+    pos = 0
+    for m in PLACEHOLDER_RE.finditer(template):
+        if m.start() > pos:
+            tokens.append((False, template[pos : m.start()]))
+        tokens.append((True, m.group(0)))
+        pos = m.end()
+    if pos < len(template):
+        tokens.append((False, template[pos:]))
+
+    def stands_for(part: str, placeholder: str) -> bool:
+        return bool(part) and (registry.placeholder(part) == placeholder or registry.redact(part) == placeholder)
+
+    def walk(i: int, at: int) -> bool:
+        if i == len(tokens):
+            return at == len(text)
+        is_placeholder, piece = tokens[i]
+        if not is_placeholder:
+            return text.startswith(piece, at) and walk(i + 1, at + len(piece))
+        return any(stands_for(text[at:end], piece) and walk(i + 1, end) for end in range(at + 1, len(text) + 1))
+
+    return walk(0, 0)
 
 
 def _rerender_vars(runner: Runner, workflow: Workflow, names: set[str]) -> None:

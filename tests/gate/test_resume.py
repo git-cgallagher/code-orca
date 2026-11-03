@@ -402,3 +402,55 @@ def test_a_mistyped_secret_input_is_not_quoted_in_the_refusal(tmp_path, spec, ty
         go(rd, calls, fresh, wf=wf, secret_inputs={"api_token": typed})
     shown = fresh.redact(str(e.value))  # what the CLI prints
     assert "api_token" in shown and "FIXTURE-SECRET" not in shown and "short1" not in shown
+
+
+WF_CONN = Workflow.model_validate(
+    {
+        "api": "codeorca/v1",
+        "kind": "workflow",
+        "name": "conn",
+        "inputs": {"db_password": {"type": "string"}, "conn": {"type": "string"}, "hosts": {"type": "list"}},
+        "steps": [
+            {"id": "approve", "type": "gate", "message": "m"},
+            {
+                "id": "use",
+                "type": "shell",
+                "needs": ["approve"],
+                "run": ["use", "${{ inputs.conn }}", "${{ inputs.hosts | join(',') }}"],
+            },
+        ],
+    }
+)
+
+
+@pytest.mark.parametrize(
+    "supplied",
+    [
+        {"conn": "u:WRONG-but-long-enough@evil"},
+        {"conn": f"u:{SECRET}@elsewhere"},
+        {"conn": f"u:{SECRET}@h", "hosts": '["h1", "other-host"]'},
+        {"conn": f"u:{SECRET}@h", "hosts": f'["{SECRET}"]'},
+    ],
+    ids=["conn-wrong", "conn-literal-changed", "list-wrong", "list-short"],
+)
+def test_a_partially_redacted_input_must_match_part_by_part(tmp_path, supplied):
+    """Review finding: only a value recorded as ONE placeholder was checked; ``u:<redacted:...>@h`` or a list
+    input accepted any re-supplied value."""
+    inputs = {"db_password": SECRET, "conn": f"u:{SECRET}@h", "hosts": ["h1", SECRET]}
+    rd, calls, _ = start(tmp_path, wf=WF_CONN, inputs=inputs)
+    recorded = rd.read_run()["inputs"]
+    assert recorded["conn"].startswith("u:<redacted:hmac:") and recorded["conn"].endswith("@h")
+    full = {"conn": f"u:{SECRET}@h", "hosts": json.dumps(["h1", SECRET])}
+    with pytest.raises(ResumeRefused, match="does not match"):
+        go(rd, calls, SecretRegistry(KEY, "env:test"), wf=WF_CONN, secret_inputs={**full, **supplied})
+    assert rd.read_run()["status"] == "waiting"
+
+
+def test_a_partially_redacted_input_resupplied_exactly_resumes(tmp_path):
+    inputs = {"db_password": SECRET, "conn": f"u:{SECRET}@h", "hosts": ["h1", SECRET]}
+    rd, calls, _ = start(tmp_path, wf=WF_CONN, inputs=inputs)
+    fresh = SecretRegistry(KEY, "env:test")
+    supplied = {"conn": f"u:{SECRET}@h", "hosts": json.dumps(["h1", SECRET])}
+    code = go(rd, calls, fresh, wf=WF_CONN, secret_inputs=supplied)
+    assert code == EXIT_OK
+    assert calls.argv["use"] == ["use", f"u:{SECRET}@h", f"h1,{SECRET}"]

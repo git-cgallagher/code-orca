@@ -101,9 +101,10 @@ def project_file(tmp_path: Path) -> Path:
     text = (root / "codeorca.yaml").read_text(encoding="utf-8")
     text = text.replace('python: ">=3.13,<3.14"', 'python: ">=3.13,<3.15"')
     text = text.replace("collections: {}", 'collections: { "amazon.aws": "10.1.0" }')
-    text = text.replace("python_packages: {}", 'python_packages: { boto3: "1.42.*" }')
+    text = text.replace('boto3: ">=1.35"', 'boto3: "1.42.*"')
     (root / "codeorca.yaml").write_text(text, encoding="utf-8")
-    assert load_project(root / "codeorca.yaml").runtime.collections == {"amazon.aws": "10.1.0"}
+    runtime = load_project(root / "codeorca.yaml").runtime
+    assert runtime.collections == {"amazon.aws": "10.1.0"} and runtime.python_packages == {"boto3": "1.42.*"}
     return root / "codeorca.yaml"
 
 

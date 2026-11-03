@@ -7,6 +7,13 @@
   and the code-orca wheel under the base's pins (no venv, `pip check` in the build); `container/tests/smoke.sh`
   checks the pins and runs the reference project end to end inside the image; the reference `runtime:` block lists
   `boto3` (bootstrap-backend) and documents where each pin comes from.
+- Container pipeline: `.github/workflows/image.yml` builds, smoke-tests and grype-scans
+  `ghcr.io/git-cgallagher/code-orca-runtime` on native amd64 + arm64 runners, publishes `:main`/`:sha-<short>` from
+  main and `:X.Y.Z`/`:X.Y`/`:latest` from a `vX.Y.Z` tag matching pyproject's version (never re-tagging a release),
+  with build provenance and an SPDX SBOM attested on the index; `bin/codeorca` runs code-orca in the image (secrets
+  by name only, `-it` only on a terminal, Docker socket only on request, state/specs chowned back); tests in
+  `tests/wrapper/`; Dependabot's docker entry; `docs/CONTAINER.md`.
+
 - Phase 3 review fixes: a helper's non-UTF-8 output file (UTF-16 `Out-File`, Latin-1) is rewritten scrubbed or
   deleted, never left raw, and `scan_outputs` reads UTF-16; `gate.max_age` also bounds when the gate started asking
   (`waiting_since`) and when the plan was made (`planned_at` in the binding); resume refuses a changed project

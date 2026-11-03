@@ -66,6 +66,10 @@ Consumers keep their own `codeorca.yaml`, `workflows/`, `specs/` in their own (u
 | `container/requirements/` | `codeorca.in`/`.txt` (what code-orca needs that the base lacks, hash-pinned; empty today), `build.in`/`.txt` (setuptools for the builder stage), `lock.sh` (pip-compile inside `BASE_IMAGE` with `--constraint=/usr/share/ansible-runtime/constraints.txt`), `README.md` |
 | `container/tests/smoke.sh` | runs inside the image from a bind-mounted checkout (`docker run --rm -v "$PWD":/work -w /work <image> bash container/tests/smoke.sh`): tini PID 1, terraform/pwsh/PSScriptAnalyzer equal the Dockerfile's ARG defaults, ansible-core and every base pin as installed, `codeorca --version` = pyproject, `pip check`, no curl/gpg/unzip, the TF/PowerShell env, then on a temp COPY of `examples/reference`: `doctor`, `validate`, `plan-only`, `configure-local`, `demo-rollout` exit 3, `resume latest --approve` refused, both lints, no placeholder in specs/run dir; prints one `PASS:` line. Never writes to or runs git in the checkout |
 | `.dockerignore` | allow-list build context: `pyproject.toml`, `README.md`, `LICENSE`, `src/`, `container/requirements/` only |
+| `.github/workflows/image.yml` | the image pipeline (modelled on ansible-runtime's `build.yml`): `image (amd64)` / `image (arm64)` on native runners build `container/Dockerfile` `--target runtime` with no build-args (the ARG defaults are the pins), run `container/tests/smoke.sh` from the checkout, check the checkout stayed clean, grype (amd64, fixable critical) and, on `main` or a tag only (`PUBLISH`), push by digest; `manifest` makes `:main` (+ `:sha-<short>` on a push) or `:X.Y.Z`/`:X.Y`/`:latest` (tag must equal pyproject's version; an existing `:X.Y.Z` is never re-pointed), then build provenance + SPDX SBOM attestations on the index. No path filter on `pull_request` (the two image jobs are to become required checks) |
+| `bin/codeorca` | local launch wrapper (bash 3.2-safe; header lists every mount and env name): `docker run --rm` of `CODEORCA_IMAGE` (default `code-orca-runtime:latest`) with `$PWD` at `/work`, `-it` only when stdin and stdout are TTYs, AWS/`CODEORCA_*`/`TF_VAR_*` by name only (`compgen -e`; `CODEORCA_IMAGE`/`CODEORCA_DOCKER_SOCKET` not passed), ssh agent, `known_hosts` ro, plugin cache, the Docker socket only with `CODEORCA_DOCKER_SOCKET=1`; then chowns the project's state dir + `specs_dir` (from `-p`'s file; relative, no `..`, no symlink) back to the caller; exit code is codeorca's. Never runs aws-vault |
+| `tests/wrapper/` | `bin/codeorca` against a fake `docker` on PATH recording argv: no secret value on any argv, names only, `-it` needs both TTY ends (pty), socket only on `=1`, exit codes propagate (a failed chown never masks one), chown targets per `-p` form; clean env per test; skipped on Windows |
+| `docs/CONTAINER.md` | what the image holds and why, local arm64 build + smoke, `bin/codeorca`, the trigger table, releasing (tag == pyproject version), pulling + `gh attestation verify`, GHCR visibility (manual), bumping the base / Terraform / PowerShell / PSScriptAnalyzer |
 
 ## Conventions
 
@@ -469,6 +473,18 @@ Container (for the image phase):
   `.git` is a file pointing at the main checkout's absolute host path, so git inside the container fails on a
   worktree mount (and on Linux a root container sees a runner-owned checkout as "dubious ownership"): the smoke
   test never calls git; the caller checks `git status --porcelain`.
+- Dependabot's docker updater reads literal `FROM image:tag@sha256:...` lines only (`docker/file_parser.rb`'s
+  `FROM_LINE`): `ARG BASE_IMAGE=...` + `FROM ${BASE_IMAGE}` is invisible to it. A literal pinned stage that the ARG
+  default names works (`ARG BASE_IMAGE=pinned-base` BEFORE the first `FROM`, then `FROM <image>@sha256:... AS
+  pinned-base`, `FROM ${BASE_IMAGE}`): BuildKit resolves an ARG naming a stage, but a global ARG declared after
+  the first `FROM` is blank in later `FROM` lines ("base name should not be blank").
+- A `paths:` filter on `pull_request` and a required check do not mix: a skipped workflow leaves the check
+  "Expected" and the PR unmergeable. `image.yml` filters only its `push` trigger.
+- A container package pushed to GHCR from Actions starts private for a personal account; making it public is a
+  UI-only step in the package settings (Chris). Check with an anonymous token + manifest fetch after the first
+  push (`docs/CONTAINER.md`), not `docker logout`.
+- On Docker Desktop for macOS, files a root container writes into a bind mount already show as the host user, so
+  `bin/codeorca`'s chown is a no-op there; it matters on Linux.
 
 ## TODO (phases, from the design plan)
 

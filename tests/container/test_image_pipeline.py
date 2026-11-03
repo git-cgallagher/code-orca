@@ -52,3 +52,30 @@ def test_both_build_steps_pass_the_same_label_build_args():
     assert build["build-args"] == push["build-args"]  # identical inputs: the push is all cache hits
     names = {line.split("=", 1)[0] for line in build["build-args"].splitlines() if line}
     assert names == {"IMAGE_VERSION", "IMAGE_REVISION"}  # never a pin: the ARG defaults are the pins
+
+
+def test_release_checks_run_in_both_jobs_on_a_full_checkout():
+    for job in ("image", "manifest"):
+        checkout = steps(job)[0]
+        assert checkout["uses"].startswith("actions/checkout@")
+        assert checkout["with"]["fetch-depth"] == 0
+        (check,) = [s for s in steps(job) if ".github/ci/release-check.sh" in s.get("run", "")]
+        assert check["if"] == "startsWith(github.ref, 'refs/tags/v')"
+
+
+def test_latest_and_minor_tags_follow_the_release_check():
+    tags = step("manifest", "Tags")["with"]["tags"]
+    assert "enable=${{ steps.release.outputs.latest == 'true' }}" in [
+        part for line in tags.splitlines() if "value=latest" in line for part in line.split(",")
+    ]
+    (minor,) = [line for line in tags.splitlines() if "{{major}}.{{minor}}" in line]
+    assert "enable=${{ steps.release.outputs.minor == 'true' }}" in minor
+
+
+def test_the_overwrite_guard_runs_before_the_tags_are_created():
+    names = [s.get("name") for s in steps("manifest")]
+    guard = step("manifest", "Refuse to overwrite an existing release")
+    assert ".github/ci/refuse-overwrite.sh" in guard["run"]
+    assert names.index("Refuse to overwrite an existing release") < names.index("Create the multi-arch manifest")
+    create = step("manifest", "Create the multi-arch manifest")["run"]
+    assert '"$IMAGE:$VERSION"' in create  # the version tag must be among the tags written

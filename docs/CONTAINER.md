@@ -97,7 +97,7 @@ CODEORCA_IMAGE=ghcr.io/git-cgallagher/code-orca-runtime:X.Y.Z bin/codeorca docto
 | push to `main` touching `container/**`, `src/**`, `pyproject.toml`, the workflow or `examples/reference/**` | amd64 + arm64 | `:main`, `:sha-<short>` |
 | weekly schedule (Monday 07:00 UTC, on `main`) | amd64 + arm64 | `:main` only (Debian security updates; never a release tag) |
 | manual run (`workflow_dispatch`) | amd64 + arm64 | `:main` on `main`; nothing on any other branch |
-| tag `vX.Y.Z` | amd64 + arm64 | `:X.Y.Z`, `:X.Y`, `:latest` |
+| tag `vX.Y.Z` (strict, on `main`) | amd64 + arm64 | `:X.Y.Z`; `:X.Y` and `:latest` only when it is the highest release of its line / overall |
 
 Each architecture builds on its own native runner (`image (amd64)` on `ubuntu-24.04`, `image (arm64)` on
 `ubuntu-24.04-arm`), loads the image, runs the smoke test from the checkout, checks the checkout is still clean,
@@ -112,8 +112,17 @@ checks on the "main protection" ruleset once they have run once.
 1. In a PR, set `version = "X.Y.Z"` in `pyproject.toml` (and the CHANGELOG), and point
    `examples/reference/codeorca.yaml`'s `runtime.image` at the new tag. Merge it.
 2. Tag the merge commit `vX.Y.Z` and push the tag (a public release: Chris pushes it).
-3. The workflow fails if the tag differs from `pyproject.toml`'s version, and refuses to re-point an existing
-   `:X.Y.Z` (GHCR tags are mutable; consumers pin them). A broken release is fixed by releasing the next version.
+3. `.github/ci/release-check.sh` (both jobs, on a full checkout) fails unless the tag is a strict `vX.Y.Z` (no
+   `rc`/`-rc.1`/`+build` suffix: metadata-action would emit no version tag for one, only `:latest`), equals
+   `pyproject.toml`'s version, and its commit is on `origin/main` (a tag on an unreviewed branch commit is not a
+   release). It also decides whether the release moves `:latest` (the highest strict `vX.Y.Z` tag on `main`) and
+   `:X.Y` (the highest `vX.Y.*`), so a backport such as `v0.1.5` after `v0.2.0`, or two tags pushed together, never
+   move them backwards.
+4. `.github/ci/refuse-overwrite.sh` refuses to re-point an existing `:X.Y.Z` (GHCR tags are mutable; consumers pin
+   them). Only a registry "not found" counts as absent: any other registry error fails the job. The one exception
+   is a re-run whose two platform digests equal the existing index's (the tags went out, then an attestation
+   failed): the tags are re-pointed at the existing index as a carbon copy (same digest) and the attestations run
+   again. A broken release is fixed by releasing the next version.
 
 `pyproject.toml` still says `0.0.1` while the reference project names `code-orca-runtime:0.1.0`, so the first
 release needs the version bump in step 1.

@@ -4,8 +4,11 @@ name: image
 # ansible-runtime/.github/workflows/build.yml. See docs/CONTAINER.md.
 # PR: build on both architectures, smoke-test, scan. Nothing is pushed.
 # main (push, weekly schedule, manual run): the same, then :main; a push also gets :sha-<short>.
-# Tag vX.Y.Z (must equal pyproject.toml's version): :X.Y.Z, :X.Y, :latest, refusing to
-#   overwrite an existing :X.Y.Z. The index gets build provenance and an SPDX SBOM attestation.
+# Tag vX.Y.Z (.github/ci/release-check.sh: strict vX.Y.Z, equal to pyproject.toml's version, on
+#   main): :X.Y.Z, plus :X.Y and :latest only when it is the highest release of its line / overall
+#   (a backport or two racing tags never move them backwards). An existing :X.Y.Z is never
+#   re-pointed (.github/ci/refuse-overwrite.sh), except by a re-run with the same digests. The
+#   index gets build provenance and an SPDX SBOM attestation.
 # Weekly: rebuild :main so Debian security updates land without a code change; a schedule
 #   runs on main, so it never produces a release tag.
 # A manual run on any other branch builds and tests only (PUBLISH is false there).
@@ -62,17 +65,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0  # origin/main and every tag, for the release check
 
-      - name: The tag equals pyproject.toml's version
+      - name: A release tag is strict, equals pyproject.toml's version and is on main
         if: startsWith(github.ref, 'refs/tags/v')
         env:
           REF: ${{ github.ref_name }}
-        run: |
-          version=$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
-          if [ "${REF#v}" != "$version" ]; then
-            echo "::error::tag $REF does not match pyproject.toml version $version"
-            exit 1
-          fi
+        run: .github/ci/release-check.sh "$REF" > /dev/null
 
       # The OCI version/revision labels. Not pins: a tag run labels X.Y.Z, anything else sha-<short>.
       # The two ARGs sit just before the Dockerfile's LABEL, so a new value rebuilds no layer.
@@ -182,17 +181,15 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0  # origin/main and every tag, for the release check
 
-      - name: The tag equals pyproject.toml's version
+      # Outputs version, latest (highest vX.Y.Z on main) and minor (highest vX.Y.*).
+      - name: A release tag is strict, equals pyproject.toml's version and is on main
+        id: release
         if: startsWith(github.ref, 'refs/tags/v')
         env:
           REF: ${{ github.ref_name }}
-        run: |
-          version=$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
-          if [ "${REF#v}" != "$version" ]; then
-            echo "::error::tag $REF does not match pyproject.toml version $version"
-            exit 1
-          fi
+        run: .github/ci/release-check.sh "$REF"
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
         with:
@@ -207,7 +204,10 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       # main (push, schedule, dispatch): :main; a push to main also :sha-<short>.
-      # A tag: :X.Y.Z, :X.Y, :latest (the semver types only ever match a tag ref).
+      # A tag: :X.Y.Z; :X.Y and :latest only when release-check says this is the highest of its
+      # line / overall (the semver types only ever match a tag ref). No `image-release`
+      # concurrency group: GitHub cancels a PENDING run when a third joins the group, which would
+      # silently drop a release; the highest-version rule makes the order irrelevant instead.
       - name: Tags
         id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302  # v6.2.0
@@ -219,35 +219,45 @@ jobs:
             type=raw,value=main,enable=${{ github.ref == 'refs/heads/main' }}
             type=sha,prefix=sha-,enable=${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
             type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=semver,pattern={{major}}.{{minor}},enable=${{ steps.release.outputs.minor == 'true' }}
+            type=raw,value=latest,enable=${{ steps.release.outputs.latest == 'true' }}
 
       # GHCR tags are mutable. A release version must never be re-pointed: consumers pin it
-      # (codeorca.yaml's runtime.image), and the weekly rebuild only ever moves :main.
+      # (codeorca.yaml's runtime.image), and the weekly rebuild only ever moves :main. Only a
+      # registry "not found" counts as absent; any other error fails. A re-run whose digests equal
+      # the existing index's (the tags went out, then an attestation failed) may proceed.
       - name: Refuse to overwrite an existing release
+        id: guard
         if: startsWith(github.ref, 'refs/tags/v')
         env:
-          REF: ${{ github.ref_name }}
-        run: |
-          tag="$IMAGE:${REF#v}"
-          if docker buildx imagetools inspect "$tag" >/dev/null 2>&1; then
-            echo "::error::$tag already exists; release a new version instead"
-            exit 1
-          fi
+          VERSION: ${{ steps.release.outputs.version }}
+        run: .github/ci/refuse-overwrite.sh "$IMAGE" "$VERSION" "$RUNNER_TEMP/digests"
 
       - name: Create the multi-arch manifest
         id: create
         working-directory: ${{ runner.temp }}/digests
         env:
           TAGS: ${{ steps.meta.outputs.tags }}
+          VERSION: ${{ steps.release.outputs.version }}
+          RERUN: ${{ steps.guard.outputs.rerun }}
         run: |
           args=()
           while IFS= read -r t; do [ -n "$t" ] && args+=(-t "$t"); done <<< "$TAGS"
           if [ "${#args[@]}" -eq 0 ]; then echo "::error::no tags for $GITHUB_REF"; exit 1; fi
+          if [ -n "$VERSION" ] && ! grep -qxF "$IMAGE:$VERSION" <<< "$TAGS"; then
+            echo "::error::the tags for $GITHUB_REF do not include $IMAGE:$VERSION"
+            exit 1
+          fi
           sources=()
           for d in *; do sources+=("$IMAGE@sha256:$d"); done
           if [ "${#sources[@]}" -ne 2 ]; then echo "::error::expected 2 digests, got ${#sources[@]}"; exit 1; fi
-          docker buildx imagetools create "${args[@]}" "${sources[@]}"
+          if [ "$RERUN" = true ]; then
+            # carbon copy of the existing index: its digest (what consumers pin) does not change
+            existing=$(docker buildx imagetools inspect "$IMAGE:$VERSION" --format '{{json .Manifest.Digest}}' | tr -d '"')
+            docker buildx imagetools create --prefer-index=false "${args[@]}" "$IMAGE@$existing"
+          else
+            docker buildx imagetools create "${args[@]}" "${sources[@]}"
+          fi
           first=$(head -n1 <<< "$TAGS")
           docker buildx imagetools inspect "$first"
           echo "digest=$(docker buildx imagetools inspect "$first" --format '{{json .Manifest.Digest}}' | tr -d '"')" >> "$GITHUB_OUTPUT"

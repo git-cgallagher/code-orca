@@ -13,6 +13,11 @@
   no longer aborts. codeorca takes no abbreviated long options (`--proj`), on any subcommand.
   The image's OCI labels: `version` is `X.Y.Z` on a release (it was always `dev`), a new `revision` carries the commit,
   and `licenses` adds `GPL-3.0-or-later` (ansible-core, ansible-lint).
+  Releases (`.github/ci/release-check.sh`, `refuse-overwrite.sh`): only a strict `vX.Y.Z` tag on a `main` commit
+  publishes (a prerelease tag had published only `:latest`; a branch tag published at all); `:latest` and `:X.Y` move
+  only for the highest release (a backport or racing tags had moved them backwards); the overwrite refusal fails on
+  any registry error but "not found" (it had failed open), and lets a re-run with the same digests re-attest a
+  release whose attestation failed after the tags went out.
 - Container image (Phase 4): `container/Dockerfile` builds `code-orca-runtime` on ansible-runtime 1.3.0 with
   Terraform 1.14.7 (GPG-verified release zip + its BSL 1.1 license), PowerShell 7.6.9 LTS + PSScriptAnalyzer 1.25.0
   and the code-orca wheel under the base's pins (no venv, `pip check` in the build); `container/tests/smoke.sh`

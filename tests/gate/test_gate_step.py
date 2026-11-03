@@ -386,3 +386,44 @@ def test_a_rejection_is_final_even_where_retry_would_apply():
                 ],
             }
         )
+
+
+def test_a_secret_named_field_is_read_with_the_no_echo_prompt(tmp_path):
+    """Review finding: the interactive gate read every field with a plain readline, echoing a *_token field."""
+    registry = SecretRegistry(KEY, "env:test")
+    plain, secret = scripted("approve", "CHG-1"), scripted("FIXTURE-SECRET-gate-field-002")
+    executors = default_executors()
+    executors["shell"] = recorder([])
+    executors["gate"] = gate_step.make_executor(
+        registry, prompt=plain, secret_prompt=secret, isatty=lambda fd: True, out=lambda text: None
+    )
+    steps = [
+        {
+            "id": "approve",
+            "type": "gate",
+            "message": "m",
+            "fields": {"ticket": {"type": "string"}, "change_token": {"type": "string"}},
+        }
+    ]
+    r = Runner(PROJECT, workflow(steps), {}, RunDir(tmp_path / "runs"), executors)
+    assert r.run() == EXIT_OK
+    assert [t for t, _ in plain.asked] == ["type approve or reject: ", "ticket (string): "]
+    assert [t for t, _ in secret.asked] == ["change_token (string, not echoed): "]
+    assert r.states["approve"]["outputs"]["change_token"] == "FIXTURE-SECRET-gate-field-002"
+
+
+def test_a_field_error_never_quotes_what_was_typed(tmp_path):
+    out: list[str] = []
+    steps = [{"id": "approve", "type": "gate", "message": "m", "fields": {"pin_secret": {"type": "int"}}}]
+    rc, r = make_run(tmp_path, workflow(steps), prompt=scripted("approve", "FIXTURE-SECRET-x", "7"), out=out)
+    assert rc == EXIT_OK and r.states["approve"]["outputs"]["pin_secret"] == 7
+    assert any("is not an int" in line for line in out) and not any("FIXTURE-SECRET" in line for line in out)
+
+
+def test_a_short_secret_named_field_is_named_in_a_warning(tmp_path):
+    """Review finding: a 6-digit *_token value is too short to register and was persisted in clear silently."""
+    steps = [{"id": "approve", "type": "gate", "message": "m", "fields": {"mfa_token": {"type": "string"}}}]
+    rc, r = make_run(tmp_path, workflow(steps), prompt=scripted("approve", "493817"))
+    assert rc == EXIT_OK
+    result = r.run_dir.read_result("approve")
+    assert result["unprotected_fields"] == ["mfa_token"] and "too short to register" in result["warning"]

@@ -63,11 +63,14 @@ def project(tmp_path: Path, monkeypatch) -> Path:
     monkeypatch.setenv("CODEORCA_REDACTION_KEY", KEY)
     monkeypatch.delenv("TF_VAR_app_secret", raising=False)
     monkeypatch.delenv("CI", raising=False)
+    # no terminal, whatever pytest's capture mode: `pytest -s` in a terminal must not reach a real prompt (the
+    # human side injects its own isatty and prompt)
+    monkeypatch.setattr("os.isatty", lambda fd: False)
     return root
 
 
 def first_run(project: Path, config_dir: Path, capsys) -> RunDir:
-    """The agent-like run through the CLI: no terminal (pytest captures fd 1), so the gate waits."""
+    """The agent-like run through the CLI: no terminal (os.isatty patched in the fixture), so the gate waits."""
     p = str(project / "codeorca.yaml")
     assert cli.main(["run", "demo-rollout", "-p", p, "--input", f"config_dir={config_dir}"]) == EXIT_WAITING
     out = capsys.readouterr().out

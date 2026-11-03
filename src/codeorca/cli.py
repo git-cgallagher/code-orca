@@ -478,11 +478,41 @@ def _ask_secret_inputs(names: list[str]) -> dict[str, str]:
     return values
 
 
+def _ask_secret_fields(names: list[str]) -> dict[str, str]:
+    """Ask for each gate field named like a secret on the terminal, not echoed; an empty answer leaves the field
+    to its default (or to the required-field refusal)."""
+    import getpass
+
+    values: dict[str, str] = {}
+    for name in names:
+        value = getpass.getpass(f"field {name} (named like a secret; not echoed, empty for none): ")
+        if value:
+            values[name] = value
+    return values
+
+
+def _confirm_approval() -> None:
+    """The approver confirms on the terminal, after seeing what the approval binds."""
+    try:
+        answer = input("type approve to confirm (anything else changes nothing): ")
+    except EOFError:
+        answer = ""
+    if answer.strip().lower() != "approve":
+        raise CliError("resume: not confirmed; nothing was changed")
+
+
 def cmd_resume(args: argparse.Namespace) -> int:
-    from codeorca.resume import TTY_REFUSAL, ResumeRefused, needed_secret_inputs, resume
+    from codeorca.resume import (
+        TTY_REFUSAL,
+        ResumeRefused,
+        describe_gate,
+        needed_secret_inputs,
+        resume,
+        waiting_gate,
+    )
     from codeorca.runner import EXIT_FAILED
     from codeorca.secrets import key_denylist, line_hook, record_filter
-    from codeorca.steps.gate import is_terminal
+    from codeorca.steps.gate import is_terminal, secret_field_names
 
     # First, before anything is read or fetched: an agent or a pipe gets the refusal and nothing else. resume()
     # checks again; neither check takes an option (the approval invariant).
@@ -501,12 +531,28 @@ def cmd_resume(args: argparse.Namespace) -> int:
         workflow = load_workflow(path)
     except ValidationError as e:
         raise CliError(f"{path}: INVALID\n{e}") from None
+    denylist = key_denylist(project)
+    gate = waiting_gate(workflow, record) if record.get("status") == "waiting" else None
+    secret_fields = secret_field_names(gate.fields, denylist) if gate is not None else []
+    on_argv = sorted(set(fields) & set(secret_fields))
+    if on_argv:
+        # the value would already be in ps and shell history: refuse, and ask on the terminal instead
+        raise CliError(
+            f"--field {', '.join(on_argv)}: named like a secret, so it is asked on the terminal (not echoed), "
+            "never taken from the command line"
+        )
     env = dict(os.environ)
     registry = _registry(project, env)
     secret_inputs: dict[str, str] = {}
-    if record.get("status") == "waiting":  # otherwise resume() refuses; asking first would be pointless
+    if gate is not None:  # otherwise resume() refuses; asking first would be pointless
         secret_inputs = _ask_secret_inputs(needed_secret_inputs(workflow, record))
-    denylist = key_denylist(project)
+        if decision == "approve":
+            asked = _ask_secret_fields(secret_fields)
+            for value in asked.values():  # before anything could print one (a field error, a refusal)
+                registry.add(value)
+            fields.update(asked)
+            print(describe_gate(run_dir, gate))
+            _confirm_approval()
     print(f"resume {run_dir.run_id}: {workflow.name} ({path}): {decision}")
     try:
         code = resume(
@@ -600,14 +646,22 @@ def build_parser() -> argparse.ArgumentParser:
         description=(
             "Decide the gate a run is waiting at and finish the run. Needs an interactive terminal on stdin AND "
             "stdout for either decision; there is no flag or environment variable that bypasses this. Secret "
-            "inputs the remaining steps need (recorded redacted) are asked for on the terminal, not echoed."
+            "inputs the remaining steps need (recorded redacted) and gate fields named like secrets are asked for "
+            "on the terminal, not echoed. --approve shows what the approval binds (message, specs, plan files "
+            "with their sha256, waived deletes) and asks you to type approve to confirm."
         ),
     )
     rs.add_argument("run_id", help="a run id or 'latest'")
     decide = rs.add_mutually_exclusive_group(required=True)
     decide.add_argument("--approve", action="store_true", help="approve the gate (the plan files it recorded)")
     decide.add_argument("--reject", action="store_true", help="reject: the gate fails, its dependents are omitted")
-    rs.add_argument("--field", action="append", default=[], metavar="K=V", help="a typed gate field (approve only)")
+    rs.add_argument(
+        "--field",
+        action="append",
+        default=[],
+        metavar="K=V",
+        help="a typed gate field (approve only; never a field named like a secret: those are asked)",
+    )
     _add_project(rs)
     rs.set_defaults(func=cmd_resume)
 

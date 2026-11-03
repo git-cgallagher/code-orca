@@ -192,7 +192,9 @@ GATED = f"""steps:
 
 @pytest.mark.parametrize("decision", ["--approve", "--reject"])
 def test_resume_refuses_without_a_terminal(tmp_path, monkeypatch, capsys, decision):
-    """pytest captures fd 1 (not a terminal), as an agent's pipe would: the run waits, resume refuses either way."""
+    """No terminal (as an agent's pipe): the run waits, resume refuses either way. ``os.isatty`` is patched, so
+    the test does not depend on pytest's fd capture (``pytest -s`` in a terminal would otherwise prompt)."""
+    monkeypatch.setattr("os.isatty", lambda fd: False)
     root = reference_copy(tmp_path, monkeypatch)
     write_workflow(root, "gated", GATED)
     p = str(root / "codeorca.yaml")
@@ -204,6 +206,91 @@ def test_resume_refuses_without_a_terminal(tmp_path, monkeypatch, capsys, decisi
     assert "interactive terminal" in err and "no flag or environment variable" in err
     record = json.loads((only_run(root) / "run.json").read_text(encoding="utf-8"))
     assert record["status"] == "waiting" and record["steps"]["after"]["status"] is None
+
+
+SECRET_INPUT = "FIXTURE-SECRET-cli-resume-input-001"
+SECRET_FIELD = "FIXTURE-SECRET-cli-resume-field-001"
+SECRET_GATED = f"""inputs:
+  api_token: {{ type: string }}
+steps:
+  - id: approve
+    type: gate
+    message: ship it?
+    fields:
+      ticket: {{ type: string }}
+      change_token: {{ type: string, required: true }}
+  - id: after
+    type: shell
+    needs: [approve]
+    run: [{sys.executable!r}, '-c', 'import sys; print(sys.argv[1:])', '${{{{ inputs.api_token }}}}',
+          '${{{{ steps.approve.outputs.change_token }}}}', '${{{{ steps.approve.outputs.ticket }}}}']
+    outputs:
+      seen: "${{{{ steps.approve.outputs.change_token }}}}"
+"""
+
+
+def _waiting_secret_run(root: Path, monkeypatch) -> str:
+    monkeypatch.setattr("os.isatty", lambda fd: False)
+    write_workflow(root, "secret-gated", SECRET_GATED)
+    p = str(root / "codeorca.yaml")
+    assert cli.main(["run", "secret-gated", "-p", p, "--input", f"api_token={SECRET_INPUT}"]) == 3
+    return p
+
+
+def test_cli_resume_on_a_terminal_asks_secrets_shows_the_binding_and_redacts(tmp_path, monkeypatch, capsys):
+    """The CLI's own resume wiring (registry, redact, cwd, getpass, the confirmation), not a hand-built copy:
+    os.isatty is patched (resume() resolves it at call time), the secrets come through getpass."""
+    root = reference_copy(tmp_path, monkeypatch)
+    p = _waiting_secret_run(root, monkeypatch)
+    capsys.readouterr()
+    monkeypatch.setattr("os.isatty", lambda fd: True)
+    asked: list[str] = []
+
+    def fake_getpass(prompt: str) -> str:
+        asked.append(prompt)
+        return SECRET_INPUT if prompt.startswith("input api_token") else SECRET_FIELD
+
+    monkeypatch.setattr("getpass.getpass", fake_getpass)
+    monkeypatch.setattr("builtins.input", lambda prompt="": "approve")
+    assert cli.main(["resume", "latest", "--approve", "--field", "ticket=CHG-1", "-p", p]) == 0
+    out = capsys.readouterr().out
+    assert "gate approve: ship it?" in out  # what the approval binds is shown before it is confirmed
+    assert [a.split()[1] for a in asked] == ["api_token", "change_token"]
+    run_dir = only_run(root)
+    record = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+    assert record["status"] == "succeeded" and record["steps"]["after"]["status"] == "succeeded"
+    stdout_log = (run_dir / "steps" / "after" / "stdout.log").read_text(encoding="utf-8")
+    assert "CHG-1" in stdout_log and "<redacted:" in stdout_log  # the step got the values; the log is scrubbed
+    for path in run_dir.rglob("*"):
+        if path.is_file():
+            data = path.read_bytes()
+            assert SECRET_INPUT.encode() not in data and SECRET_FIELD.encode() not in data, path
+    assert SECRET_INPUT not in out and SECRET_FIELD not in out
+
+
+def test_cli_resume_refuses_a_secret_named_field_on_the_command_line(tmp_path, monkeypatch, capsys):
+    """Review finding: a field named like a secret could only be passed as --field (ps, shell history)."""
+    root = reference_copy(tmp_path, monkeypatch)
+    p = _waiting_secret_run(root, monkeypatch)
+    capsys.readouterr()
+    monkeypatch.setattr("os.isatty", lambda fd: True)
+    monkeypatch.setattr("getpass.getpass", lambda prompt: pytest.fail("asked before refusing"))
+    assert cli.main(["resume", "latest", "--approve", "--field", f"change_token={SECRET_FIELD}", "-p", p]) == 1
+    err = capsys.readouterr().err
+    assert "named like a secret" in err and "never taken from the command line" in err
+    assert SECRET_FIELD not in err
+    assert json.loads((only_run(root) / "run.json").read_text(encoding="utf-8"))["status"] == "waiting"
+
+
+def test_cli_resume_without_the_typed_confirmation_changes_nothing(tmp_path, monkeypatch, capsys):
+    root = reference_copy(tmp_path, monkeypatch)
+    p = _waiting_secret_run(root, monkeypatch)
+    monkeypatch.setattr("os.isatty", lambda fd: True)
+    monkeypatch.setattr("getpass.getpass", lambda prompt: SECRET_INPUT if "api_token" in prompt else SECRET_FIELD)
+    monkeypatch.setattr("builtins.input", lambda prompt="": "yes")
+    assert cli.main(["resume", "latest", "--approve", "-p", p]) == 1
+    assert "not confirmed" in capsys.readouterr().err
+    assert json.loads((only_run(root) / "run.json").read_text(encoding="utf-8"))["status"] == "waiting"
 
 
 def test_resume_needs_exactly_one_decision(capsys):

@@ -17,7 +17,9 @@ Three ways through a gate:
   variable or flag that approves without one (the approval invariant).
 
 Outputs: ``approved`` (bool), ``approver`` (str) and one output per typed field. A field whose name matches the
-key denylist has its value registered before anything is written. The gate's rendered ``allow_delete_of`` is
+key denylist is read without echo, has its value registered before anything is written, and is never taken
+from the command line on resume (it is asked on the terminal); one too short to register is named in the result
+(``unprotected_fields`` + ``warning``). The gate's rendered ``allow_delete_of`` is
 recorded in the result too: the apply step reads it from there.
 """
 
@@ -131,7 +133,8 @@ def coerce_field(name: str, spec: GateField, raw: Any) -> Any:
         try:
             return int(raw)
         except (TypeError, ValueError):
-            raise FieldError(f"field {name!r}: {raw!r} is not an int") from None
+            # value-free: a field can be named like a secret, and what was typed is not registered yet
+            raise FieldError(f"field {name!r}: the value is not an int") from None
     if isinstance(raw, bool):
         return raw
     lowered = str(raw).strip().lower()
@@ -139,7 +142,7 @@ def coerce_field(name: str, spec: GateField, raw: Any) -> Any:
         return True
     if lowered in ("false", "no", "n"):
         return False
-    raise FieldError(f"field {name!r}: {raw!r} is not true or false")
+    raise FieldError(f"field {name!r}: the value is not true or false")
 
 
 def coerce_fields(specs: Mapping[str, GateField], given: Mapping[str, Any]) -> dict[str, Any]:
@@ -160,12 +163,34 @@ def coerce_fields(specs: Mapping[str, GateField], given: Mapping[str, Any]) -> d
     return values
 
 
-def register_fields(registry: SecretRegistry, values: Mapping[str, Any], denylist) -> None:
-    """A field named like a secret (``ticket_token``) is registered before any record carries it."""
+def secret_field_names(specs: Mapping[str, Any], denylist) -> list[str]:
+    """The declared fields named like a secret (key denylist): asked without echo, never taken from argv."""
     patterns = compile_key_denylist(denylist)
-    for name, value in values.items():
-        if value is not None and not isinstance(value, bool) and any(p.search(name) for p in patterns):
-            registry.add(str(value))
+    return [name for name in specs if any(p.search(name) for p in patterns)]
+
+
+def register_fields(registry: SecretRegistry, values: Mapping[str, Any], denylist) -> list[str]:
+    """A field named like a secret (``ticket_token``) is registered before any record carries it. Returns the
+    names whose value is too short to register (nothing scrubs it): the result warns about them by name."""
+    unprotected: list[str] = []
+    for name in secret_field_names(values, denylist):
+        value = values[name]
+        if value is None or isinstance(value, bool):
+            continue
+        registry.add(str(value))
+        if len(str(value).strip()) < registry.min_length:
+            unprotected.append(name)
+    return unprotected
+
+
+def unprotected_warning(names: list[str]) -> dict[str, Any]:
+    if not names:
+        return {}
+    return {
+        "unprotected_fields": names,
+        "warning": f"field(s) {', '.join(names)} are named like secrets but too short to register: nothing "
+        "scrubs their value from records or logs",
+    }
 
 
 def terminal_prompt(text: str, timeout: float | None) -> str:
@@ -185,6 +210,27 @@ def terminal_prompt(text: str, timeout: float | None) -> str:
     if line == "":
         raise EOFError
     return line.rstrip("\r\n")
+
+
+def terminal_secret_prompt(text: str, timeout: float | None) -> str:
+    """``terminal_prompt`` with the terminal's echo off (a field named like a secret is never shown). Without a
+    terminal to turn echo off on, it reads nothing: end of input (the gate rejects)."""
+    import termios
+
+    try:
+        fd = sys.stdin.fileno()
+        saved = termios.tcgetattr(fd)
+    except (termios.error, OSError, ValueError):
+        raise EOFError from None
+    quiet = list(saved)
+    quiet[3] &= ~termios.ECHO
+    try:
+        termios.tcsetattr(fd, termios.TCSAFLUSH, quiet)
+        return terminal_prompt(text, timeout)
+    finally:
+        termios.tcsetattr(fd, termios.TCSAFLUSH, saved)
+        sys.stdout.write("\n")
+        sys.stdout.flush()
 
 
 def _threaded_readline(timeout: float) -> str:
@@ -242,15 +288,19 @@ def make_executor(
     isatty: Callable[[int], bool] | None = None,
     out: Callable[[str], None] | None = None,
     getuser: Callable[[], str] = current_user,
+    secret_prompt: Prompt | None = None,
 ) -> Executor:
-    """The ``gate`` executor bound to the run's registry. ``prompt``/``isatty``/``out`` are injectable for tests;
-    the defaults read the real terminal (``terminal_prompt``, ``os.isatty``, ``print``)."""
+    """The ``gate`` executor bound to the run's registry. ``prompt``/``isatty``/``out``/``secret_prompt`` are
+    injectable for tests; the defaults read the real terminal (``terminal_prompt``, ``os.isatty``, ``print``, and
+    ``terminal_secret_prompt`` (no echo) for a field named like a secret). An injected ``prompt`` also answers
+    the secret fields unless ``secret_prompt`` is given."""
     ask = prompt or terminal_prompt
+    ask_secret = secret_prompt or (prompt if prompt is not None else terminal_secret_prompt)
     tty = isatty or os.isatty
     say = out or (lambda text: print(text, flush=True))
 
     def run_gate(step, ctx: StepContext) -> StepResult:
-        return execute(step, ctx, registry, ask, tty, say, getuser)
+        return execute(step, ctx, registry, ask, tty, say, getuser, ask_secret)
 
     run_gate.__name__ = "run_gate"
     return run_gate
@@ -264,6 +314,7 @@ def execute(
     tty: Callable[[int], bool],
     say: Callable[[str], None],
     getuser: Callable[[], str],
+    ask_secret: Prompt | None = None,
 ) -> StepResult:
     base = _base_result(step, ctx, registry)
     specs: Mapping[str, GateField] = step.fields or {}
@@ -299,13 +350,14 @@ def execute(
         decision = _ask_decision(ask, say, deadline)
         if decision == "reject":
             return _rejected(step, base, approver)
-        values = _ask_fields(specs, ask, say, deadline)
+        secret = set(secret_field_names(specs, denylist))
+        values = _ask_fields(specs, ask, say, deadline, ask_secret or ask, secret)
     except EOFError:
         return _rejected(step, base, approver, "rejected (end of input)")
     except TimeoutError:
         return _timed_out(step, base, ctx.timeout)
-    register_fields(registry, values, denylist)
-    return _approved(step, base, approver, values)
+    unprotected = register_fields(registry, values, denylist)
+    return _approved(step, {**base, **unprotected_warning(unprotected)}, approver, values)
 
 
 def _show(step, base: Mapping[str, Any], say: Callable[[str], None]) -> None:
@@ -330,15 +382,23 @@ def _ask_decision(ask: Prompt, say: Callable[[str], None], deadline: _Deadline) 
 
 
 def _ask_fields(
-    specs: Mapping[str, GateField], ask: Prompt, say: Callable[[str], None], deadline: _Deadline
+    specs: Mapping[str, GateField],
+    ask: Prompt,
+    say: Callable[[str], None],
+    deadline: _Deadline,
+    ask_secret: Prompt | None = None,
+    secret: set[str] | frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
     values: dict[str, Any] = {}
     for name, spec in specs.items():
         hint = spec.type + (", required" if spec.required else "")
         if spec.default is not None:
-            hint += f", default {spec.default!r}"
+            hint += f", default {spec.default!r}" if name not in secret else ", has a default"
+        if name in secret:
+            hint += ", not echoed"
+        reader = (ask_secret or ask) if name in secret else ask
         while True:
-            raw = ask(f"{name} ({hint}): ", deadline.remaining()).strip()
+            raw = reader(f"{name} ({hint}): ", deadline.remaining()).strip()
             if raw == "":
                 if spec.default is not None:
                     values[name] = spec.default
@@ -382,5 +442,8 @@ __all__ = [
     "parse_utc",
     "plan_binding_problems",
     "register_fields",
+    "secret_field_names",
     "terminal_prompt",
+    "terminal_secret_prompt",
+    "unprotected_warning",
 ]

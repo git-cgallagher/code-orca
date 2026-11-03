@@ -134,10 +134,15 @@ def test_no_keyword_bypasses_the_terminal_check(tmp_path, flag):
     assert rd.read_run()["status"] == "waiting"
 
 
-def test_default_isatty_is_the_real_one_and_pytest_has_no_terminal(tmp_path):
+def test_default_isatty_is_os_isatty_resolved_at_call_time(tmp_path, monkeypatch):
+    """No isatty passed: resume() asks os.isatty when it is called (so the CLI's own call is testable), and a
+    non-terminal is refused whatever pytest's capture mode is."""
     rd, calls, registry = start(tmp_path)
+    seen: list[int] = []
+    monkeypatch.setattr("os.isatty", lambda fd: seen.append(fd) or False)
     with pytest.raises(ResumeRefused, match="interactive terminal"):
         resume(PROJECT, rd, "approve", executors=executors(calls, registry), workflow=WF)
+    assert seen == [0]
 
 
 # --- refusals ------------------------------------------------------------------------------------------------------
@@ -569,3 +574,28 @@ def test_a_non_literal_input_reference_needs_every_redacted_input(tmp_path, expr
         go(rd, calls, fresh, wf=wf)
     assert go(rd, calls, fresh, wf=wf, secret_inputs={"db_password": SECRET}) == EXIT_OK
     assert calls.argv["use"] == ["use", SECRET]
+
+
+def test_a_secret_named_field_given_on_resume_is_registered_before_anything_streams(tmp_path):
+    """Review finding (test gap): removing register_fields on the resume path broke no test. A later step echoes
+    the field; nothing under the run dir may hold it."""
+    value = "FIXTURE-SECRET-resume-field-0001"
+    wf = workflow(
+        [
+            {"id": "approve", "type": "gate", "message": "m", "fields": {"ticket_token": {"type": "string"}}},
+            {
+                "id": "use",
+                "type": "shell",
+                "needs": ["approve"],
+                "run": ["use"],
+                "outputs": {"echo": "token ${{ steps.approve.outputs.ticket_token }}"},
+            },
+        ]
+    )
+    rd, calls, _ = start(tmp_path, wf=wf)
+    fresh = SecretRegistry(KEY, "env:test")
+    assert go(rd, calls, fresh, wf=wf, fields={"ticket_token": value}) == EXIT_OK
+    assert fresh.count_matches(value) == 1
+    for path in rd.path.rglob("*"):
+        if path.is_file():
+            assert value.encode() not in path.read_bytes(), path

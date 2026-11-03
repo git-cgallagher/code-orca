@@ -66,6 +66,7 @@ from codeorca.steps.gate import (
     parse_utc,
     plan_binding_problems,
     register_fields,
+    unprotected_warning,
 )
 
 DEFAULT_MAX_AGE = "24h"
@@ -88,7 +89,7 @@ def resume(
     *,
     fields: Mapping[str, Any] | None = None,
     executors: Mapping[str, Executor],
-    isatty: Callable[[int], bool] = os.isatty,
+    isatty: Callable[[int], bool] | None = None,
     secret_inputs: Mapping[str, Any] | None = None,
     workflow: Workflow | None = None,
     env: Mapping[str, str] | None = None,
@@ -102,7 +103,9 @@ def resume(
     """Decide the waiting gate of ``run_dir`` and finish the run; returns the run's exit code (0/1/3)."""
     if decision not in ("approve", "reject"):
         raise ValueError(f"decision must be 'approve' or 'reject', not {decision!r}")
-    if not is_terminal(isatty):
+    # resolved at call time (``os.isatty`` unless a test injects one), so the CLI's own call is testable without
+    # any option that could bypass the check
+    if not is_terminal(isatty if isatty is not None else os.isatty):
         raise ResumeRefused(TTY_REFUSAL)
     lock_path = run_dir.path / LOCK_FILE
     with open(lock_path, "a+", encoding="utf-8") as lock:
@@ -213,10 +216,11 @@ def _resume_locked(
         cwd=cwd,
     )
     _rerender_vars(runner, workflow, needed_vars)
+    unprotected: list[str] = []
     if registry is not None:
         from codeorca.secrets import key_denylist
 
-        register_fields(registry, values, key_denylist(project))
+        unprotected = register_fields(registry, values, key_denylist(project))
 
     approver = getuser()
     decided_at = now_utc()
@@ -232,6 +236,7 @@ def _resume_locked(
                 "decided_at": decided_at,
                 "fields": values,
                 "resumed": True,
+                **unprotected_warning(unprotected),
             },
         )
     else:
@@ -243,6 +248,38 @@ def _resume_locked(
     runner.add_resume({"gate": gate_id, "decision": decision, "approver": approver, "resumed_at": decided_at})
     runner.settle(gate_id, result)
     return runner.run()
+
+
+def waiting_gate(workflow: Workflow, record: Mapping[str, Any]):
+    """The gate step the run is waiting at, or None (resume() refuses then, with the reason)."""
+    states = record.get("steps") or {}
+    waiting = [sid for sid, st in states.items() if (st or {}).get("status") == "waiting"]
+    steps = {s.id: s for s in workflow.steps}
+    if len(waiting) == 1 and waiting[0] in steps and steps[waiting[0]].type == "gate":
+        return steps[waiting[0]]
+    return None
+
+
+def describe_gate(run_dir: RunDir, gate) -> str:
+    """What an approval binds, as the interactive gate shows it before asking: the message, the specs, every plan
+    file with the sha256 it recorded (and whether the file still matches), the deletes it waives."""
+    from codeorca.steps.gate import _show
+
+    result = run_dir.read_result(gate.id) or {}
+    plans = dict(result.get("plans") or {})
+    problems = plan_binding_problems(plans)
+    base = {
+        "message": str(result.get("message") or gate.message),
+        "specs": list(result.get("specs") or []),
+        "plans": plans,
+        "allow_delete_of": list(result.get("allow_delete_of") or []),
+    }
+    lines: list[str] = []
+    _show(gate, base, lines.append)
+    if not plans:
+        lines.append("plan files: none recorded (nothing to apply is bound to this gate)")
+    lines.extend(f"  !! {p}" for p in problems)
+    return "\n".join(lines)
 
 
 def _load_workflow(project: Project | None, name: str) -> Workflow:
@@ -545,4 +582,15 @@ def _rerender_vars(runner: Runner, workflow: Workflow, names: set[str]) -> None:
             raise ResumeRefused(f"vars.{name}: {e}") from None
 
 
-__all__ = ["ResumeRefused", "TTY_REFUSAL", "is_redacted", "needed_secret_inputs", "remaining_steps", "resume"]
+__all__ = [
+    "ResumeRefused",
+    "TTY_REFUSAL",
+    "describe_gate",
+    "is_redacted",
+    "matches_recorded",
+    "needed_secret_inputs",
+    "remaining_steps",
+    "resume",
+    "unreplayable_outputs",
+    "waiting_gate",
+]

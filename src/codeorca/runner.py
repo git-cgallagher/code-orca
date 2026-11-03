@@ -593,7 +593,13 @@ class Runner:
     def _finish(self, step, status: str, outputs, result, error: str | None) -> str:
         state = self.states[step.id]
         state.update({"status": status, "outputs": outputs, "error": error, "finished": _now()})
-        self.run_dir.write_outputs(step.id, self._scrub(outputs))
+        persisted = self._scrub(outputs)
+        # the names of the outputs whose persisted form differs from the value later steps saw (a registered
+        # value scrubbed): a resume cannot replay those, and refuses a remaining step that references one
+        state["scrubbed_outputs"] = sorted(
+            name for name, value in (outputs or {}).items() if (persisted or {}).get(name) != value
+        )
+        self.run_dir.write_outputs(step.id, persisted)
         self._after_step(step)
         return status
 

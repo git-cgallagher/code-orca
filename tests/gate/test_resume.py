@@ -507,3 +507,65 @@ def test_resume_refuses_another_redaction_key(tmp_path):
     assert rd.read_run()["status"] == "waiting"
     assert go(rd, calls, SecretRegistry(KEY, "env:aaaa1111")) == EXIT_OK
     assert rd.read_run()["redaction_key_id"] == "env:aaaa1111"
+
+
+def test_resume_refuses_a_scrubbed_step_output_a_remaining_step_references(tmp_path):
+    """Review finding: Runner._restore replayed outputs from run.json (already scrubbed), so a post-gate step got
+    'u:<redacted:hmac:...>@h' instead of the value the run had, and the run exited 0."""
+    wf = workflow(
+        [
+            {"id": "mk", "type": "shell", "run": ["mk"], "outputs": {"conn": "u:${{ inputs.db_password }}@h"}},
+            {"id": "approve", "type": "gate", "needs": ["mk"], "message": "ok?"},
+            {"id": "use", "type": "shell", "needs": ["approve"], "run": ["use", "${{ steps.mk.outputs.conn }}"]},
+        ],
+        inputs={"db_password": {"type": "string"}},
+    )
+    rd, calls, _ = start(tmp_path, wf=wf, inputs={"db_password": SECRET})
+    assert rd.read_run()["steps"]["mk"]["scrubbed_outputs"] == ["conn"]
+    calls2 = Calls()
+    with pytest.raises(ResumeRefused, match=r"step output\(s\) that run.json holds redacted: mk.conn"):
+        go(rd, calls2, SecretRegistry(KEY, "env:test"), wf=wf)
+    assert "use" not in calls2.ids and rd.read_run()["status"] == "waiting"
+
+
+def test_an_output_redacted_at_its_source_still_replays(tmp_path):
+    """An output that was already a placeholder when the run produced it (a sensitive terraform output) is replayed
+    as it was: the run itself handed the placeholder on, so nothing is lost."""
+    wf = workflow(
+        [
+            {"id": "mk", "type": "shell", "run": ["mk"], "outputs": {"tok": "<redacted:hmac:0123abcd>"}},
+            {"id": "approve", "type": "gate", "needs": ["mk"], "message": "ok?"},
+            {"id": "use", "type": "shell", "needs": ["approve"], "run": ["use", "${{ steps.mk.outputs.tok }}"]},
+        ]
+    )
+    rd, calls, registry = start(tmp_path, wf=wf)
+    assert rd.read_run()["steps"]["mk"]["scrubbed_outputs"] == []
+    assert go(rd, calls, registry, wf=wf) == EXIT_OK
+    assert calls.argv["use"] == ["use", "<redacted:hmac:0123abcd>"]
+
+
+@pytest.mark.parametrize(
+    "expr",
+    ["${{ inputs.get('db_password') }}", "${{ inputs['db_' ~ 'password'] }}", "${{ inputs[vars.which] }}"],
+    ids=["get", "computed-item", "var-item"],
+)
+def test_a_non_literal_input_reference_needs_every_redacted_input(tmp_path, expr):
+    """Review finding: inputs.get('x') and inputs[expr] were not seen as references, so nothing was asked for and
+    the step received '<redacted:key>'."""
+    from codeorca.resume import needed_secret_inputs
+
+    wf = workflow(
+        [
+            {"id": "approve", "type": "gate", "message": "ok?"},
+            {"id": "use", "type": "shell", "needs": ["approve"], "run": ["use", expr]},
+        ],
+        inputs={"db_password": {"type": "string"}},
+        vars={"which": "db_password"},
+    )
+    rd, calls, _ = start(tmp_path, wf=wf, inputs={"db_password": SECRET})
+    assert needed_secret_inputs(wf, rd.read_run()) == ["db_password"]
+    fresh = SecretRegistry(KEY, "env:test")
+    with pytest.raises(ResumeRefused, match="db_password"):
+        go(rd, calls, fresh, wf=wf)
+    assert go(rd, calls, fresh, wf=wf, secret_inputs={"db_password": SECRET}) == EXIT_OK
+    assert calls.argv["use"] == ["use", SECRET]

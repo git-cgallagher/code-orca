@@ -16,6 +16,8 @@ Refusals (``ResumeRefused``, nothing is written):
 - approve only: the gate has waited longer than ``project.gate.max_age`` (a fresh plan is needed: start a new
   run), or a plan file the gate recorded is gone or no longer matches its sha256 (tamper check);
 - a typed field is unknown, mistyped, or required and missing;
+- a remaining step references a step output whose persisted value was scrubbed (``scrubbed_outputs`` in the
+  step's state): run.json holds a placeholder where the run had the value, so it cannot be replayed;
 - a remaining step needs an input that run.json holds redacted (an input whose name matched the key denylist,
   or whose value was registered) and ``secret_inputs`` does not supply it again; a supplied value that does not
   match what the run recorded (part by part for a partially redacted string or a list/map input:
@@ -188,6 +190,13 @@ def _resume_locked(
         raise ResumeRefused("--field is for --approve only")
 
     remaining = remaining_steps(workflow, record)
+    lost = unreplayable_outputs(workflow, record, remaining, gate_id)
+    if lost:
+        raise ResumeRefused(
+            "the remaining steps reference step output(s) that run.json holds redacted: "
+            + ", ".join(lost)
+            + "; a resume would hand them the placeholder instead of the value; start a new run"
+        )
     inputs, needed_vars = _resolve_inputs(workflow, record, remaining, secret_inputs, registry)
 
     runner = Runner.restore(
@@ -306,19 +315,87 @@ def _leaves(value: Any) -> Iterable[str]:
 _WHOLE = object()
 
 
-def _references(texts: Iterable[str], namespace: str) -> set[str] | object:
-    """Names under ``namespace`` (``inputs``/``vars``) the texts reference; ``_WHOLE`` when the namespace itself
-    is used as a value (``inputs | tojson``), which needs every name."""
-    attr = re.compile(rf"\b{namespace}\s*\.\s*([A-Za-z_][A-Za-z0-9_]*)")
-    item = re.compile(rf"\b{namespace}\s*\[\s*['\"]([^'\"]+)['\"]\s*\]")
-    bare = re.compile(rf"\b{namespace}\b(?!\s*[.\[])")
+def _references(texts: Iterable[str], namespace: str, declared: Iterable[str]) -> set[str] | object:
+    """Names under ``namespace`` (``inputs``/``vars``) the texts reference; ``_WHOLE`` when any use of the
+    namespace is not a literal ``ns.NAME`` (a declared name) or ``ns['NAME']``: the namespace used as a value
+    (``inputs | tojson``), a method (``inputs.get('x')``), a computed subscript (``inputs[vars.which]``). Fail
+    closed: whatever cannot be read as a literal name needs every name."""
+    known = set(declared)
+    attr = re.compile(rf"{namespace}\s*\.\s*([A-Za-z_][A-Za-z0-9_]*)\b(?!\s*\()")
+    item = re.compile(rf"{namespace}\s*\[\s*(?:'([^'\\]+)'|\"([^\"\\]+)\")\s*\]")
+    use = re.compile(rf"\b{namespace}\b")
     names: set[str] = set()
     for text in texts:
-        if bare.search(text):
+        for m in use.finditer(text):
+            a = attr.match(text, m.start())
+            if a and a.group(1) in known:
+                names.add(a.group(1))
+                continue
+            i = item.match(text, m.start())
+            if i:
+                names.add(i.group(1) or i.group(2))
+                continue
             return _WHOLE
-        names.update(attr.findall(text))
-        names.update(item.findall(text))
     return names
+
+
+_STEP_USE = re.compile(r"\bsteps\b")
+_STEP_OUTPUT = re.compile(
+    r"steps\s*\.\s*([a-z][a-z0-9_]*)\s*\.\s*outputs\s*"
+    r"(?:\.\s*([A-Za-z_][A-Za-z0-9_]*)\b(?!\s*\()|\[\s*(?:'([^'\\]+)'|\"([^\"\\]+)\")\s*\])"
+)
+_STEP_OTHER = re.compile(r"steps\s*\.\s*([a-z][a-z0-9_]*)\s*\.\s*(?:status|outcome)\b")
+
+
+def _step_output_references(texts: Iterable[str]) -> set[tuple[str, str]] | object:
+    """``(step, output)`` pairs the texts reference; ``(step, '*')`` for ``steps.x.outputs`` used whole;
+    ``_WHOLE`` for any other use of ``steps`` (fail closed: every replayed output may be needed)."""
+    refs: set[tuple[str, str]] = set()
+    whole_step = re.compile(r"steps\s*\.\s*([a-z][a-z0-9_]*)\s*\.\s*outputs\b")
+    for text in texts:
+        for m in _STEP_USE.finditer(text):
+            o = _STEP_OUTPUT.match(text, m.start())
+            if o:
+                refs.add((o.group(1), o.group(2) or o.group(3) or o.group(4)))
+                continue
+            if _STEP_OTHER.match(text, m.start()):
+                continue  # a status is replayed as it was: never redacted
+            w = whole_step.match(text, m.start())
+            if w:
+                refs.add((w.group(1), "*"))
+                continue
+            return _WHOLE
+    return refs
+
+
+def unreplayable_outputs(workflow: Workflow, record: Mapping[str, Any], remaining: list, skip: str) -> list[str]:
+    """``step.output`` names a remaining step references whose persisted (replayed) value was scrubbed: the run
+    saw the real value, run.json holds a placeholder, and a resume would hand the placeholder on. ``skip`` is
+    the gate being decided (its outputs are produced again)."""
+    states = record.get("steps") or {}
+    texts = [t for s in remaining for t in _strings(s)]
+    refs = _step_output_references(texts)
+
+    def scrubbed(sid: str) -> set[str]:
+        state = states.get(sid) or {}
+        if sid == skip or state.get("status") is None:
+            return set()
+        if "scrubbed_outputs" in state:
+            return set(state.get("scrubbed_outputs") or [])
+        # a run.json from before the runner recorded it: judge by the persisted value
+        return {name for name, value in (state.get("outputs") or {}).items() if is_redacted(value)}
+
+    pairs = (
+        {(sid, "*") for sid in states} if refs is _WHOLE else refs  # type: ignore[assignment]
+    )
+    bad: set[str] = set()
+    for sid, out in pairs:  # type: ignore[union-attr]
+        names = scrubbed(sid)
+        if out == "*":
+            bad.update(f"{sid}.{n}" for n in names)
+        elif out in names:
+            bad.add(f"{sid}.{out}")
+    return sorted(bad)
 
 
 def remaining_steps(workflow: Workflow, record: Mapping[str, Any]) -> list:
@@ -330,10 +407,10 @@ def remaining_steps(workflow: Workflow, record: Mapping[str, Any]) -> list:
 def _used_names(workflow: Workflow, remaining: list) -> tuple[set[str], set[str]]:
     """(input names, var names) the remaining steps reference, directly or through a var."""
     step_texts = [t for s in remaining for t in _strings(s)]
-    var_refs = _references(step_texts, "vars")
+    var_refs = _references(step_texts, "vars", workflow.vars)
     var_names = set(workflow.vars) if var_refs is _WHOLE else set(var_refs) & set(workflow.vars)  # type: ignore[arg-type]
     var_texts = [t for name in var_names for t in _strings(workflow.vars[name])]
-    input_refs = _references([*step_texts, *var_texts], "inputs")
+    input_refs = _references([*step_texts, *var_texts], "inputs", workflow.inputs)
     used = set(workflow.inputs) if input_refs is _WHOLE else set(input_refs)  # type: ignore[arg-type]
     return used, var_names
 

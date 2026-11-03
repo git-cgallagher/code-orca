@@ -608,8 +608,21 @@ def _add_project(p: argparse.ArgumentParser) -> None:
     p.add_argument("-p", "--project", default="codeorca.yaml", help="project file (default: ./codeorca.yaml)")
 
 
+class _Parser(argparse.ArgumentParser):
+    """No abbreviated long options (``--proj`` for ``--project``), on every subcommand too.
+
+    ``add_subparsers`` makes each subparser with ``type(parent)``, so this reaches them all. bin/codeorca finds the
+    project file by matching ``-p``/``--project`` exactly; an abbreviation it cannot see would send its chown to
+    the wrong tree.
+    """
+
+    def __init__(self, *args, **kwargs):
+        kwargs.setdefault("allow_abbrev", False)
+        super().__init__(*args, **kwargs)
+
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="codeorca", description="Terraform + Ansible orchestrator")
+    parser = _Parser(prog="codeorca", description="Terraform + Ansible orchestrator")
     parser.add_argument("--version", action="version", version=f"codeorca {__version__}")
     sub = parser.add_subparsers(dest="command", required=True)
 

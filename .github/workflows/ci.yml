@@ -131,8 +131,10 @@ jobs:
           test "$status" = waiting || { echo "run.json is $status after a refused resume"; exit 1; }
       - name: No placeholder secret anywhere in the produced files
         # Each check is its own fatal `if`: under `bash -e` a `! grep` never fails the step (errexit ignores an
-        # inverted pipeline, and a multi-line run exits with its LAST command's status). `-a` scans the binary
-        # plan file as text too.
+        # inverted pipeline, and a multi-line run exits with its LAST command's status). `-a` reads binary files
+        # as text, but a plan file is a zip whose entries are DEFLATE-compressed, so grep cannot see a secret
+        # inside one: no_plan_in_specs.py fails if a plan file or any archive is under specs/ at all (plan files
+        # belong in the run dir only, which keeps them by design).
         run: |
           ls examples/reference/specs/app/plan.yaml examples/reference/specs/app/plan.meta.yaml
           ls examples/reference/specs/app/hosts/app-host.yaml examples/reference/specs/app/hosts/app-host.meta.yaml
@@ -144,5 +146,9 @@ jobs:
               exit 1
             fi
           done
+          if ! python -I container/tests/no_plan_in_specs.py examples/reference/specs; then
+            echo "a plan file or archive is under examples/reference/specs"
+            exit 1
+          fi
       - name: Produced files are not tracked
         run: test -z "$(git status --porcelain examples/reference)"

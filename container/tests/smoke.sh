@@ -169,5 +169,10 @@ for pattern in FIXTURE-SECRET example-not-secret-smoke; do
     fail "placeholder secret leaked into the produced files: $pattern"
   fi
 done
+# A plan file is a zip whose entries hold the secret DEFLATE-compressed: the grep above cannot see into one, so no
+# plan file or other archive may be under specs/ at all (plan files live in the run dir only).
+if ! python3 -I "$root/container/tests/no_plan_in_specs.py" "$ref/specs"; then
+  fail "a plan file or archive is under specs/ (the grep leak check cannot see inside one)"
+fi
 
-echo "PASS: code-orca ${pkg_have} | terraform ${tf_have} | pwsh ${pwsh_want} | PSScriptAnalyzer ${pssa_have} | ansible-core ${core_have} | python $(python3 -c 'import platform; print(platform.python_version())') | reference: doctor, plan-only, configure-local, demo-rollout gate (3), resume refused, lint, no leak"
+echo "PASS: code-orca ${pkg_have} | terraform ${tf_have} | pwsh ${pwsh_want} | PSScriptAnalyzer ${pssa_have} | ansible-core ${core_have} | python $(python3 -c 'import platform; print(platform.python_version())') | reference: doctor, plan-only, configure-local, demo-rollout gate (3), resume refused, lint, no leak, no plan in specs"

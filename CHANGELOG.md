@@ -20,6 +20,8 @@
   release whose attestation failed after the tags went out.
   The weekly schedule no longer claims to deliver Debian security updates (it cannot: digest-pinned base, cached
   layers; it re-scans with a fresh grype database). The clean-checkout check includes ignored files.
+  The smoke test and CI's leak check fail on a plan file or any archive under specs/
+  (`container/tests/no_plan_in_specs.py`): `grep -ra` cannot see a secret in a plan's deflated zip entries.
 - Container image (Phase 4): `container/Dockerfile` builds `code-orca-runtime` on ansible-runtime 1.3.0 with
   Terraform 1.14.7 (GPG-verified release zip + its BSL 1.1 license), PowerShell 7.6.9 LTS + PSScriptAnalyzer 1.25.0
   and the code-orca wheel under the base's pins (no venv, `pip check` in the build); `container/tests/smoke.sh`

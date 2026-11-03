@@ -32,6 +32,10 @@ sub=$1
 [ "$sub" = providers ] && sub=providers_schema
 echo "$sub" >> "$FAKE_LOG"
 for a in "$@"; do case "$a" in -out=*) printf 'FAKE-PLAN' > "${a#-out=}";; esac; done
+if [ "$sub" = show ] && [ -n "$FAKE_TAMPER_ON_SHOW" ] && grep -q '^apply_marker$' "$FAKE_LOG" 2>/dev/null; then
+  for a in "$@"; do last=$a; done
+  printf 'x' >> "$last"
+fi
 if [ "$sub" = apply ] && [ -n "$FAKE_LOCK_TIMES" ]; then
   n=$(grep -c '^apply$' "$FAKE_LOG")
   if [ "$n" -le "$FAKE_LOCK_TIMES" ]; then
@@ -496,3 +500,32 @@ def test_a_short_stack_secret_is_named_in_the_step_result(project, engine):
         result = r.run_dir.read_result(sid)
         assert result["unprotected_secrets"] == ["TF_VAR_pin"], sid
         assert any("TF_VAR_pin" in w for w in result["warnings"]), sid
+
+
+def test_an_approved_gate_the_apply_does_not_need_is_not_its_approval(project, engine):
+    """Review finding (test gap): find_approval only counts gates the apply transitively needs; no test showed
+    that an approving gate elsewhere in the workflow is ignored."""
+    r = run(project, workflow([PLAN, GATE, {**APPLY, "needs": ["plan"]}]), engine)
+    assert r.states["approve"]["status"] == "succeeded"
+    assert r.states["apply"]["status"] == "failed"
+    assert "needs an approving gate upstream (the step needs no gate)" in r.states["apply"]["error"]
+    assert calls(engine, "apply") == 0
+
+
+ARM_SCRIPT = "import sys; open(sys.argv[1], 'a').write('apply_marker\\n')"
+
+
+def test_the_adapter_rechecks_the_gate_recorded_sha256_not_a_fresh_one(project, engine):
+    """Review finding (test gap): apply passes the gate's sha256 to TerraformRunner.apply, whose last-moment check
+    refuses a plan file that changed after find_approval (here: during the apply step's own show -json)."""
+    marker = {
+        "id": "arm",
+        "type": "shell",
+        "needs": ["approve"],
+        "run": [sys.executable, "-c", ARM_SCRIPT, engine["FAKE_LOG"]],
+    }
+    engine["FAKE_TAMPER_ON_SHOW"] = "1"
+    r = run(project, workflow([PLAN, GATE, marker, {**APPLY, "needs": ["arm"]}]), engine)
+    st = r.states["apply"]
+    assert st["status"] == "errored" and "does not match the approved" in st["error"], st
+    assert calls(engine, "apply") == 0

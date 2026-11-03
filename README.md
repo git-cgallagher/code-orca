@@ -164,16 +164,21 @@ codeorca lint powershell examples/reference/helpers [--ansible-settings]
 ```
 
 **Gate and apply.** A `gate` step prints its message, the specs the run staged and every plan file with its
-sha256, then asks `approve`/`reject` and its typed `fields` (`--field k=v` on `resume --approve`). It asks only
+sha256, then asks `approve`/`reject` and its typed `fields` (`--field k=v` on `resume --approve`; a field named like
+a secret is read without echo and never taken from `--field`: resume asks for it). It asks only
 when stdin AND stdout are terminals. Without one (an agent, CI, a pipe) `non_interactive: wait` stops the run
 (`run.json` status `waiting`, exit 3; `finally` does not run yet) and `non_interactive: fail` fails it.
 `codeorca resume <run-id|latest> --approve|--reject` decides the gate **on a terminal only**: there is no flag or
 environment variable that bypasses that check, for either decision. Secret inputs the remaining steps need
-(recorded redacted) are asked for again on the terminal, not echoed, never taken from the command line. Resume
-refuses a changed workflow, a gate older than `gate.max_age` and a plan file that changed or vanished since the gate
-recorded it; completed steps are replayed, the rest run, `finally` runs once. A `terraform` `apply` step runs only
+(recorded redacted) are asked for again on the terminal, not echoed, never taken from the command line.
+`--approve` prints what the approval binds (message, specs, plan files with their sha256, waived deletes) and asks
+you to type `approve` to confirm. Resume refuses a changed workflow, project (`codeorca.yaml`) or redaction key, a
+gate or plan older than `gate.max_age`, a plan file that changed or vanished since the gate recorded it, and a
+remaining step that needs a step output run.json holds redacted; completed steps are replayed, the rest run,
+`finally` runs once. A gate may not sit in `finally` or carry `retry`. A `terraform` `apply` step runs only
 a plan file of this run whose sha256 an approving gate it needs recorded, re-checks the plan gate (with the gate's
-`allow_delete_of`), deletes the plan file afterwards and retries only a lock-acquisition failure before any change.
+`allow_delete_of`), deletes the plan file afterwards (or after a failure no retry may use) and retries only a
+lock-acquisition failure before any change (or a failure before Terraform ran).
 `timeout` bounds the prompt; `on_timeout: fail|cancel|warn` never approves, and a cancelled gate fails the run
 (exit 1). `--dry-run` auto-approves (recorded as `approver: dry-run`) and an apply then only reports the plan.
 

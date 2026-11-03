@@ -808,14 +808,25 @@ def _marker(ctx: StepContext) -> Path:
     return ctx.step_dir / APPLY_MARKER
 
 
-def _check_retry(ctx: StepContext) -> None:
-    if ctx.attempt <= 1:
-        return
+def _read_marker(ctx: StepContext) -> dict[str, Any]:
     try:
         previous = json.loads(_marker(ctx).read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        previous = {}
-    if not previous.get("lock_error_before_change"):
+        return {}
+    return previous if isinstance(previous, dict) else {}
+
+
+def _retry_allowed(marker: Mapping[str, Any]) -> bool:
+    """A retry may run only when nothing can have changed: a state-lock error before any change, or a failure
+    before any Terraform process started (the codeorca stack flock held by a drift, an SSM secret fetch)."""
+    return bool(marker.get("lock_error_before_change") or marker.get("before_terraform"))
+
+
+def _check_retry(ctx: StepContext) -> None:
+    if ctx.attempt <= 1:
+        return
+    previous = _read_marker(ctx)
+    if not _retry_allowed(previous):
         raise Refused(
             "apply is retried only after a state-lock error before any change; the previous attempt failed with: "
             + str(previous.get("error") or "an error before Terraform ran")
@@ -844,6 +855,27 @@ def apply_step(
     except Refused as e:
         return StepResult("failed", error=f"apply refused: {e}")
     _write_json(_marker(ctx), {"attempt": ctx.attempt, "lock_error_before_change": False, "error": None})
+    succeeded = False
+    try:
+        result = _apply_session(step, ctx, registry, resolve_secret, plan_path, producer, approval)
+        succeeded = result.status == "succeeded"
+        return result
+    finally:
+        if not succeeded and not _retry_allowed(_read_marker(ctx)):
+            # the plan embeds sensitive variable values and prior state in clear, and no later attempt may apply
+            # it (only a lock error before any change, or a failure before Terraform ran, is retried): delete it
+            plan_path.unlink(missing_ok=True)
+
+
+def _apply_session(
+    step,
+    ctx: StepContext,
+    registry: SecretRegistry,
+    resolve_secret: SecretResolver | None,
+    plan_path: Path,
+    producer: str,
+    approval: Approval,
+) -> StepResult:
     with ExitStack() as resources:
         try:
             session = open_session(
@@ -860,7 +892,10 @@ def apply_step(
                 resolve_secret=resolve_secret,
             )
         except StepError as e:
-            _write_json(_marker(ctx), {"attempt": ctx.attempt, "lock_error_before_change": False, "error": str(e)})
+            # nothing ran yet (the stack flock is held by a drift or another run, a secret could not be
+            # fetched): a retry is safe, and the plan file stays for it
+            marker = {"attempt": ctx.attempt, "lock_error_before_change": False, "before_terraform": True}
+            _write_json(_marker(ctx), {**marker, "error": str(e)})
             raise
         try:
             session.init()

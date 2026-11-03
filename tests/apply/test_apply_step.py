@@ -303,7 +303,8 @@ def test_the_plan_gate_blocks_a_delete_the_gate_did_not_waive(project, engine):
     r = run(project, workflow([PLAN, GATE, APPLY]), engine)
     assert r.states["apply"]["status"] == "failed"
     assert "plan gate: aws_s3_bucket.logs (stateful type aws_s3_bucket)" in r.states["apply"]["error"]
-    assert calls(engine, "apply") == 0 and plan_path(r).exists()
+    assert calls(engine, "apply") == 0
+    assert not plan_path(r).exists()  # it can never be applied now, and it holds sensitive values: deleted
 
 
 def test_allow_delete_of_on_the_approving_gate_waives_it(project, engine):
@@ -330,6 +331,47 @@ def test_a_lock_error_before_any_change_is_retried(project, engine):
     assert r.states["apply"]["attempts"] == 2 and calls(engine, "apply") == 2
 
 
+def test_a_lock_error_keeps_the_plan_for_the_retry(project, engine):
+    engine["FAKE_LOCK_TIMES"] = "5"
+    r = run(project, workflow([PLAN, GATE, APPLY]), engine)
+    assert r.states["apply"]["status"] == "failed" and r.run_dir.read_result("apply")["lock_error"] is True
+    assert plan_path(r).exists()
+
+
+def test_a_stack_flock_conflict_before_terraform_ran_is_retried(project, engine):
+    """Review finding: open_session failing on the codeorca stack flock (a drift holds it) wrote a marker that
+    vetoed every retry, though no Terraform process had started; during a resume that burned the approval."""
+    import fcntl
+
+    held: dict = {}
+
+    def approve_and_hold_the_flock(text, t):
+        locks = project.root / project.state_dir / "locks"
+        locks.mkdir(parents=True, exist_ok=True)
+        fh = open(locks / "app.lock", "a+")  # noqa: SIM115 - released by the runner's backoff sleep below
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        held["fh"] = fh
+        return "approve"
+
+    def release(seconds):
+        fh = held.pop("fh", None)
+        if fh is not None:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+            fh.close()
+
+    registry = SecretRegistry(b"example-not-secret-key", "env:test")
+    executors = default_executors()
+    executors["terraform"] = terraform_step.make_executor(registry)
+    executors["gate"] = _gate(approve_and_hold_the_flock)
+    apply = {**APPLY, "retry": {"limit": 1, "policy": "error"}}
+    rd = RunDir(project.root / project.state_dir)
+    r = Runner(project, workflow([PLAN, GATE, apply]), {}, rd, executors, env=engine, sleep=release)
+    r.run()
+    st = r.states["apply"]
+    assert st["status"] == "succeeded", st["error"]
+    assert st["attempts"] == 2 and calls(engine, "apply") == 1
+
+
 def test_any_other_apply_failure_is_never_retried(project, engine):
     engine["FAKE_STDOUT_apply"] = json.dumps(
         {"@level": "error", "@message": "Error: creating thing", "type": "apply_errored"}
@@ -340,7 +382,9 @@ def test_any_other_apply_failure_is_never_retried(project, engine):
     st = r.states["apply"]
     assert st["status"] == "failed" and calls(engine, "apply") == 1
     assert "retried only after a state-lock error" in st["error"] and "creating thing" in st["error"]
-    assert plan_path(r).exists()  # kept on failure (no success, nothing to clean up behind)
+    # review finding: the plan (sensitive variables + prior state in clear) was kept after a failed apply, though
+    # no later attempt may use it; only a lock error before any change (retryable) keeps it
+    assert not plan_path(r).exists()
 
 
 def test_dry_run_applies_nothing_and_reports_skipped(project, engine):

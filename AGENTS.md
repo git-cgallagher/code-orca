@@ -62,6 +62,10 @@ Consumers keep their own `codeorca.yaml`, `workflows/`, `specs/` in their own (u
 | `tests/cli/test_cli_phase3.py`, `tests/steps/test_stack_secrets.py`, `tests/integration/test_reference_demo_rollout.py` | CLI wiring (executors, resolver closures, key fetcher, no AWS call with the env key, `resume` refusal + no bypass option, `lint powershell`); stack secrets (unit + live `drift`/`run` with a fake resolver); `demo-rollout` wait -> refused CLI resume -> approve (all steps, finally once, plan deleted, no placeholder anywhere) and reject |
 | `tests/` | pytest; `tests/negative/` holds workflow files that must fail validation, each for a named reason |
 | `tests/redact/` | redaction tests (no terraform/ansible binary needed); `fixtures/` holds a hand-scrubbed plan/state/output JSON, a providers-schema excerpt and two log captures, all with `FIXTURE-SECRET-*` placeholders; regeneration recipe in `conftest.py` |
+| `container/Dockerfile` | the runtime image (`docker buildx build -f container/Dockerfile --target runtime .`): `FROM ${BASE_IMAGE}` (ansible-runtime 1.3.0 index digest), a `downloader` stage (curl/gnupg/unzip, never shipped) feeding `terraform` (release zip: VALIDSIG primary fingerprint, one-line `sha256sum -c`, binary + `LICENSE.txt` copied out) and `msrepo` (`packages-microsoft-prod.deb`, bind-mounted into the final stage), a `builder` stage (wheel with hash-pinned setuptools, `--no-build-isolation`), and `runtime` (PowerShell `${PWSH_VERSION}-1.deb`, PSScriptAnalyzer AllUsers, code-orca into the base's site-packages under the base's constraints + `pip check`, no venv; root, tini, `WORKDIR /work`, `CMD codeorca --help`, OCI labels incl. `MIT AND BUSL-1.1` and `version=${IMAGE_VERSION}`). Build args `BASE_IMAGE`, `TF_VERSION`, `PWSH_VERSION`, `PSSA_VERSION`, `IMAGE_VERSION`; keep each `ARG X=default` line comment-free (the smoke test parses them) |
+| `container/requirements/` | `codeorca.in`/`.txt` (what code-orca needs that the base lacks, hash-pinned; empty today), `build.in`/`.txt` (setuptools for the builder stage), `lock.sh` (pip-compile inside `BASE_IMAGE` with `--constraint=/usr/share/ansible-runtime/constraints.txt`), `README.md` |
+| `container/tests/smoke.sh` | runs inside the image from a bind-mounted checkout (`docker run --rm -v "$PWD":/work -w /work <image> bash container/tests/smoke.sh`): tini PID 1, terraform/pwsh/PSScriptAnalyzer equal the Dockerfile's ARG defaults, ansible-core and every base pin as installed, `codeorca --version` = pyproject, `pip check`, no curl/gpg/unzip, the TF/PowerShell env, then on a temp COPY of `examples/reference`: `doctor`, `validate`, `plan-only`, `configure-local`, `demo-rollout` exit 3, `resume latest --approve` refused, both lints, no placeholder in specs/run dir; prints one `PASS:` line. Never writes to or runs git in the checkout |
+| `.dockerignore` | allow-list build context: `pyproject.toml`, `README.md`, `LICENSE`, `src/`, `container/requirements/` only |
 
 ## Conventions
 
@@ -451,6 +455,20 @@ Container (for the image phase):
 - OpenTofu images are `COPY --from` sources only (direct use unsupported since 1.10).
 - aws-vault's `--ecs-server` cannot serve a container (SDKs refuse non-loopback credential URLs); pass
   `AWS_*` by name on `docker run -e`, never `--env-file` or a value on the argv.
+- **Learned building it (2026-11-03):** the base has **no curl, gpg or unzip** (and no setuptools): downloads
+  happen in a `downloader` stage and only their results reach the final stage (`COPY --from`, or a
+  `RUN --mount=type=bind,from=…` for the Microsoft repo .deb, so it never lands in a layer). The base already pins
+  **every** code-orca dependency (jinja2, pydantic, ruamel.yaml 0.19.1, ansible-core, boto3), so
+  `container/requirements/codeorca.txt` has no packages; pip accepts an empty `-r` file, and an install under
+  `-c /usr/share/ansible-runtime/constraints.txt` with a pin that disagrees fails `ResolutionImpossible` (tested).
+  `--require-hashes` rejects an unhashed local wheel, so the wheel is a separate `pip install --no-deps`. Without a
+  hash-pinned setuptools, `pip wheel` build isolation would fetch an unhashed one: the builder uses
+  `--no-build-isolation`. `pip-compile` with no source argument compiles `pyproject.toml` into `./requirements.txt`
+  (a stray file in the checkout). PSScriptAnalyzer 1.25.0 is ~286 MB, 279 MB of it `compatibility_profiles/` (the
+  data the `PSUseCompatible*` rules read): kept, the image is ~1.24 GB (arm64; the base is ~612 MB). A git worktree's
+  `.git` is a file pointing at the main checkout's absolute host path, so git inside the container fails on a
+  worktree mount (and on Linux a root container sees a runner-owned checkout as "dubious ownership"): the smoke
+  test never calls git; the caller checks `git status --porcelain`.
 
 ## TODO (phases, from the design plan)
 
@@ -490,6 +508,7 @@ Container (for the image phase):
      through a helper or a `no_log` extra var today); a model field for it is a design decision, not done here.
    - **`specs/backend.yaml`** (plan 5.11): not rendered; the bootstrap step's `diff` output (run.json/result.json) is
      the record until a `source.backend` spec renderer (model field, schema, kind) exists.
-4. Container image on `ghcr.io/git-cgallagher/ansible-runtime`: the pyproject ranges (`pydantic`, `ruamel.yaml`,
-   `jinja2`) must be pinned exactly, with hashes, in `requirements/codeorca.txt` for the image; ranges are for pip users only.
+4. Container image on `ghcr.io/git-cgallagher/ansible-runtime` (in progress, Phase 4): the pyproject ranges are for
+   pip users only; in the image the base's `constraints.txt` fixes every version, and anything the base lacks is
+   hash-pinned in `container/requirements/codeorca.txt` (nothing today). amd64 is verified only in CI.
 5. Reference project end to end in CI; consumer guide; v0.1.0.

@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Container image (Phase 4): `container/Dockerfile` builds `code-orca-runtime` on ansible-runtime 1.3.0 with
+  Terraform 1.14.7 (GPG-verified release zip + its BSL 1.1 license), PowerShell 7.6.9 LTS + PSScriptAnalyzer 1.25.0
+  and the code-orca wheel under the base's pins (no venv, `pip check` in the build); `container/tests/smoke.sh`
+  checks the pins and runs the reference project end to end inside the image; the reference `runtime:` block lists
+  `boto3` (bootstrap-backend) and documents where each pin comes from.
 - Phase 3 review fixes: a helper's non-UTF-8 output file (UTF-16 `Out-File`, Latin-1) is rewritten scrubbed or
   deleted, never left raw, and `scan_outputs` reads UTF-16; `gate.max_age` also bounds when the gate started asking
   (`waiting_since`) and when the plan was made (`planned_at` in the binding); resume refuses a changed project

@@ -1,0 +1,262 @@
+name: image
+
+# The code-orca-runtime image (container/Dockerfile, target `runtime`), modelled on
+# ansible-runtime/.github/workflows/build.yml. See docs/CONTAINER.md.
+# PR: build on both architectures, smoke-test, scan. Nothing is pushed.
+# main (push, weekly schedule, manual run): the same, then :main; a push also gets :sha-<short>.
+# Tag vX.Y.Z (must equal pyproject.toml's version): :X.Y.Z, :X.Y, :latest, refusing to
+#   overwrite an existing :X.Y.Z. The index gets build provenance and an SPDX SBOM attestation.
+# Weekly: rebuild :main so Debian security updates land without a code change; a schedule
+#   runs on main, so it never produces a release tag.
+# A manual run on any other branch builds and tests only (PUBLISH is false there).
+on:
+  # No `paths:` filter on pull_request: `image (amd64)` and `image (arm64)` are meant to become
+  # required checks, and a required check whose workflow a path filter skipped stays "Expected"
+  # forever, blocking the PR (ansible-runtime has no filter for the same reason).
+  pull_request:
+  push:
+    branches: [main]
+    paths:
+      - 'container/**'
+      - 'src/**'
+      - 'pyproject.toml'
+      - '.github/workflows/image.yml'
+      - 'examples/reference/**'
+    tags: ['v*.*.*']
+  schedule:
+    - cron: '0 7 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  IMAGE: ghcr.io/git-cgallagher/code-orca-runtime
+  PUBLISH: ${{ github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) }}
+
+concurrency:
+  group: image-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# Every job sets timeout-minutes: GitHub's default is 6 hours, and a stalled apt, pip,
+# PowerShell Gallery or image pull would hold the runner that long. Each limit is several
+# times the job's expected slowest run (the image job is ansible-runtime's 30 plus the
+# Terraform and PowerShell layers).
+jobs:
+  # One job per architecture, each on a native runner (no QEMU). The job names
+  # `image (amd64)` and `image (arm64)` are meant to become required checks on the
+  # "main protection" ruleset once they have run once (that ruleset change is a separate,
+  # manual step; this workflow never edits rulesets). Do not rename them.
+  image:
+    name: image (${{ matrix.arch }})
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write  # push by digest (outside pull_request only)
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: The tag equals pyproject.toml's version
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          REF: ${{ github.ref_name }}
+        run: |
+          version=$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
+          if [ "${REF#v}" != "$version" ]; then
+            echo "::error::tag $REF does not match pyproject.toml version $version"
+            exit 1
+          fi
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069  # v4.4.1
+
+      # No build-args: the Dockerfile's ARG defaults (BASE_IMAGE, TF_VERSION, PWSH_VERSION,
+      # PSSA_VERSION) are the single source of truth for every pin.
+      - name: Build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc  # v7.4.0
+        with:
+          context: .
+          file: container/Dockerfile
+          target: runtime
+          platforms: linux/${{ matrix.arch }}
+          load: true
+          tags: code-orca-runtime:test
+          cache-from: type=gha,scope=${{ matrix.arch }}-runtime
+          cache-to: type=gha,mode=max,scope=${{ matrix.arch }}-runtime
+
+      - name: Smoke test
+        run: docker run --rm -v "$PWD":/work -w /work code-orca-runtime:test bash container/tests/smoke.sh
+
+      - name: The smoke test left the checkout clean
+        run: |
+          status=$(git status --porcelain)
+          if [ -n "$status" ]; then
+            echo "::error::the smoke test changed tracked or unignored files"
+            echo "$status"
+            exit 1
+          fi
+
+      - name: Scan for fixable critical vulnerabilities
+        if: matrix.arch == 'amd64'
+        uses: anchore/scan-action@27805bf3b4e84b4a5c980df22ed233c00390a439  # v7.4.2
+        with:
+          image: code-orca-runtime:test
+          severity-cutoff: critical
+          only-fixed: true
+          output-format: table
+
+      - name: Log in to GHCR
+        if: env.PUBLISH == 'true'
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6  # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Same inputs as the Build step, so it is all cache hits; only the push is new.
+      - name: Push by digest
+        id: push
+        if: env.PUBLISH == 'true'
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc  # v7.4.0
+        with:
+          context: .
+          file: container/Dockerfile
+          target: runtime
+          platforms: linux/${{ matrix.arch }}
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=${{ matrix.arch }}-runtime
+          provenance: false
+
+      - name: Record the digest
+        if: env.PUBLISH == 'true'
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/digests"
+          touch "$RUNNER_TEMP/digests/${DIGEST#sha256:}"
+      - if: env.PUBLISH == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: digest-runtime-${{ matrix.arch }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # Joins the two per-arch digests into one multi-arch index under the tags, then attests it.
+  manifest:
+    if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    needs: image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write      # the tags, and the attestations pushed next to the image
+      id-token: write      # Sigstore signing of the attestations
+      attestations: write  # the repository's attestation store
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: The tag equals pyproject.toml's version
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          REF: ${{ github.ref_name }}
+        run: |
+          version=$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
+          if [ "${REF#v}" != "$version" ]; then
+            echo "::error::tag $REF does not match pyproject.toml version $version"
+            exit 1
+          fi
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          pattern: digest-runtime-*
+          path: ${{ runner.temp }}/digests
+          merge-multiple: true
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069  # v4.4.1
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6  # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # main (push, schedule, dispatch): :main; a push to main also :sha-<short>.
+      # A tag: :X.Y.Z, :X.Y, :latest (the semver types only ever match a tag ref).
+      - name: Tags
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302  # v6.2.0
+        with:
+          images: ${{ env.IMAGE }}
+          flavor: |
+            latest=false
+          tags: |
+            type=raw,value=main,enable=${{ github.ref == 'refs/heads/main' }}
+            type=sha,prefix=sha-,enable=${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+
+      # GHCR tags are mutable. A release version must never be re-pointed: consumers pin it
+      # (codeorca.yaml's runtime.image), and the weekly rebuild only ever moves :main.
+      - name: Refuse to overwrite an existing release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          REF: ${{ github.ref_name }}
+        run: |
+          tag="$IMAGE:${REF#v}"
+          if docker buildx imagetools inspect "$tag" >/dev/null 2>&1; then
+            echo "::error::$tag already exists; release a new version instead"
+            exit 1
+          fi
+
+      - name: Create the multi-arch manifest
+        id: create
+        working-directory: ${{ runner.temp }}/digests
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          args=()
+          while IFS= read -r t; do [ -n "$t" ] && args+=(-t "$t"); done <<< "$TAGS"
+          if [ "${#args[@]}" -eq 0 ]; then echo "::error::no tags for $GITHUB_REF"; exit 1; fi
+          sources=()
+          for d in *; do sources+=("$IMAGE@sha256:$d"); done
+          if [ "${#sources[@]}" -ne 2 ]; then echo "::error::expected 2 digests, got ${#sources[@]}"; exit 1; fi
+          docker buildx imagetools create "${args[@]}" "${sources[@]}"
+          first=$(head -n1 <<< "$TAGS")
+          docker buildx imagetools inspect "$first"
+          echo "digest=$(docker buildx imagetools inspect "$first" --format '{{json .Manifest.Digest}}' | tr -d '"')" >> "$GITHUB_OUTPUT"
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.create.outputs.digest }}
+          push-to-registry: true
+
+      # syft resolves the index to the runner's platform, so the SBOM lists the linux/amd64
+      # image's contents; the two arches are built from the same pins.
+      - name: SBOM (SPDX)
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c  # v0.24.3
+        with:
+          image: ${{ env.IMAGE }}@${{ steps.create.outputs.digest }}
+          registry-username: ${{ github.actor }}
+          registry-password: ${{ secrets.GITHUB_TOKEN }}
+          format: spdx-json
+          output-file: ${{ runner.temp }}/sbom.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: Attest the SBOM
+        uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e  # v4.1.0
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.create.outputs.digest }}
+          sbom-path: ${{ runner.temp }}/sbom.spdx.json
+          push-to-registry: true

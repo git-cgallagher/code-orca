@@ -9,8 +9,10 @@ name: image
 #   (a backport or two racing tags never move them backwards). An existing :X.Y.Z is never
 #   re-pointed (.github/ci/refuse-overwrite.sh), except by a re-run with the same digests. The
 #   index gets build provenance and an SPDX SBOM attestation.
-# Weekly: rebuild :main so Debian security updates land without a code change; a schedule
-#   runs on main, so it never produces a release tag.
+# Weekly: re-run the build, smoke test and grype against a fresh vulnerability database, and
+#   re-push :main. It does NOT pick up Debian security updates: the base is pinned by digest and
+#   the layers come from the cache, so the image only changes when the base digest is bumped
+#   (Dependabot's docker entry). A schedule runs on main, so it never produces a release tag.
 # A manual run on any other branch builds and tests only (PUBLISH is false there).
 on:
   # No `paths:` filter on pull_request: `image (amd64)` and `image (arm64)` are meant to become
@@ -108,11 +110,13 @@ jobs:
       - name: Smoke test
         run: docker run --rm -v "$PWD":/work -w /work code-orca-runtime:test bash container/tests/smoke.sh
 
+      # --ignored: the checkout is fresh, so even an ignored path (examples/reference/.codeorca,
+      # specs, .terraform: where a misdirected run would write, root-owned) must not appear.
       - name: The smoke test left the checkout clean
         run: |
-          status=$(git status --porcelain)
+          status=$(git status --porcelain --ignored)
           if [ -n "$status" ]; then
-            echo "::error::the smoke test changed tracked or unignored files"
+            echo "::error::the smoke test changed the checkout (tracked, untracked or ignored files)"
             echo "$status"
             exit 1
           fi

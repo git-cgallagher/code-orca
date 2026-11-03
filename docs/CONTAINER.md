@@ -95,13 +95,15 @@ CODEORCA_IMAGE=ghcr.io/git-cgallagher/code-orca-runtime:X.Y.Z bin/codeorca docto
 |---|---|---|
 | pull request (every PR: no path filter, so the checks can be required) | amd64 + arm64 | nothing |
 | push to `main` touching `container/**`, `src/**`, `pyproject.toml`, the workflow or `examples/reference/**` | amd64 + arm64 | `:main`, `:sha-<short>` |
-| weekly schedule (Monday 07:00 UTC, on `main`) | amd64 + arm64 | `:main` only (Debian security updates; never a release tag) |
+| weekly schedule (Monday 07:00 UTC, on `main`) | amd64 + arm64 (grype with a fresh vulnerability database) | `:main` only, never a release tag. Not a Debian update: the base is pinned by digest and the layers come from the cache, so the image changes only when the base digest is bumped (Dependabot's `docker` entry) |
 | manual run (`workflow_dispatch`) | amd64 + arm64 | `:main` on `main`; nothing on any other branch |
 | tag `vX.Y.Z` (strict, on `main`) | amd64 + arm64 | `:X.Y.Z`; `:X.Y` and `:latest` only when it is the highest release of its line / overall |
 
 Each architecture builds on its own native runner (`image (amd64)` on `ubuntu-24.04`, `image (arm64)` on
 `ubuntu-24.04-arm`), loads the image, runs the smoke test from the checkout, checks the checkout is still clean,
-and scans with grype (amd64, failing on a fixable critical finding). Outside pull requests each pushes its image
+and scans with grype (amd64, failing on a fixable critical finding). "Still clean" is `git status --porcelain --ignored`:
+the checkout is fresh, so even an ignored path a misdirected run would write (`examples/reference/.codeorca`, `specs`)
+fails the job. Outside pull requests each pushes its image
 by digest; the `manifest` job joins the two digests under the tags, then attaches build provenance
 (`actions/attest-build-provenance`) and an SPDX SBOM (`anchore/sbom-action` + `actions/attest-sbom`) to the
 multi-arch index, both pushed to the registry. `image (amd64)` and `image (arm64)` are meant to be required

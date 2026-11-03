@@ -54,6 +54,10 @@ def test_both_build_steps_pass_the_same_label_build_args():
     assert names == {"IMAGE_VERSION", "IMAGE_REVISION"}  # never a pin: the ARG defaults are the pins
 
 
+def test_clean_checkout_check_sees_ignored_files():
+    assert "git status --porcelain --ignored" in step("image", "The smoke test left the checkout clean")["run"]
+
+
 def test_release_checks_run_in_both_jobs_on_a_full_checkout():
     for job in ("image", "manifest"):
         checkout = steps(job)[0]

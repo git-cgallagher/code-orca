@@ -1,5 +1,5 @@
 # yaml-language-server: $schema=../../../schema/codeorca-workflow.schema.json
-# Runs end to end in Phase 2: configure this machine with the reference role (connection: local, writes only
+# Runs end to end (in CI): configure this machine with the reference role (connection: local, writes only
 # under `config_dir`, outside the repository), then render the redacted Ansible host spec.
 # `codeorca run configure-local -p examples/reference/codeorca.yaml` needs ansible-core
 # (`pip install 'code-orca[ansible]'`) and CODEORCA_REDACTION_KEY in the environment.

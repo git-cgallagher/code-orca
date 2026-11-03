@@ -1,9 +1,20 @@
 """codeorca command line (plan section 5.1).
 
 Phase 1 ships ``validate``, ``schema export``, ``run``, ``drift``, ``doctor``, ``render``, ``summary`` and
-``runs gc``; Phase 2 adds ``lint ansible``. ``resume`` arrives with the gate (Phase 3). Every command that touches a
-project takes ``-p/--project codeorca.yaml`` (default: ``./codeorca.yaml``; optional for ``lint ansible``, which
-then uses the default key denylist); paths in the project file resolve against it.
+``runs gc``; Phase 2 adds ``lint ansible``; Phase 3 adds ``resume`` and ``lint powershell`` and registers the
+``gate``, ``python`` and ``powershell`` executors. Every command that touches a project takes
+``-p/--project codeorca.yaml`` (default: ``./codeorca.yaml``; optional for ``lint ansible``, which then uses the
+default key denylist); paths in the project file resolve against it.
+
+Secrets (plan 5.9): the run's registry takes the SSM-backed redaction key (``ssm_key_fetcher``; the
+``CODEORCA_REDACTION_KEY`` variable wins when set and SSM is then never called), and one SSM resolver per run (and
+per resume) is handed to the helper executors (``env: {X: {secret: ssm:/...}}``) and the terraform step (a stack's
+``secrets:``) and to ``drift``. Without boto3 the resolver is ``None`` and only a step that needs a secret fails.
+
+The approval invariant: nothing here can make a gate or ``resume`` believe it has a terminal. The gate executor and
+``resume`` are built with their defaults (``os.isatty``, the real prompt); no option, flag or environment variable
+is wired to ``isatty``/``prompt``, and secret inputs a resume needs are asked with ``getpass`` on the terminal,
+never taken from the command line.
 """
 
 from __future__ import annotations
@@ -74,24 +85,38 @@ def _table(rows: list[list[str]], header: list[str]) -> str:
 
 
 def _registry(project: Project, env: Mapping[str, str]):
-    from codeorca.secrets import RedactionKeyMissing, build_registry
+    from codeorca.secrets import RedactionKeyMissing, build_registry, ssm_key_fetcher
 
     try:
-        return build_registry(project, env)
+        # the fetcher is only called when CODEORCA_REDACTION_KEY is unset and the project names redaction.hmac_key
+        return build_registry(project, env, key_fetcher=ssm_key_fetcher(project))
     except RedactionKeyMissing as e:
         raise CliError(str(e)) from None
 
 
-def _executors(registry) -> dict:
+def _resolver(project: Project, registry):
+    """The run's ``ssm:/`` resolver (every value registered before it is returned), or ``None`` without boto3.
+    Lazy: no AWS call happens until a step needs a secret."""
+    from codeorca.providers import make_resolver
+
+    return make_resolver(project, registry)
+
+
+def _executors(registry, resolver=None) -> dict:
     from codeorca.steps import ansible as ansible_step
-    from codeorca.steps import default_executors
+    from codeorca.steps import default_executors, powershell_step, python_step
+    from codeorca.steps import gate as gate_step
     from codeorca.steps import spec_render as spec_render_step
     from codeorca.steps import terraform as terraform_step
 
     executors = default_executors()
-    executors["terraform"] = terraform_step.make_executor(registry)
+    executors["terraform"] = terraform_step.make_executor(registry, resolver)
     executors["ansible"] = ansible_step.make_executor(registry)
     executors["spec-render"] = spec_render_step.make_executor(registry)
+    # the real terminal only: isatty/prompt are injectable for tests and are NEVER wired to an option here
+    executors["gate"] = gate_step.make_executor(registry)
+    executors["python"] = python_step.make_executor(registry, resolver)
+    executors["powershell"] = powershell_step.make_executor(registry, resolver)
     # passed to Runner explicitly, never register()ed process-wide: the executors close over this run's registry
     return executors
 
@@ -145,7 +170,7 @@ def cmd_schema_export(args: argparse.Namespace) -> int:
 
 def cmd_run(args: argparse.Namespace) -> int:
     from codeorca.rundir import RunDir
-    from codeorca.runner import EXIT_FAILED, InputError, RunError, Runner, resolve_inputs
+    from codeorca.runner import EXIT_FAILED, EXIT_WAITING, InputError, RunError, Runner, resolve_inputs
     from codeorca.secrets import key_denylist, line_hook, record_filter, seed_inputs
 
     project = _project(args)
@@ -169,12 +194,13 @@ def cmd_run(args: argparse.Namespace) -> int:
             workflow,
             inputs,
             run_dir,
-            _executors(registry),
+            _executors(registry, _resolver(project, registry)),
             dry_run=args.dry_run,
             env=env,
             stream=line_hook(registry),
             redact=record_filter(registry, denylist),
             cwd=project.root,
+            key_id=registry.key_id,
         )
     except RunError as e:
         shutil.rmtree(run_dir.path, ignore_errors=True)  # nothing ran and no run.json exists: leave no empty run
@@ -187,6 +213,11 @@ def cmd_run(args: argparse.Namespace) -> int:
         return EXIT_FAILED
     print(_status_table(runner.record(finished=True), registry))
     print(f"run {run_dir.run_id}: {runner.status} (exit {code}); run dir {run_dir.path}")
+    if code == EXIT_WAITING:
+        print(
+            f"run {run_dir.run_id}: waiting at a gate; a human continues it on a terminal: "
+            f"codeorca resume {run_dir.run_id} --approve|--reject -p {args.project}"
+        )
     return code
 
 
@@ -211,6 +242,7 @@ def cmd_drift(args: argparse.Namespace) -> int:
     project = _project(args)
     env = dict(os.environ)
     registry = _registry(project, env)
+    resolver = _resolver(project, registry)
     wanted = list(args.stack) if args.stack else list(project.stack_order())
     unknown = sorted(set(wanted) - set(project.stacks))
     if unknown:
@@ -236,7 +268,9 @@ def cmd_drift(args: argparse.Namespace) -> int:
         verdict, detail, spec = "error", "", ""
         try:
             with ExitStack() as resources:
-                session = open_session(project, name, registry, step_dir, env, resources, lock=False)
+                session = open_session(
+                    project, name, registry, step_dir, env, resources, lock=False, resolve_secret=resolver
+                )
                 try:
                     session.init()
                     outcome = plan_stack(session, lock=False, run_id=run_dir.run_id, step_id=step_id)
@@ -423,6 +457,150 @@ def cmd_lint_ansible(args: argparse.Namespace) -> int:
     return rc
 
 
+def _parse_fields(pairs: list[str]) -> dict[str, str]:
+    fields: dict[str, str] = {}
+    for pair in pairs:
+        key, sep, value = pair.partition("=")
+        if not sep or not key:
+            raise CliError(f"--field expects k=v, got {pair!r}")
+        fields[key] = value
+    return fields
+
+
+def _ask_secret_inputs(names: list[str]) -> dict[str, str]:
+    """Ask for each secret input on the terminal, not echoed (``getpass``). Never a flag: a value on the argv
+    would land in ``ps`` and shell history."""
+    import getpass
+
+    values: dict[str, str] = {}
+    for name in names:
+        values[name] = getpass.getpass(f"input {name} (recorded redacted; type it again, not echoed): ")
+    return values
+
+
+def _ask_secret_fields(names: list[str]) -> dict[str, str]:
+    """Ask for each gate field named like a secret on the terminal, not echoed; an empty answer leaves the field
+    to its default (or to the required-field refusal)."""
+    import getpass
+
+    values: dict[str, str] = {}
+    for name in names:
+        value = getpass.getpass(f"field {name} (named like a secret; not echoed, empty for none): ")
+        if value:
+            values[name] = value
+    return values
+
+
+def _confirm_approval() -> None:
+    """The approver confirms on the terminal, after seeing what the approval binds."""
+    try:
+        answer = input("type approve to confirm (anything else changes nothing): ")
+    except EOFError:
+        answer = ""
+    if answer.strip().lower() != "approve":
+        raise CliError("resume: not confirmed; nothing was changed")
+
+
+def cmd_resume(args: argparse.Namespace) -> int:
+    from codeorca.resume import (
+        TTY_REFUSAL,
+        ResumeRefused,
+        describe_gate,
+        needed_secret_inputs,
+        resume,
+        waiting_gate,
+    )
+    from codeorca.runner import EXIT_FAILED
+    from codeorca.secrets import key_denylist, line_hook, record_filter
+    from codeorca.steps.gate import is_terminal, secret_field_names
+
+    # First, before anything is read or fetched: an agent or a pipe gets the refusal and nothing else. resume()
+    # checks again; neither check takes an option (the approval invariant).
+    if not is_terminal(os.isatty):
+        raise CliError(TTY_REFUSAL)
+    decision = "approve" if args.approve else "reject"
+    fields = _parse_fields(args.field)
+    project = _project(args)
+    run_dir = _existing_run(project, args.run_id)
+    record = run_dir.read_run() or {}
+    workflow_name = str(record.get("workflow") or "")
+    if not workflow_name:
+        raise CliError(f"run {run_dir.run_id}: no workflow recorded")
+    path = _workflow_file(project, workflow_name)
+    try:
+        workflow = load_workflow(path)
+    except ValidationError as e:
+        raise CliError(f"{path}: INVALID\n{e}") from None
+    denylist = key_denylist(project)
+    gate = waiting_gate(workflow, record) if record.get("status") == "waiting" else None
+    secret_fields = secret_field_names(gate.fields, denylist) if gate is not None else []
+    on_argv = sorted(set(fields) & set(secret_fields))
+    if on_argv:
+        # the value would already be in ps and shell history: refuse, and ask on the terminal instead
+        raise CliError(
+            f"--field {', '.join(on_argv)}: named like a secret, so it is asked on the terminal (not echoed), "
+            "never taken from the command line"
+        )
+    env = dict(os.environ)
+    registry = _registry(project, env)
+    secret_inputs: dict[str, str] = {}
+    if gate is not None:  # otherwise resume() refuses; asking first would be pointless
+        secret_inputs = _ask_secret_inputs(needed_secret_inputs(workflow, record))
+        if decision == "approve":
+            asked = _ask_secret_fields(secret_fields)
+            for value in asked.values():  # before anything could print one (a field error, a refusal)
+                registry.add(value)
+            fields.update(asked)
+            print(describe_gate(run_dir, gate))
+            _confirm_approval()
+    print(f"resume {run_dir.run_id}: {workflow.name} ({path}): {decision}")
+    try:
+        code = resume(
+            project,
+            run_dir,
+            decision,
+            fields=fields,
+            executors=_executors(registry, _resolver(project, registry)),
+            secret_inputs=secret_inputs,
+            workflow=workflow,
+            env=env,
+            stream=line_hook(registry),
+            redact=record_filter(registry, denylist),
+            registry=registry,
+            cwd=project.root,
+        )
+    except ResumeRefused as e:
+        raise CliError(f"resume refused: {registry.redact(str(e))}") from None
+    except KeyboardInterrupt:
+        print(f"run {run_dir.run_id}: interrupted", file=sys.stderr)
+        return EXIT_FAILED
+    run = run_dir.read_run() or {}
+    print(_status_table(run, registry))
+    print(f"run {run_dir.run_id}: {run.get('status')} (exit {code}); run dir {run_dir.path}")
+    return code
+
+
+def cmd_lint_powershell(args: argparse.Namespace) -> int:
+    from codeorca.steps.powershell_step import ansible_pslint_settings, lint_powershell
+
+    for raw in args.paths:
+        if not Path(raw).exists():
+            raise CliError(f"lint: {raw} is neither a file nor a directory")
+    settings = None
+    if args.ansible_settings:
+        settings = ansible_pslint_settings()
+        if settings is None:
+            raise CliError("--ansible-settings needs ansible-core installed (pip install 'code-orca[ansible]')")
+    findings = lint_powershell(args.paths, settings)
+    rc = 0
+    for f in findings:
+        print(f"{f['file']}:{f['line']} {f['rule']} {f['level']} {f['message']}")
+        if f["level"] in ("warning", "error"):
+            rc = 1
+    print(f"lint: {len(findings)} finding(s); exit {rc}", file=sys.stderr)
+    return rc
+
+
 # -------------------------------------------------------------------------------------------------- parser
 
 
@@ -446,12 +624,46 @@ def build_parser() -> argparse.ArgumentParser:
     e.add_argument("--check", action="store_true", help="fail if a committed schema differs from the models")
     e.set_defaults(func=cmd_schema_export)
 
-    r = sub.add_parser("run", help="run a workflow (a file path or <workflows_dir>/<name>.yaml)")
+    r = sub.add_parser(
+        "run",
+        help="run a workflow (a file path or <workflows_dir>/<name>.yaml)",
+        description=(
+            "Run a workflow. Exit 0 succeeded, 1 failed, 3 waiting at a gate. A gate asks only when stdin AND "
+            "stdout are terminals: with a piped stdout (an agent, CI, `| tee`) the run stops at the gate (exit 3) "
+            "and a human continues it on a terminal with `codeorca resume <run-id> --approve` (or --reject). No "
+            "flag or environment variable approves without a terminal."
+        ),
+    )
     r.add_argument("workflow")
     _add_project(r)
     r.add_argument("--input", action="append", default=[], metavar="K=V")
     r.add_argument("--dry-run", action="store_true")
     r.set_defaults(func=cmd_run)
+
+    rs = sub.add_parser(
+        "resume",
+        help="decide a run waiting at a gate (on a terminal only), then finish the run",
+        description=(
+            "Decide the gate a run is waiting at and finish the run. Needs an interactive terminal on stdin AND "
+            "stdout for either decision; there is no flag or environment variable that bypasses this. Secret "
+            "inputs the remaining steps need (recorded redacted) and gate fields named like secrets are asked for "
+            "on the terminal, not echoed. --approve shows what the approval binds (message, specs, plan files "
+            "with their sha256, waived deletes) and asks you to type approve to confirm."
+        ),
+    )
+    rs.add_argument("run_id", help="a run id or 'latest'")
+    decide = rs.add_mutually_exclusive_group(required=True)
+    decide.add_argument("--approve", action="store_true", help="approve the gate (the plan files it recorded)")
+    decide.add_argument("--reject", action="store_true", help="reject: the gate fails, its dependents are omitted")
+    rs.add_argument(
+        "--field",
+        action="append",
+        default=[],
+        metavar="K=V",
+        help="a typed gate field (approve only; never a field named like a secret: those are asked)",
+    )
+    _add_project(rs)
+    rs.set_defaults(func=cmd_resume)
 
     d = sub.add_parser(
         "drift", help="plan every stack (no lock), refresh specs, verdict table: 0 clean, 2 drift, 1 error"
@@ -485,6 +697,17 @@ def build_parser() -> argparse.ArgumentParser:
     la.add_argument("paths", nargs="+", help="playbooks, task files or directories (searched for *.yml/*.yaml)")
     la.add_argument("-p", "--project", help="take the key and lookup denylists from this project file")
     la.set_defaults(func=cmd_lint_ansible)
+    lp = lsub.add_parser(
+        "powershell",
+        help="PSScriptAnalyzer over PowerShell helpers; exit 1 on any warning or error finding",
+    )
+    lp.add_argument("paths", nargs="+", help="scripts or directories (searched recursively)")
+    lp.add_argument(
+        "--ansible-settings",
+        action="store_true",
+        help="use ansible-test's pslint settings (needs ansible-core), so a helper can move into a collection as is",
+    )
+    lp.set_defaults(func=cmd_lint_powershell)
 
     runs = sub.add_parser("runs", help="run directory housekeeping")
     rsub = runs.add_subparsers(dest="runs_command", required=True)

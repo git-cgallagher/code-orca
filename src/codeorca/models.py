@@ -4,8 +4,8 @@ Design rules baked in here (see AGENTS.md):
 - ``extra='forbid'`` everywhere: an unknown key is an error, never silently ignored.
 - Step types are a discriminated union on ``type``.
 - The Terraform ``action`` enum is the deny floor: destroy, import, state surgery, -target and -auto-approve
-  are not expressible in a ``terraform`` step at all. A helper (``shell`` today, ``python``/``powershell`` later)
-  is trusted code and may run any program; the ``shell`` executor still runs ``policy.check_argv`` over an argv
+  are not expressible in a ``terraform`` step at all. A helper (``shell``, ``python``, ``powershell``) is trusted
+  code and may run any program; the ``shell`` executor still runs ``policy.check_argv`` over an argv
   whose program is ``terraform``/``tofu``, so the literal ``run: [terraform, destroy]`` is refused too.
 - ``apply`` requires a ``plan_file``: a bare apply is denied.
 - Cross-step output references (``${{ steps.x.outputs.y }}``) must name a declared output of a step this step
@@ -73,6 +73,9 @@ class Terraform(StepBase):
     def _apply_needs_plan_file(self):
         if self.action == "apply" and not self.plan_file:
             raise ValueError("apply requires plan_file (a bare apply is denied)")
+        if self.action in ("apply", "migrate_backend") and self.var_overrides:
+            # an apply runs the reviewed plan file, which already carries every variable value
+            raise ValueError(f"{self.action} takes no var_overrides (the reviewed plan file carries the variables)")
         return self
 
 
@@ -134,13 +137,49 @@ class Shell(StepBase):
     run: list[str]  # argv array, never a shell string
 
 
+class GateField(BaseModel):
+    """A typed value the approver types at the gate; exposed as ``steps.<gate>.outputs.<name>``."""
+
+    model_config = ConfigDict(extra="forbid")
+    type: Literal["string", "int", "bool"] = "string"
+    required: bool = False
+    default: str | int | bool | None = None
+
+    @model_validator(mode="after")
+    def _default_matches_type(self):
+        d = self.default
+        if d is None:
+            return self
+        ok = {
+            "string": isinstance(d, str),
+            "int": isinstance(d, int) and not isinstance(d, bool),
+            "bool": isinstance(d, bool),
+        }[self.type]
+        if not ok:
+            raise ValueError(f"default {d!r} is not a {self.type}")
+        return self
+
+
 class Gate(StepBase):
     type: Literal["gate"]
     message: str
     on_timeout: Literal["fail", "cancel", "warn"] = "fail"
     non_interactive: Literal["wait", "fail"] = "wait"
     allow_delete_of: list[str] = []
-    fields: dict[str, dict] = {}
+    fields: dict[Annotated[str, Field(pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")], GateField] = {}
+
+    @model_validator(mode="after")
+    def _gate_rules(self):
+        if self.on_failure == "continue":
+            # a rejected gate must block its dependents; `continue` would count a rejection as met
+            raise ValueError("a gate cannot use on_failure: continue (a rejection must block its dependents)")
+        if self.retry.limit:
+            # a typed reject or a timeout is final; a retry would ask again (and restart the timeout)
+            raise ValueError("a gate cannot use retry (a rejection or a timeout is final)")
+        clash = sorted(set(self.fields) & IMPLICIT_OUTPUTS["gate"])
+        if clash:
+            raise ValueError(f"gate fields may not be named {', '.join(clash)} (implicit gate outputs)")
+        return self
 
 
 class PlayScope(BaseModel):
@@ -257,6 +296,9 @@ class Workflow(BaseModel):
                 if n not in ids:
                     raise ValueError(f"{s.id}: needs unknown step {n}")
         for s in self.finally_:
+            if s.type == "gate":
+                # a gate there would leave the run 'succeeded' (exit 0) with an unanswered gate nobody can resume
+                raise ValueError(f"finally step {s.id}: a gate is not allowed in finally (put it in steps)")
             if s.needs:
                 # finally steps always run after the main graph; their status functions describe the run
                 raise ValueError(f"finally step {s.id}: needs is not allowed on a finally step (they always run last)")
@@ -270,7 +312,11 @@ class Workflow(BaseModel):
             tuple(graphlib.TopologicalSorter(graph).static_order())
         except graphlib.CycleError as e:
             raise ValueError(f"dependency cycle: {e.args[1]}") from None
-        declared = {s.id: set(s.outputs) | IMPLICIT_OUTPUTS[s.type] for s in self.steps}
+        # a gate's typed fields are outputs too (the approver's answers)
+        declared = {
+            s.id: set(s.outputs) | IMPLICIT_OUTPUTS[s.type] | (set(s.fields) if s.type == "gate" else set())
+            for s in self.steps
+        }
         for s in [*self.steps, *self.finally_]:
             for text in _walk_strings(s.model_dump(by_alias=True, exclude={"outputs"})):
                 for sid, out in STEP_REF.findall(text):

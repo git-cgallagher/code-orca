@@ -14,10 +14,14 @@ Consumers keep their own `codeorca.yaml`, `workflows/`, `specs/` in their own (u
 
 | Path | What |
 |---|---|
-| `src/codeorca/models.py` | Pydantic v2 models: the single source of truth for workflow files and the JSON Schema |
+| `src/codeorca/models.py` | Pydantic v2 models: the single source of truth for workflow files and the JSON Schema (a gate refuses `on_failure: continue` and `retry`, and is not allowed in `finally`) |
 | `src/codeorca/config.py` | YAML 1.2 loader (ruamel, pure) |
-| `src/codeorca/cli.py` | `codeorca validate`, `schema export [--check]` (workflow + project schemas), `run` (registers the terraform, ansible and spec-render executors), `drift`, `doctor`, `render`, `summary`, `runs gc`, `lint ansible` (`-p` optional there); every project command takes `-p` |
-| `src/codeorca/secrets.py` | run-wide redaction wiring: `build_registry` (HMAC key from `CODEORCA_REDACTION_KEY` in this phase, fail-closed; seeds from `AWS_SECRET_ACCESS_KEY`/`AWS_SESSION_TOKEN` + every stack's `secrets:`/`required_env` values), `seed_inputs` (inputs whose name matches the key denylist), `line_hook` for `Runner(stream=)`, `record_filter` for `Runner(redact=)`, `terraform_stream` (a `StreamRedactor` per channel) for `TerraformRunner(stream=)` |
+| `src/codeorca/cli.py` | `codeorca validate`, `schema export [--check]` (workflow + project schemas), `run` (registers the terraform, ansible, spec-render, gate, python and powershell executors; one SSM resolver per run, `make_resolver`, handed to the helpers and the terraform step), `resume <run-id\|latest> (--approve [--field k=v] \| --reject)` (terminal check first, before anything is read; secret inputs via `getpass` from `resume.needed_secret_inputs`, never a flag; `--field` refused for a field named like a secret, which is asked with `getpass` instead; `--approve` prints `describe_gate` and asks for a typed `approve`; `run` records `redaction_key_id`), `drift` (stack secrets through the resolver too), `doctor`, `render`, `summary`, `runs gc`, `lint ansible` (`-p` optional there), `lint powershell <paths> [--ansible-settings]`; every project command takes `-p`; the registry gets `key_fetcher=ssm_key_fetcher(project)`. Nothing here passes `isatty=`/`prompt=` (a test greps the source) |
+| `src/codeorca/secrets.py` | run-wide redaction wiring: `build_registry(project, env, *, key_fetcher=None)` (HMAC key: `CODEORCA_REDACTION_KEY` when set, SSM not called; else the SecureString `redaction.hmac_key` through `key_fetcher` = `ssm_key_fetcher(project)`, key id `<ref>@<version>`; else fail closed naming the parameter; seeds from `AWS_SECRET_ACCESS_KEY`/`AWS_SESSION_TOKEN` + every stack's `secrets:`/`required_env` values), `seed_inputs` (inputs whose name matches the key denylist), `line_hook` for `Runner(stream=)`, `record_filter` for `Runner(redact=)`, `terraform_stream` (a `StreamRedactor` per channel) for `TerraformRunner(stream=)` |
+| `src/codeorca/providers/` | secret providers (plan 5.9): `ssm.py` (`SSMSecrets(registry, *, session_factory, region, timeout_s)`: `get`/`resolve_secret`/`fetch`, a SecureString or any value fetched as a secret registered before it is returned, per-run in-memory cache, `__reduce__` raises; `fetch_parameter`, `aws_config` (connect/read timeout, `retries={'max_attempts': 2}`), `call_with_deadline` (wall-clock limit on a daemon thread, covers a hung credential provider); errors carry the parameter + error code only); `__init__.py` `make_resolver(project, registry)` (`None` without boto3), `make_secrets`, `declared_secret_refs`, `NO_PROVIDER_MESSAGE`; boto3 is the `aws` extra, imported lazily |
+| `src/codeorca/bootstrap/s3.py` | S3 state-backend bootstrap (plan 5.11; `python -m codeorca.bootstrap.s3 --project … [--dry-run] [--output-file]`, `main(argv)`, `bootstrap(project, *, dry_run, session_factory, timeout_s)`): refuses a local backend and a caller outside `backend.account_id`, creates the bucket, refuses an Object Lock default retention before any write, converges public access block / versioning / encryption / TLS-only policy statement (Sid `CodeOrcaDenyInsecureTransport`, merged) / noncurrent-expiry lifecycle rule (merged by ID) / `managed-by=code-orca` tag, writes each stack's `backend.hcl` (`backend_settings`, `render_backend_hcl`); output `{bucket, region, account_id, created, changed, dry_run, backend_files, diff, notes}`; never touches objects |
+| `examples/reference/helpers/bootstrap_backend.py`, `examples/reference/workflows/bootstrap-backend.yaml` | the reference bootstrap workflow (a `python` step wrapping `codeorca.bootstrap.s3.main`, its `diff` an output, then a terraform `validate` per stack); validates in CI; a test runs it through the real python step, which refuses the reference project's local backend |
+| `tests/providers/`, `tests/bootstrap/` | SSM provider, SSM redaction key and bootstrap tests over moto (`mock_aws` + fake credentials + `AWS_CONFIG_FILE` emptied in an autouse conftest, so a developer's aws-vault profile never engages); never real AWS |
 | `src/codeorca/doctor.py` | `codeorca doctor`: tiny dependency-free version matcher (`exact`, `>=,<`, `7.6.*`, `*`), injectable probes, table / `--json` / `--lock` output |
 | `src/codeorca/specs/` | spec rendering: `__init__.py` (`render_spec_yaml`, `write_spec` + `.meta.yaml` sidecar + the post-write gate, `build_header`, `NEVER_RENDERED`), `terraform_plan.py` (`seed_registry`, `build_plan_document`: merge_unknown -> placeholder mask -> schema mask -> value scrub + key denylist on value trees only, provenance from `configuration.*.expressions`, `never_render`) |
 | `src/codeorca/specs/ansible_vars.py` | the Ansible host spec's **inventory scope**, run as a subprocess (`python -m codeorca.specs.ansible_vars --inventory … --host … [--roles-path …] [--lookup-denylist] [--key-denylist] [--template] [--extra-vars-file] [--play-hosts] [--resolve-lookup]`): one JSON document on stdout (fd 1 is parked, ansible's own output goes to stderr), `declared`/`resolved`/`source` per var templated key by key, `<secret: declared>` from `meta/argument_specs.yml` or `meta/main.yml`'s `argument_specs` (`no_log`, nested too, OR-ed over every role and entry point), `<skipped: key matches denylist>`, `<vault>` (never decrypted), `<skipped: lookup <fqcn> is a secret source>` (lookup denylist by raw name and FQCN, denylist-named arguments, non-literal plugin names), nested denylist-named leaves masked for templating, argument-spec enrichment, `--template` files rendered like the `template` action with the markers in place (a template whose text calls a denied lookup is a marker), extra vars overlaid on top; provenance derived from the `group_vars`/`host_vars` files `DataLoader.find_vars_files` selects; underscore keys (`_play_hosts`, `_lookup_fqcns`, `_skipped_templates`) for the caller only |
@@ -25,7 +29,10 @@ Consumers keep their own `codeorca.yaml`, `workflows/`, `specs/` in their own (u
 | `src/codeorca/specs/ansible_host.py` | pure side of the host spec: `run_vars_subprocess` (stdout in memory, stderr to a callback, no redaction key in the child), `build_host_document` (registry scrub + key denylist over value trees only), `header_for`, `render_play_scope_playbook` (**play scope**: check-mode play with `import_role` + `when: false` per role, `template` tasks with `ignore_errors` + `copy content: to_nice_json` of an allow list), `marker_vars`, `parse_play_scope_events` over the adapter's JSONL (`not run` for an expected task with no result) |
 | `src/codeorca/lint/` | `lint_playbooks(paths, key_denylist, lookup_denylist)` -> `{file, line, rule, level, message}`: `no-hostvars-dump`, `debug-secret-name`, `secret-to-plain-param` (module `no_log` from DOCUMENTATION plus a source scan of `argument_spec`; `resolve_module` injectable), `unknown-module` (info), `redundant-task-no-log` (info) |
 | `tests/specs/test_ansible_host*.py`, `tests/lint/`, `tests/fixtures/ansible_host/` | host spec and lint tests; the fixture inventory (2 hosts, templated/int/vaulted/lookup/password-named vars, `roles/app_config` with an argument spec and a template; the vault password is the placeholder `vault-pass.txt`); the subprocess and installed-module tests skip without ansible-core (`pip install -e '.[ansible]'`) |
-| `src/codeorca/steps/terraform.py` | the `terraform` executor (`make_executor(registry)`): stack resolution, per-stack flock, non-secret backend config, pre-plan registration of sensitive `var_overrides` / `TF_VAR_*`, `init` (`-lockfile=readonly` under `CI`), `validate`/`plan`/`output`/`test`; `apply` and `migrate_backend` fail with the Phase 3 message; `open_session` + `plan_stack` are what `codeorca drift` reuses |
+| `src/codeorca/steps/terraform.py` | the `terraform` executor (`make_executor(registry, resolve_secret=None)`): stack resolution, the stack's `secrets:` resolved into the child env only and registered first (`resolve_stack_secrets`; before `required_env` is checked; no resolver -> `NO_PROVIDER_MESSAGE`, `SSMError` -> its value-free message), per-stack flock, non-secret backend config (`backend_config` = `bootstrap.s3.backend_settings` for s3), pre-plan registration of sensitive `var_overrides` / `TF_VAR_*`, `init` (`-lockfile=readonly` under `CI`), `validate`/`plan`/`output`/`test`; `apply` (`apply_step`: `resolve_plan_file` = this run's own plan output for the stack, `find_approval` = an approving gate the step transitively needs whose recorded sha256 matches, `check_approval_age` against `gate.max_age`, `show -json` seeds the registry, applyable/complete check, plan gate again with the gate's `allow_delete_of`, adapter apply, redacted `tf_outputs`, plan file deleted; retries only after a lock error before any change, via `apply-attempt.json`; `--dry-run` = skipped) and `migrate_backend` (`migrate_step`/`migrate_stack`: approving gate, `state list` probe of the target from a temp copy of the stack, then `init -migrate-state -force-copy` without `-json`); `open_session` + `plan_stack` are what `codeorca drift` reuses |
+| `src/codeorca/steps/gate.py` | the `gate` executor (`make_executor(registry, *, prompt, isatty, out, getuser, secret_prompt)`): `--dry-run` auto-approves (`approver: dry-run`); on a terminal (stdin AND stdout) prints the redacted message, staged specs and plan files + sha256, asks approve/reject and the typed `fields` (a field named like a secret through `terminal_secret_prompt`, echo off; one too short to register is named in `unprotected_fields` + `warning`), records approver/decision/`decided_at`/`waiting_since`/`plans` (the binding: `{path, sha256, planned_at}`); no terminal: `non_interactive: wait` -> `waiting` (exit 3), `fail` -> failed; `timeout` bounds the prompt, no `on_timeout` approves; helpers `collect_plans`, `plan_binding_problems`, `coerce_fields`, `is_terminal`, `terminal_prompt` |
+| `src/codeorca/resume.py` | `needed_secret_inputs(workflow, record)` (what the CLI asks for), `waiting_gate`/`describe_gate` (what `resume --approve` shows), `resume(project, run_dir, decision, *, fields, executors, isatty, secret_inputs, workflow, env, stream, redact, registry, …)` (`isatty` resolved at call time): terminal required (no env var or keyword bypass), refuses non-waiting runs, a changed workflow (`workflow_sha256`), project (`project_sha256`) or redaction key (`redaction_key_id`), a remaining step that references a scrubbed step output (`unreplayable_outputs`, from the runner's `scrubbed_outputs`), on approve a gate or plan older than `gate.max_age` or a changed/missing plan file; re-supplied inputs are checked part by part (`matches_recorded`) and never quoted in a refusal; references to `inputs`/`vars` that are not literal names fail closed (every redacted name is needed); redacted inputs a remaining step needs must be re-supplied (`secret_inputs`); settles the gate, replays completed steps, runs the rest and `finally` once; `ResumeRefused` |
+| `tests/gate/`, `tests/apply/` | gate executor + model rules + resume (injected prompt/terminal, counting executors); apply on a fake engine (binding, max_age, plan gate, lock-only retry, dry-run), the reference stack plan -> wait -> resume -> apply with real Terraform, `migrate_backend` over two local backends (`path=`) |
 | `src/codeorca/steps/spec_render.py` | the `spec-render` executor (`terraform_plan` and `ansible` sources; `terraform_state` is not implemented) and `render_run` behind `codeorca render` (plan specs from `plan.json`, host specs from `host-vars.json`, nothing re-run) |
 | `src/codeorca/steps/host_spec.py` | `spec-render` with `source.ansible`: the play-scope playbook, its roles' `defaults`/`vars` and `vars_files` read first (vault-aware, fail closed), staged inventory (playbook-adjacent `group_vars`/`host_vars` copied) in the 0700 handoff dir, inventory scope via `run_vars_subprocess` (every roles dir, the producer's kept `extra-vars.json` overlaid on top), play scope via `AnsibleRunner` (only the plays that target the host, `--check --diff`, a random vault password, markers incl. `<vault>` and masked nested trees in a 0600 `-e @` file, secret leaves registered before it runs, output held until clear values are registered), `merge_play_scope` (`scope: inventory`/`play`, `source` = the play-scope source that won), `host-vars.json` (0600) + `write_spec` |
 | `tests/specs/`, `tests/steps/`, `tests/cli/`, `tests/integration/` | plan document + YAML writer over the fixtures; executors without a terraform binary; doctor with injected probes; the reference project end to end through the CLI (skipped without `terraform`) |
@@ -42,12 +49,17 @@ Consumers keep their own `codeorca.yaml`, `workflows/`, `specs/` in their own (u
 | `src/codeorca/project.py` | Pydantic models for the project file `codeorca.yaml` (`load_project`, `project_json_schema`): s3 backend needs bucket/region/account_id, stack `depends_on` DAG, `max_parallel` must be 1 |
 | `src/codeorca/expr.py` | `${{ … }}` expressions: sandboxed Jinja2 + StrictUndefined, `render`/`render_value`/`render_tree`, `evaluate_when` (must be a bool), GHA-style `success()`/`always()`/`failure()`/`cancelled()` |
 | `src/codeorca/rundir.py` | `RunDir` (`<state_dir>/<run_id>/{run.json, steps/<id>/, outputs/, handoff/ (0700), specs/}`), run id format, `stack_lock` (flock), `list_runs`, `gc` |
-| `src/codeorca/runner.py` | `Runner`: sequential graphlib DAG, status propagation, retry/backoff, timeouts, inputs, outputs from the typed `result`, `finally`, run.json; `StepContext`/`StepResult`/`Executor` |
+| `src/codeorca/runner.py` | `Runner`: sequential graphlib DAG, status propagation (a step its executor cancelled, a gate's `on_timeout: cancel`, cancels the run: exit 1, `executor_cancelled`), retry/backoff, timeouts, inputs, outputs from the typed `result`, `finally` (never at a wait: once, at the real end), run.json (`workflow_sha256`, `project_sha256`, `redaction_key_id` from `Runner(key_id=)`, `resumes`/`resumed_at`/`decision`; per step `scrubbed_outputs`: the outputs the persisted scrub changed; a waiting `finally` step is an error); `Runner.restore` (replay a persisted run) + `settle` (decide a waiting step) for resume; `StepContext` (carries the `workflow`)/`StepResult`/`Executor` |
 | `src/codeorca/steps/` | executor registry (`register`/`lookup`/`default_executors`), the `shell` executor (argv only, logs via line sink + stream hook), "not implemented in this phase" placeholders for the other types |
 | `tests/core/` | project model, expressions, run directory and runner tests (shell-step workflows on `sys.executable`) |
+| `src/codeorca/steps/helpers.py` | the shared `python`/`powershell` helper contract (plan 5.8): `run_helper`, project-root-relative `script:` (symlinks resolved, escape/missing refused), child cwd = project root, step `env:` with `{secret: ssm:/...}` resolved through an injected `resolve_secret` and registered before the child starts (denylist-named literals too; values under 8 chars listed by name in `unprotected_env`), `CODEORCA_*` env names reserved, `CODEORCA_DRY_RUN` set only under `--dry-run`, redaction through the registry whatever `ctx.stream` is; runs through `shell.run_argv` (the shell step's child-process machinery) |
+| `src/codeorca/steps/python_step.py`, `src/codeorca/steps/powershell_step.py` | `make_executor(registry, resolve_secret=None)` each: `[sys.executable, -I, script, *args]`; `[pwsh, -NoProfile, -NonInteractive, -File, script, *args]` + `-WhatIf` under `--dry-run` (a script without a script-level `[CmdletBinding(SupportsShouldProcess)]`, textual check `declares_should_process`, is refused there); `lint_powershell(paths, settings=None)` (PSScriptAnalyzer via pwsh, `{file, line, rule, level, message}` findings, one `info` finding when pwsh or the module is missing) and `ansible_pslint_settings()` (ansible-test's `pslint/settings.psd1`). Registered by the CLI (`cli._executors`), not in `steps/__init__.py` |
+| `tests/helpers/`, `tests/fixtures/helpers/` | helper-step tests through a real `Runner` + `SecretRegistry` (`helper_support.py`; `conftest.py` re-exports its fixtures): outputs to a dependent step, secret env vs `scan_outputs`, exit codes, `-I` (a planted `json.py`), dry run, path containment, timeout; pwsh tests (exit 3 through `-File`, `-WhatIf`, refusal, secret env) and PSScriptAnalyzer tests skip without `pwsh` / the module (both on the ubuntu-24.04 runner); fail-closed lint edges use a fake `pwsh` |
 | `schema/` | exported JSON Schema; CI fails if it differs from the models (`schema export --check`) |
 | `src/codeorca/redact/` | redaction pipeline (plan §5.7): `registry.py` (`SecretRegistry`, HMAC placeholders, encodings), `text.py` (`redact_tree`/`redact_text`, key denylist), `terraform.py` (`mask_by_map`, `merge_unknown`, `schema_sensitive_paths`, `mask_by_schema`), `stream.py` (`StreamRedactor`), `gate.py` (`scan_outputs`), `entropy.py` (`entropy_warnings`); residual risk in the package docstring |
-| `examples/reference/` | the offline reference project: project config, a provider-free Terraform stack, `ansible/` (role `app_config` with an argument spec incl. a `no_log` token, playbook-adjacent `group_vars/app.yml` with a denied env lookup, `site.yml`), workflows `plan-only` + `configure-local` (run in CI) and `demo-rollout` (validates only) |
+| `examples/reference/` | the offline reference project: project config, a provider-free Terraform stack, `ansible/` (role `app_config` with an argument spec incl. a `no_log` token, playbook-adjacent `group_vars/app.yml` with a denied env lookup, `site.yml`), `helpers/` (`check_dns.py`, `Test-AppConfig.ps1`, `summary.py`, `bootstrap_backend.py`), workflows `plan-only` + `configure-local` (run in CI), `demo-rollout` (plan -> spec -> gate -> apply -> configure -> host spec -> python + powershell helpers -> finally summary; CI runs it to the gate and asserts exit 3 + a refused resume; the test resumes it with an injected terminal) and `bootstrap-backend` (validates only) |
+| `tests/conftest.py` | suite-wide: AWS profile/role/static-key variables removed, `AWS_CONFIG_FILE`/`AWS_SHARED_CREDENTIALS_FILE` empty, IMDS disabled for every test; `no_boto3_session` makes `boto3.Session` raise and counts attempts (the no-network proof) |
+| `tests/cli/test_cli_phase3.py`, `tests/steps/test_stack_secrets.py`, `tests/integration/test_reference_demo_rollout.py` | CLI wiring (executors, resolver closures, key fetcher, no AWS call with the env key, `resume` refusal + no bypass option, `lint powershell`); stack secrets (unit + live `drift`/`run` with a fake resolver); `demo-rollout` wait -> refused CLI resume -> approve (all steps, finally once, plan deleted, no placeholder anywhere) and reject |
 | `tests/` | pytest; `tests/negative/` holds workflow files that must fail validation, each for a named reason |
 | `tests/redact/` | redaction tests (no terraform/ansible binary needed); `fixtures/` holds a hand-scrubbed plan/state/output JSON, a providers-schema excerpt and two log captures, all with `FIXTURE-SECRET-*` placeholders; regeneration recipe in `conftest.py` |
 
@@ -56,9 +68,9 @@ Consumers keep their own `codeorca.yaml`, `workflows/`, `specs/` in their own (u
 - **Deny floor in code.** The Terraform `action` enum and the `apply` -> `plan_file` rule live in the
   models. A workflow file can only narrow policy, never widen it. Do not add `destroy`, `import`,
   `state`, `taint` or an auto-approve flag to the enum. The floor covers the `terraform` step type; helpers
-  (`shell` today, `python`/`powershell` later) are trusted code, but the `shell` executor still runs
+  (`shell`, `python`, `powershell`) are trusted code, but the `shell` executor still runs
   `policy.check_argv` over an argv whose program is `terraform`/`tofu`, so `run: [terraform, destroy]` is
-  refused too. The adapter drops `TF_CLI_ARGS*` from every child environment (the one other way onto the
+  refused too (a `python`/`powershell` helper's own child processes are not inspected: review bounds them). The adapter drops `TF_CLI_ARGS*` from every child environment (the one other way onto the
   command line).
 - **Model rules with a negative test each** (`tests/test_models.py`): duplicate step ids across `steps` and
   `finally`; `needs` on a finally step is refused (finally steps always run last; their status functions
@@ -75,6 +87,16 @@ Consumers keep their own `codeorca.yaml`, `workflows/`, `specs/` in their own (u
   YAML 1.1 boolean tokens as keys regardless of loader.
 - Actions in workflows are SHA-pinned with a `# vX.Y.Z` comment; workflow-level `permissions: contents: read`;
   `pull_request`, never `pull_request_target`.
+- **The approval invariant** (plan 5.9, owner decision 2026-11-01): an agent-launched run can reach exit 3 at a
+  gate and nothing further. The gate asks only when stdin AND stdout are terminals; `resume` refuses otherwise,
+  for either decision, and there is no environment variable or keyword that skips the check (tests assert both;
+  `isatty` is injectable for tests only and the CLI must never pass it). An apply runs only a plan file whose
+  sha256 an approving gate recorded, within `gate.max_age` (measured from the decision, from when the gate started
+  asking or waiting, and from when the plan was made); a dry-run approval never counts in a real run. A resume
+  refuses when the workflow, the project (`project_sha256`) or the redaction key (`redaction_key_id`) changed since
+  the stop; `resume --approve` shows what the approval binds and the approver types `approve` to confirm. A gate
+  may not sit in `finally` or carry `retry`. Gate fields named like secrets are read without echo and never taken
+  from `--field`.
 - One PR at a time against `main`; merge by hand once every check is green (`gh pr merge --admin`
   satisfies the "external contributor review" ruleset for the owner's own PRs).
 
@@ -87,7 +109,7 @@ Phase 1 integration (2026-11-01):
   (`tfjson.previous_outputs`); `prior_outputs` is the fallback for outputs with no change entry.
 - **`init -json` and `-migrate-state` are mutually exclusive** on 1.14.7; the `migrate_backend` action (Phase 3) must
   run its init without `-json` (tolerant text parsing) or not at all.
-- **The redaction key is `CODEORCA_REDACTION_KEY` in Phase 1** (bytes of its UTF-8; key id `env:<sha256[:8]>` in
+- **(Superseded in Phase 3: see the Phase 3 gotchas.) The redaction key is `CODEORCA_REDACTION_KEY` in Phase 1** (bytes of its UTF-8; key id `env:<sha256[:8]>` in
   spec headers). There is no SSM wrapper yet, so `redaction.hmac_key` is validated but unused; a project with
   `placeholder: hmac` fails closed when the variable is absent. The key's own text is registered, so it never
   appears in a log either.
@@ -215,6 +237,134 @@ Phase 2 integration (2026-11-01):
 - **Specs render multi-line strings as literal blocks** (`|`, a `SafeRepresenter` subclass in `specs/__init__.py`,
   per the `add_representer` gotcha below), so a rendered template diffs line by line.
 
+Phase 3 helpers (2026-11-02):
+- **`ConvertTo-Json -InputObject $array -AsArray` nests the array** (`[[...]]`), and a parser that skipped
+  non-object entries reported every script as lint-clean. `-InputObject` alone keeps 0- and 1-element arrays arrays;
+  `lint_powershell` turns any unexpected shape into a `pslint-error` finding.
+- **pwsh writes ANSI escapes in error records even when stderr is a pipe** (7.6): the helper child env defaults
+  `NO_COLOR=1` and the lint command sets `$PSStyle.OutputRendering = 'PlainText'`, or `stderr.log` and step errors
+  carry escape codes.
+- **pwsh always adds its default module dirs to `PSModulePath`**, so "PSScriptAnalyzer is missing" cannot be
+  simulated with a real pwsh on a machine that has the module (the runner image does); the test uses a fake `pwsh`.
+- **The `SupportsShouldProcess` check is textual**: comments dropped, only the text before the first `{` is searched
+  (the script-level attribute area), `= $false`/`= 0` does not count. A `#` or `{` inside a string in the header
+  makes it refuse (fails closed). Without the check, `-WhatIf` on a script that does not declare it fails to bind or
+  is ignored while the script makes real changes.
+- **`python -I`** keeps the script's own directory and the cwd off `sys.path` (a planted `json.py` is not
+  imported) and ignores `PYTHON*`/user site; the interpreter's own site-packages still load.
+- PowerShell for local tests: the portable `powershell-7.6.x-osx-arm64.tar.gz` (sha256 from the release's UTF-16LE
+  `hashes.sha256`) plus `Save-PSResource PSScriptAnalyzer -Path <dir>` and `PSModulePath=<dir>`; never brew/sudo.
+Phase 3 gate / resume / apply (2026-11-02):
+- **`finally` used to run when a run stopped at a gate** (exit 3), so a resumed run would have run it twice; it now
+  runs only at the real end (the old waiting test asserted the opposite and was changed with the reason in the
+  commit). A run.json from before the change whose finally already ran is not run again on resume.
+- **A redacted input cannot be replayed.** `record_filter` key-denylists `inputs`, so `api_token` persists as
+  `<redacted:key>` (no placeholder to check a re-supplied value against); an input that is only *registered*
+  persists as `<redacted:hmac:…>` and is checked. Resume therefore keeps inputs verbatim (never re-coerces them:
+  `<redacted:key>` is not an int) and asks again only for redacted inputs a remaining step (or a var it uses)
+  references; a var built from one is rendered again. A step output the persisted scrub changed (the runner names
+  it in the step's `scrubbed_outputs`) cannot be replayed either: resume refuses when a remaining step references
+  one (an output that was already a placeholder at its source replays as it was).
+- **The runner's retry cannot be vetoed by an executor**, and `retry.policy: transient` matches any
+  `policy.transient_errors` entry (`Throttling`, `429`), so the apply step keeps `apply-attempt.json` in its step
+  dir and refuses attempt 2+ unless attempt 1 failed with `Error acquiring the state lock` before any
+  `apply_start`/`apply_progress` message; the lock failure's error text carries that phrase so `transient` fires.
+- **A resumed apply runs in a fresh registry**: nothing from the first process is registered, so the apply runs
+  `show -json` first and `seed_registry` over it before the apply streams (the plan file carries the variables,
+  so no input needs re-supplying for an apply).
+- **`terraform state list` with no state exits 1** with "No state file was found!" on stderr (1.14.7); the
+  `migrate_backend` probe treats exactly that as empty. A state that exists but lists **no resources** is
+  treated as empty too and would be overwritten by `-force-copy` (residual). `init -backend-config=path=…` works
+  only when the configuration declares `backend "local" {}` explicitly; `-migrate-state -force-copy` from local
+  path A to B copies and leaves A in place.
+- **`n` is a YAML 1.1 boolean token**: a gate field (or any key) named `n` fails validation; name it `count`.
+Phase 3, SSM provider and backend bootstrap (2026-11-02):
+- **botocore timeouts do not bound credential resolution.** `connect_timeout`/`read_timeout` cover the HTTP call
+  only; a `credential_process` (aws-vault waiting on a locked keychain) hangs before it. Every code-orca AWS call
+  also runs under `providers.ssm.call_with_deadline` (a daemon thread joined with a wall-clock limit, 4x the
+  per-call timeout by default); the abandoned thread cannot keep the process alive.
+- **`retries={'max_attempts': 2}` means two retries**: botocore normalises it to `total_max_attempts == 3`
+  (legacy mode); assert that, not the dict you passed.
+- **The redaction key's precedence is deliberate**: `CODEORCA_REDACTION_KEY`, when set, wins and SSM is never
+  called (deterministic key id, no credential provider touched in CI or tests); otherwise the SecureString named by
+  `redaction.hmac_key` (key id `<ref>@<version>`; a `String` parameter is refused); a failed fetch never falls back
+  to anything: it fails closed naming the parameter. `build_registry` only reaches SSM when the caller passes
+  `key_fetcher`, so a test that calls it bare stays offline.
+- **AWS tests must neutralise the developer's config**, not just set fake keys: `AWS_PROFILE` and `~/.aws/config`
+  profiles with `credential_process` (aws-vault) would still engage. The conftests drop the profile/role/container
+  variables and point `AWS_CONFIG_FILE`/`AWS_SHARED_CREDENTIALS_FILE` at an empty file under `mock_aws`.
+- **`SecretRegistry` has `__slots__`**: an instance's `add` cannot be monkeypatched; subclass it to spy.
+- **`${` and `%{` are template sequences in an HCL string**, a backend file included: `render_backend_hcl` escapes
+  them (`$${`, `%%{`). `terraform fmt` only accepts `.tf`/`.tfvars`/`.tftest.hcl`: syntax-check a backend file by
+  copying it to `.tfvars`.
+- **S3 settings to compare field by field** (moto 5 and S3 alike): `get_bucket_versioning` returns `{}` with no
+  `Status` on a new bucket; a missing setting is an error code (`NoSuchPublicAccessBlockConfiguration`,
+  `ServerSideEncryptionConfigurationNotFoundError`, `NoSuchBucketPolicy`, `NoSuchLifecycleConfiguration`,
+  `ObjectLockConfigurationNotFoundError`, `NoSuchTagSet`); a policy's `Statement`/`Action`/`Resource` may be a
+  string or a list; `put_bucket_policy`/`put_bucket_lifecycle_configuration`/`put_bucket_tagging` replace the whole
+  set, so the bootstrap merges by Sid / rule ID / tag key. A lifecycle rule needs `Filter` (`{"Prefix": ""}`).
+
+Phase 3 integration (2026-11-02):
+- **A gate cancelled by `on_timeout: cancel` used to end the run with exit 0**: the runner only counted
+  `failed`/`errored` as blocking. A step whose *executor* returned `cancelled` (status `cancelled` with an error;
+  `fail_fast` cancellations carry none) now cancels the run: exit 1, `cancelled()` true, unrelated steps cancelled.
+- **Once the CLI passes `key_fetcher`, any test that builds a registry without `CODEORCA_REDACTION_KEY` asks real
+  SSM** with whatever the shell has (aws-vault hangs on a locked keychain). `tests/conftest.py` neutralises AWS for
+  every test; a test that must prove "no AWS call" uses `no_boto3_session`. A default argument
+  `isatty=os.isatty` binds at definition time (monkeypatching `os.isatty` then does nothing): `resume()` takes
+  `isatty=None` and resolves `os.isatty` at call time, so a CLI test patches `os.isatty` (plus `getpass.getpass`
+  and `builtins.input`) and drives the CLI's own resume wiring.
+- **A terminal check under pytest must not rely on fd capture** (fd 1 is a pipe only under the default capture):
+  with `pytest -s` in a terminal, a refusal test would approve or a run would block on a real prompt. The tests
+  that need "no terminal" patch `os.isatty` to return False.
+- **`${{ steps.x.outputs.tf.a.value | default(y) }}` still raises when `x` was skipped**: outputs are `None`, `.tf`
+  is a StrictUndefined and `.a` on it raises before `default` runs. Default the first level that can be missing:
+  `(steps.x.outputs.tf | default(steps.plan.outputs.planned)).a.value` (`planned` = the plan's `prior_outputs`, the
+  root outputs re-evaluated by the plan, so a dry run or a no-change run still has the host and bucket).
+- **A gate with `when: changed` that is skipped leaves its dependents `omitted`, not `skipped`** (skipped is not a
+  met status): a step that should run after "nothing to apply" too needs `always()` plus an explicit status list
+  (demo-rollout's `configure`), and must exclude a rejected gate itself.
+- **`-WhatIf` reaches every cmdlet in the script** (`$WhatIfPreference`), so `Set-Content $env:CODEORCA_OUTPUT_FILE`
+  is silently skipped under `--dry-run` and the step has no output: write the output with
+  `[System.IO.File]::WriteAllText` (or `-WhatIf:$false`). PSScriptAnalyzer's `PSShouldProcess` warns when a script
+  declares `SupportsShouldProcess` but never calls `$PSCmdlet.ShouldProcess`: guard the script's real change with it.
+- **A `finally` shell step running `codeorca summary` depends on PATH and the operator's cwd** (the shell step runs
+  in the process cwd, `-p` defaults to `./codeorca.yaml`); the reference uses a `python` helper (cwd = project root,
+  the interpreter running code-orca, `python -I` still sees its site-packages and an editable install).
+- **A reference workflow's input defaults ARE the placeholders**: the configure-local test asserts its token
+  appears in no project file but its own workflow, so a second workflow reusing the same default broke it; each
+  reference workflow has its own `FIXTURE-SECRET-*` values (all covered by CI's `FIXTURE-SECRET` grep).
+- **`resume --reject` still asks for redacted inputs the remaining steps reference** (they are computed before the
+  decision, and `when: always()` steps may still run); type anything for a step that the reject will omit.
+
+Phase 3 review fixes (2026-11-02):
+- **A helper's output file is not always UTF-8**: PowerShell 5.1's `Out-File` default (and `-Encoding unicode`)
+  is UTF-16LE with a BOM, and a Python helper may write Latin-1. A strict UTF-8 read raised before the scrubbed
+  rewrite and left the raw file (with the helper's secret) in the run dir. `shell.decode_output` decodes by BOM, else
+  UTF-8 with `surrogateescape`; a rewrite that fails deletes the file; `scan_outputs` also reads files with NUL
+  bytes as UTF-16.
+- **An interactive gate with no `timeout` can stay open for days**: `decided_at` is "now" when the approver
+  finally types, so `gate.max_age` also bounds `waiting_since` (recorded on both paths) and each plan's
+  `planned_at` (the plan step's finish time from run.json, in the gate's `plans` binding); a binding without a
+  plan time is refused.
+- **`decided_at` has second precision**: two gates answered in the same second tie; the tie goes to the gate with
+  the most approving gates upstream of it, never to the id that sorts first.
+- **Resume pins more than the workflow**: the plan gate's `stateful_types`/`critical_tag`, `gate.max_age` and the
+  `migrate_backend` target come from `codeorca.yaml` at resume time, so run.json records `project_sha256`; and
+  `redaction_key_id`, so run and resume cannot use different keys (env override vs SSM, or a rotated parameter).
+- **botocore resolves credentials in `create_client`, not in `boto3.Session()`**: a `credential_process` (aws-vault)
+  runs when the first client is built, with no timeout. Build the clients inside `call_with_deadline`, never just
+  the session. The abandoned child cannot be killed (botocore owns the `Popen`): `SSMSecrets` shares one session
+  per run and, after the first `SSMTimeout`, fails later fetches at once instead of spawning another child.
+- **A gate in `finally` or with `retry` broke the approval contract** (exit 0 with the gate unanswered and the run
+  unresumable; a typed reject asked again with a fresh timeout): both are refused by the model.
+- **A replaced `backend.hcl` is recorded by digest only** (`{sha256, bytes}` before): a hand-written one can hold
+  credentials and the diff lands in output.json, result.json, outputs/ and run.json.
+- **An inline `(?i)` flag cannot be embedded mid-pattern** (Python 3.11+ raises "global flags not at the start"):
+  reuse a pattern's text with `.removeprefix("(?i)")` and pass `re.IGNORECASE`.
+- **CI fails on any skipped test**: terraform, ansible-core, moto, boto3 and pwsh are all installed there, so a
+  skip means a broken install. `faulthandler_timeout = 300` names a hung test instead of a silent 30-minute timeout.
+
 Terraform (1.14.7):
 - `show -json` (plan and state), `output -json`, plan files, the plan's `variables` block and `TF_LOG` all
   hold sensitive values in **plain text**; only sibling flag maps mark them, and the flags do **not**
@@ -318,7 +468,28 @@ Container (for the image phase):
    specs, cannot read a templated `vars_files` path (a warning) and does not follow `{% include %}` into other
    templates for the lookup scan; `set_fact` values are the redactor's job; playbook-adjacent `group_vars` are not
    merged with an inventory's own.
-3. Helpers (python/powershell/shell), gate with TTY + resume, apply bound to the plan sha256, backend bootstrap.
+3. ~~Helpers (python/powershell/shell), gate with TTY + resume, apply bound to the plan sha256, backend bootstrap~~
+   (done 2026-11-02: `gate` + `codeorca resume`, `apply` bound to the approved sha256, `migrate_backend`, `python`/
+   `powershell` helpers + `codeorca lint powershell`, SSM secrets + SSM-backed redaction key, S3 bootstrap +
+   reference `bootstrap-backend`, `demo-rollout` end to end, CI to the gate). Residuals:
+   - **TTY faking**: the gate and `resume` trust `isatty(0)` and `isatty(1)`; anything that hands a process a
+     pseudo-terminal (`script`, `expect`, `unbuffer`, a pty library) passes. The invariant holds against agents and
+     pipes as launched today, not against a deliberately faked terminal; the operator's own launch is the boundary.
+   - **Redaction key across a resume**: refused since the review fixes (run.json `redaction_key_id`); a run.json
+     from before them carries none and is not checked.
+   - **Abandoned credential_process children**: a hung aws-vault child outlives the deadline (and codeorca) until it
+     exits on its own; only one per run, after which SSM fetches fail fast.
+   - **Object Lock (plan V15)**: a bucket with Object Lock but no default retention is accepted and believed
+     harmless for `.tflock`; unverified.
+   - **Real AWS never exercised**: the SSM provider, the SSM redaction key, the bootstrap and an s3 backend init are
+     tested against moto only (the reference backend is local); run once against a sandbox account before v0.1.0.
+   - **`migrate_backend` limits**: a target state that exists but lists no resources is treated as empty and
+     overwritten by `-force-copy`; tested between two local backends only, never into S3.
+   - **Ansible steps cannot take SSM secrets**: the `ansible` step has no `stack:` or `env:` field, so
+     `stacks.*.secrets` and `{secret: ssm:/...}` reach terraform and the helpers only (a secret for a play goes
+     through a helper or a `no_log` extra var today); a model field for it is a design decision, not done here.
+   - **`specs/backend.yaml`** (plan 5.11): not rendered; the bootstrap step's `diff` output (run.json/result.json) is
+     the record until a `source.backend` spec renderer (model field, schema, kind) exists.
 4. Container image on `ghcr.io/git-cgallagher/ansible-runtime`: the pyproject ranges (`pydantic`, `ruamel.yaml`,
    `jinja2`) must be pinned exactly, with hashes, in `requirements/codeorca.txt` for the image; ranges are for pip users only.
 5. Reference project end to end in CI; consumer guide; v0.1.0.

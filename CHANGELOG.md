@@ -2,6 +2,58 @@
 
 ## Unreleased
 
+- Phase 3 review fixes: a helper's non-UTF-8 output file (UTF-16 `Out-File`, Latin-1) is rewritten scrubbed or
+  deleted, never left raw, and `scan_outputs` reads UTF-16; `gate.max_age` also bounds when the gate started asking
+  (`waiting_since`) and when the plan was made (`planned_at` in the binding); resume refuses a changed project
+  (`project_sha256`) or redaction key (`redaction_key_id`), a remaining step that references a scrubbed step output
+  (`scrubbed_outputs`), a non-literal `inputs`/`vars` reference without every redacted input, and a re-supplied
+  input that differs from the recorded one part by part; a mistyped secret input or field is never quoted; a gate
+  in `finally` or with `retry` is refused; a same-second approval tie goes to the downstream gate; gate fields named
+  like secrets are read without echo, never taken from `--field`, and a short one is named in a warning;
+  `resume --approve` shows the gate's message, specs, plan sha256s and waivers and asks for a typed confirmation;
+  the S3 bootstrap records a replaced `backend.hcl` by digest and builds its clients (credential resolution) inside
+  the deadline; `SSMSecrets` shares one session per run and fails fast after a hang; stack secrets too short to
+  scrub are named in the step result (`unprotected_secrets`); an apply that fails deletes its plan file unless a
+  retry may use it, and a stack-flock conflict before Terraform ran may be retried. Tests: the CLI's own resume path,
+  the ancestor-gate rule, the adapter's sha256 re-check, re-supplied secrets and fields never in the run dir, no
+  dependence on pytest's fd capture, botocore's legacy credential files closed, `faulthandler_timeout`; CI fails on
+  any skipped test.
+
+- Phase 3 integration: `codeorca run`/`resume` register the `gate`, `python` and `powershell` executors and hand one
+  SSM resolver per run to the helpers and the terraform step (a stack's `secrets:` resolved into the child env only,
+  registered first, `drift` included; without boto3 only the step that needs a secret fails); the registry takes the
+  SSM-backed redaction key (`CODEORCA_REDACTION_KEY` still wins). New `codeorca resume <run-id|latest>
+  (--approve [--field k=v] | --reject)` (terminal required, no bypass; secret inputs asked with `getpass`) and
+  `codeorca lint powershell <paths> [--ansible-settings]`. A gate cancelled by `on_timeout: cancel` now fails the
+  run (exit 1). The terraform step's s3 backend config is `bootstrap.s3.backend_settings` (adds `kms_key_id`).
+  Reference: `demo-rollout` runs end to end (plan, spec, gate, apply, Ansible from the outputs, host spec, python
+  and powershell helpers, finally summary); `bootstrap-backend` validates each stack after the helper. CI installs
+  the `aws` extra, imports the Phase 3 modules from the wheel, requires the pwsh tests to run, lints the
+  PowerShell helpers, runs `demo-rollout` to the gate (exit 3, run.json waiting) and asserts `resume --approve`
+  refuses without a terminal; the test job has a 30-minute timeout. Tests never reach AWS (`tests/conftest.py`).
+- Helper steps (Phase 3, plan 5.8): `steps/python_step.py` (`python -I`) and `steps/powershell_step.py`
+  (`pwsh -NoProfile -NonInteractive -File`, `-WhatIf` under `--dry-run`, scripts without a script-level
+  `SupportsShouldProcess` refused there) on the shared contract in `steps/helpers.py` (project-root-relative scripts,
+  `{secret: ssm:/...}` env resolved through an injected resolver and registered before the child starts, outputs via
+  `CODEORCA_OUTPUT_FILE`), plus `lint_powershell` (PSScriptAnalyzer, optional ansible-test pslint settings). The
+  shell step's child-process code moved into `shell.run_argv` unchanged. Registered by the CLI (integration).
+- Phase 3 (gate, resume, apply): the `gate` step (dry-run auto-approval; on a terminal: message, staged specs and
+  plan sha256s, approve/reject and typed `fields`, approver/decision/timestamp/plan binding recorded; no terminal:
+  `wait` -> exit 3 or `fail`; no timeout ever approves), `codeorca.resume.resume` (terminal required with no
+  bypass, `gate.max_age`, plan tamper check, changed-workflow check, re-supplied secret inputs, completed steps
+  replayed, `finally` once), the runner no longer runs `finally` at a wait (`Runner.restore`/`settle`, run.json
+  `workflow_sha256`/`resumes`), Terraform `apply` bound to an approved plan of this run (max_age, plan gate with
+  `allow_delete_of`, lock-only retry, redacted `tf_outputs`, plan file deleted, `--dry-run` skips) and
+  `migrate_backend` (approving gate, refuses a non-empty target, `init -migrate-state -force-copy`). Models: typed
+  `GateField`, gate fields are outputs, no `on_failure: continue` on a gate, no `var_overrides` on apply/migrate.
+- Phase 3 (SSM + backend bootstrap): `codeorca.providers` (`SSMSecrets`, `make_resolver`: SSM `ssm:/` references
+  registered before they are returned, memory-only cache, time-limited calls incl. a wall-clock deadline, value-free
+  errors), the SSM-backed redaction key (`build_registry(..., key_fetcher=ssm_key_fetcher(project))`, key id
+  `<ref>@<version>`; `CODEORCA_REDACTION_KEY` still wins when set; a failed fetch fails closed), and
+  `codeorca.bootstrap.s3` (`python -m codeorca.bootstrap.s3`): S3 state bucket created and converged idempotently
+  (account check, Object Lock default-retention refusal, public access block, versioning, encryption, merged
+  TLS-only policy, lifecycle and tags), `backend.hcl` per stack, `--dry-run` diff; reference workflow
+  `bootstrap-backend`; new `aws` extra (`boto3`), `moto` in `dev`.
 - Phase 2 review fixes (host spec, secrets): a listed template whose own text calls a denied lookup is a
   `<skipped: …>` marker in both scopes; the play scope reads its playbook, its roles' `defaults`/`vars` (every file
   Ansible reads, `main/` dirs included) and its `vars_files` with `!vault` values opaque (`specs/ansible_files.py`;

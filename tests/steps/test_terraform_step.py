@@ -20,8 +20,6 @@ from codeorca.steps import default_executors
 from codeorca.steps import spec_render as spec_render_step
 from codeorca.steps import terraform as terraform_step
 from codeorca.steps.terraform import (
-    PHASE3_APPLY,
-    PHASE3_MIGRATE,
     backend_config,
     check_required_env,
     declared_sensitive_variables,
@@ -103,7 +101,8 @@ def registry() -> SecretRegistry:
     return SecretRegistry(b"example-not-secret-key", "env:x")
 
 
-def test_apply_and_migrate_backend_fail_with_the_phase3_message(tmp_path, registry, project):
+def test_apply_and_migrate_backend_refuse_without_a_plan_of_this_run_or_a_gate(tmp_path, registry, project):
+    # Phase 3: apply binds to an approved plan this run produced (tests/apply/ covers the whole contract)
     wf = workflow(
         [
             {"id": "a", "type": "terraform", "stack": "app", "action": "apply", "plan_file": "p.tfplan"},
@@ -112,8 +111,10 @@ def test_apply_and_migrate_backend_fail_with_the_phase3_message(tmp_path, regist
         fail_fast=False,
     )
     r = run(wf, tmp_path, registry, project)
-    assert r.states["a"]["status"] == "failed" and r.states["a"]["error"] == PHASE3_APPLY
-    assert r.states["m"]["status"] == "failed" and r.states["m"]["error"] == PHASE3_MIGRATE
+    assert r.states["a"]["status"] == "failed"
+    assert r.states["a"]["error"].startswith("apply refused: plan_file p.tfplan is outside this run's directory")
+    assert r.states["m"]["status"] == "failed"
+    assert "migrate_backend refused: step m needs an approving gate upstream" in r.states["m"]["error"]
 
 
 def test_unknown_stack_and_missing_engine_are_errored_steps(tmp_path, registry, project):

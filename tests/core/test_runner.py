@@ -474,7 +474,8 @@ def test_waiting_executor_stops_scheduling_and_exits_3(tmp_path):
     rd = RunDir(tmp_path)
     r = Runner(PROJECT, wf, {}, rd, executors)
     assert r.run() == EXIT_WAITING
-    assert statuses(r) == {"a": "succeeded", "approve": "waiting", "b": None, "c": None, "fin": "succeeded"}
+    # finally does not run at a wait: the run is not over, and a resume runs it once at the real end
+    assert statuses(r) == {"a": "succeeded", "approve": "waiting", "b": None, "c": None, "fin": None}
     assert rd.read_run()["status"] == "waiting" and rd.read_run()["exit_code"] == 3
 
 

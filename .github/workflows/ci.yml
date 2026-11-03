@@ -11,6 +11,7 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-24.04
+    timeout-minutes: 30   # the slowest green run is a few minutes (suite ~2 min + wheel + reference runs)
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
@@ -21,7 +22,7 @@ jobs:
           terraform_version: 1.14.7
           terraform_wrapper: false   # the wrapper would swallow plan's -detailed-exitcode 2
       - name: Install
-        run: python -m pip install -e '.[dev,ansible]'   # ansible-core: the Ansible tests skip without it
+        run: python -m pip install -e '.[dev,ansible,aws]'   # ansible-core and boto3: their tests skip without them
       # An editable install maps the whole source tree, so it cannot notice a subpackage missing from the wheel:
       # build the real wheel and import every subpackage from it in a scratch venv (with its `ansible` extra:
       # the callback plugin imports ansible-core at module level).
@@ -30,9 +31,10 @@ jobs:
           python -m pip wheel . --no-deps -w /tmp/wheel
           python -m venv /tmp/wheel-venv
           whl=$(ls /tmp/wheel/*.whl)
-          /tmp/wheel-venv/bin/pip install -q --no-cache-dir "${whl}[ansible]"
+          /tmp/wheel-venv/bin/pip install -q --no-cache-dir "${whl}[ansible,aws]"
           /tmp/wheel-venv/bin/python -c 'import codeorca.adapters.terraform, codeorca.redact, codeorca.specs.terraform_plan, codeorca.steps.terraform, codeorca.cli'
           /tmp/wheel-venv/bin/python -c 'import codeorca.adapters.ansible, codeorca.steps.ansible, codeorca.steps.host_spec, codeorca.specs.ansible_host, codeorca.specs.ansible_vars, codeorca.specs.ansible_files, codeorca.lint, codeorca.ansible_plugins.callback.codeorca_jsonl'
+          /tmp/wheel-venv/bin/python -c 'import codeorca.providers, codeorca.providers.ssm, codeorca.bootstrap.s3, codeorca.resume, codeorca.steps.gate, codeorca.steps.helpers, codeorca.steps.python_step, codeorca.steps.powershell_step'
           /tmp/wheel-venv/bin/codeorca --version
       - name: Lint
         run: ruff check . && ruff format --check .
@@ -40,8 +42,24 @@ jobs:
         run: codeorca schema export schema --check
       - name: Validate the reference workflows
         run: codeorca validate examples/reference/workflows/*.yaml
+      # The PowerShell helper and lint tests skip without pwsh/PSScriptAnalyzer; both ship on the ubuntu-24.04 image,
+      # and CI must actually run them, so a missing pwsh fails here. Every other optional tool the suite skips
+      # without (terraform, ansible-core, moto, boto3) is installed above, so ANY skip fails the Tests step.
+      - name: PowerShell is on the runner
+        run: |
+          pwsh -v
+          pwsh -NoProfile -NonInteractive -Command 'if (-not (Get-Module -ListAvailable -Name PSScriptAnalyzer)) { exit 1 }'
       - name: Tests
-        run: pytest -q
+        run: |
+          set -o pipefail
+          pytest -q -rs 2>&1 | tee /tmp/pytest.log
+          # The approve -> apply proof, the apply/migrate_backend tests and the SSM, redaction-key and bootstrap
+          # suites all skip quietly when a tool is missing (terraform, ansible-playbook, moto): in CI a skip is a
+          # failure, whatever its reason, so a broken install can never merge green with those tests unrun.
+          if grep -E '^SKIPPED' /tmp/pytest.log; then
+            echo "tests were skipped in CI (see above); every test must run here: fix the install, not the guard"
+            exit 1
+          fi
       # The reference project end to end. The redaction key and the stack's sensitive input are PLACEHOLDERS
       # (the value is committed in the workflow file); the assertions below prove they never reach a spec, a log
       # or the run directory.
@@ -68,6 +86,49 @@ jobs:
         run: codeorca run configure-local -p examples/reference/codeorca.yaml
       - name: Lint the reference playbooks
         run: codeorca lint ansible -p examples/reference/codeorca.yaml examples/reference/ansible
+      - name: Lint the reference PowerShell helpers
+        run: |
+          codeorca lint powershell examples/reference/helpers
+          codeorca lint powershell --ansible-settings examples/reference/helpers
+      # The full rollout, launched the way an agent would (no terminal): it must stop at the gate with exit 3 and
+      # run.json `waiting`, and `codeorca resume --approve` must refuse. CI never approves anything.
+      - name: "demo-rollout stops at the gate without a terminal (exit 3)"
+        env:
+          CODEORCA_REDACTION_KEY: example-not-secret-ci-key
+        run: |
+          set +e
+          codeorca run demo-rollout -p examples/reference/codeorca.yaml < /dev/null
+          rc=$?
+          set -e
+          test "$rc" -eq 3 || { echo "expected exit 3 (waiting at the gate), got $rc"; exit 1; }
+          run_id=$(python - <<'PY'
+          import json
+          from pathlib import Path
+          runs = [json.loads(p.read_text()) for p in Path("examples/reference/.codeorca/runs").glob("*/run.json")]
+          demo = max((r for r in runs if r.get("workflow") == "demo-rollout"), key=lambda r: r["started"])
+          assert demo["status"] == "waiting", demo["status"]
+          assert demo["steps"]["approve"]["status"] == "waiting", demo["steps"]["approve"]
+          assert demo["steps"]["apply_app"]["status"] is None and demo["steps"]["summary"]["status"] is None
+          print(demo["run_id"])
+          PY
+          )
+          echo "DEMO_RUN_ID=${run_id}" >> "$GITHUB_ENV"
+      - name: resume refuses without a terminal (CI never approves)
+        env:
+          CODEORCA_REDACTION_KEY: example-not-secret-ci-key
+        run: |
+          set +e
+          codeorca resume "$DEMO_RUN_ID" --approve -p examples/reference/codeorca.yaml < /dev/null > /tmp/resume.out 2> /tmp/resume.err
+          rc=$?
+          set -e
+          cat /tmp/resume.out /tmp/resume.err
+          test "$rc" -ne 0 || { echo "resume --approve succeeded without a terminal"; exit 1; }
+          if ! grep -q "needs an interactive terminal" /tmp/resume.err; then
+            echo "resume did not print the terminal refusal"
+            exit 1
+          fi
+          status=$(python -c 'import json, os; print(json.load(open(os.path.join("examples/reference/.codeorca/runs", os.environ["DEMO_RUN_ID"], "run.json")))["status"])')
+          test "$status" = waiting || { echo "run.json is $status after a refused resume"; exit 1; }
       - name: No placeholder secret anywhere in the produced files
         # Each check is its own fatal `if`: under `bash -e` a `! grep` never fails the step (errexit ignores an
         # inverted pipeline, and a multi-line run exits with its LAST command's status). `-a` scans the binary
@@ -75,7 +136,8 @@ jobs:
         run: |
           ls examples/reference/specs/app/plan.yaml examples/reference/specs/app/plan.meta.yaml
           ls examples/reference/specs/app/hosts/app-host.yaml examples/reference/specs/app/hosts/app-host.meta.yaml
-          for pattern in FIXTURE-SECRET FIXTURE-SECRET-reference-token-001 example-not-secret-ci-key; do
+          for pattern in FIXTURE-SECRET FIXTURE-SECRET-reference-token-001 FIXTURE-SECRET-reference-demo-001 \
+              FIXTURE-SECRET-reference-demo-token-001 example-not-secret-ci-key; do
             if grep -raq "$pattern" examples/reference/specs examples/reference/.codeorca; then
               echo "placeholder secret leaked into the produced files: $pattern"
               grep -ral "$pattern" examples/reference/specs examples/reference/.codeorca

@@ -1,7 +1,15 @@
 # yaml-language-server: $schema=../../../schema/codeorca-workflow.schema.json
-# The full rollout. It VALIDATES but does not run yet: gate, apply, python and powershell steps are "not
-# implemented in this phase" (the runner errors on the first one). `plan-only.yaml` (Terraform) and
-# `configure-local.yaml` (Ansible + host spec) are the workflows that run end to end today.
+# The full rollout, end to end on the provider-free reference stack (offline, no AWS):
+#   plan_app -> plan_spec -> approve (gate) -> apply_app -> configure (Ansible, from the Terraform outputs)
+#   -> host_spec -> dns_check (python helper) + config_audit (powershell helper) -> finally: summary.
+#
+# `codeorca run demo-rollout -p examples/reference/codeorca.yaml` needs terraform, ansible-core and pwsh on PATH and
+# CODEORCA_REDACTION_KEY (or the SSM key named by redaction.hmac_key). Launched without a terminal (an agent, CI,
+# a pipe) it stops at the gate: run.json says `waiting`, exit 3. A human continues it on a terminal:
+#   codeorca resume latest --approve -p examples/reference/codeorca.yaml     (or --reject)
+# and code-orca then applies exactly the plan file whose sha256 the gate showed. There is no flag or environment
+# variable that approves without a terminal. `--dry-run` auto-approves the gate, skips the apply, runs Ansible in
+# check mode and the helpers with CODEORCA_DRY_RUN=1 / -WhatIf.
 api: codeorca/v1
 kind: workflow
 name: demo-rollout
@@ -9,18 +17,26 @@ description: Plan the app stack, render specs, approve, apply, configure a host 
 
 inputs:
   env: { type: string, enum: [dev, prod], default: dev }
+  # PLACEHOLDERS, not secrets (CI asserts they never reach a spec, a log or the run directory). Their names match
+  # redaction.key_denylist, so both are registered before anything runs and run.json records them redacted; a
+  # resume that still needs one asks for it again on the terminal.
+  app_secret: { type: string, default: FIXTURE-SECRET-reference-demo-001 }   # the stack's sensitive variable
+  api_token: { type: string, default: FIXTURE-SECRET-reference-demo-token-001 }   # the role's no_log argument
+  config_dir: { type: string, default: /tmp/codeorca-reference }             # where the role writes app.conf
 
 steps:
   - id: plan_app
     type: terraform
     stack: app
     action: plan
-    var_overrides: { environment: "${{ inputs.env }}" }   # rendered into a temporary -var-file (last wins)
+    var_overrides:                                        # rendered into a temporary 0600 -var-file (last wins)
+      environment: "${{ inputs.env }}"
+      app_secret: "${{ inputs.app_secret }}"
     outputs:
       changed: "${{ result.exit_code == 2 }}"
       plan_file: "${{ result.files.plan_file }}"
-      plan_json: "${{ result.files.plan_json }}"           # the redacted plan document (not raw show -json), under the run dir only
-      prior_app_host: "${{ result.prior_outputs.app_host.value }}"   # from prior_state in the plan JSON (non-sensitive)
+      plan_json: "${{ result.files.plan_json }}"           # the redacted plan document, under the run dir only
+      planned: "${{ result.prior_outputs }}"               # non-sensitive root outputs as this plan evaluates them
 
   - id: plan_spec
     type: spec-render
@@ -31,9 +47,11 @@ steps:
   - id: approve
     type: gate
     needs: [plan_spec]
-    when: "steps.plan_app.outputs.changed"
-    message: "Apply app changes for ${{ inputs.env }}? Review ${{ steps.plan_spec.outputs.path }}"
-    non_interactive: wait                                 # exit 3; `codeorca resume <run> --approve` on a TTY
+    when: "steps.plan_app.outputs.changed"               # nothing to apply: no question asked
+    message: "Apply the app stack for ${{ inputs.env }}? Review ${{ steps.plan_spec.outputs.path }}"
+    non_interactive: wait                                 # no terminal: exit 3; `codeorca resume` on a terminal
+    timeout: 30m                                          # bounds the prompt on a terminal; a timeout never approves
+    on_timeout: fail
     allow_delete_of: []                                   # per-address waivers for plan-gate-flagged stateful deletes
 
   - id: apply_app
@@ -42,7 +60,7 @@ steps:
     when: "steps.plan_app.outputs.changed"
     stack: app
     action: apply
-    plan_file: "${{ steps.plan_app.outputs.plan_file }}"
+    plan_file: "${{ steps.plan_app.outputs.plan_file }}"  # bound to the sha256 the gate recorded
     retry: { limit: 2, policy: transient }                # lock acquisition only, before any change
     outputs:
       tf: "${{ result.tf_outputs }}"                      # sensitive entries kept as redacted references
@@ -51,18 +69,24 @@ steps:
   - id: configure
     type: ansible
     needs: [apply_app]
-    when: "always() and steps.apply_app.status in ['succeeded', 'skipped']"
+    # runs after an apply, after a --dry-run (apply skipped) and when the plan had no changes (gate and apply not
+    # needed); never after a rejection or a failed apply
+    when: >-
+      always() and steps.approve.status in ['succeeded', 'skipped']
+      and steps.apply_app.status in ['succeeded', 'skipped', 'omitted']
     playbook: ansible/site.yml
     inventory:
       inline:
         app:
           hosts:
             app-host:
-              ansible_host: "${{ steps.apply_app.outputs.tf.app_host.value | default(steps.plan_app.outputs.prior_app_host) }}"
-              ansible_connection: local                   # the reference project configures the container itself
-    extra_vars:
+              ansible_host: "${{ (steps.apply_app.outputs.tf | default(steps.plan_app.outputs.planned)).app_host.value }}"
+              ansible_connection: local                   # the reference project configures the machine it runs on
+    extra_vars:                                           # handed over as a 0600 `-e @file`, deleted after the play
       app_environment: "${{ inputs.env }}"
-      app_bucket: "${{ steps.apply_app.outputs.tf.app_bucket.value }}"
+      app_bucket: "${{ (steps.apply_app.outputs.tf | default(steps.plan_app.outputs.planned)).app_bucket.value }}"
+      app_api_token: "${{ inputs.api_token }}"
+      app_config_dir: "${{ inputs.config_dir }}"
     tags: [config]                                        # the role import in site.yml carries this tag
     outputs:
       stats: "${{ result.stats }}"
@@ -70,7 +94,6 @@ steps:
   - id: host_spec
     type: spec-render
     needs: [configure]
-    when: "always()"
     source:
       ansible:
         inventory: "${{ steps.configure.outputs.inventory_path }}"
@@ -80,20 +103,24 @@ steps:
     output: specs/app/hosts/app-host.yaml
 
   - id: dns_check
-    type: python
-    needs: [apply_app]
+    type: python                                          # [python, -I, script, *args], cwd = the project root
+    needs: [host_spec]
     script: helpers/check_dns.py
-    args: ["--name", "${{ steps.apply_app.outputs.tf.app_fqdn.value }}"]
-    env: { EXAMPLE_API_TOKEN: { secret: "ssm:/example/app/api-token" } }
+    args: ["--name", "localhost"]
+    # A helper secret comes from SSM into the child env only, registered for redaction first. CI has no AWS, so
+    # the reference keeps it commented out (a consumer's own workflow would set it):
+    # env: { EXAMPLE_API_TOKEN: { secret: "ssm:/example/app/api-token" } }
     outputs: { resolved: "${{ result.output.resolved }}" }
 
   - id: config_audit
-    type: powershell                                      # exercises the step type: -WhatIf, exit codes, PSScriptAnalyzer-clean
+    type: powershell                                      # pwsh -NoProfile -NonInteractive -File; -WhatIf on --dry-run
     needs: [host_spec]
     script: helpers/Test-AppConfig.ps1
-    args: ["-Spec", "specs/app/hosts/app-host.yaml", "-TfOutputs", "${{ steps.apply_app.outputs.tf_file }}"]
+    args: ["-SpecPath", "${{ steps.host_spec.outputs.path }}"]
+    outputs: { ok: "${{ result.output.ok }}" }
 
 finally:
   - id: summary
-    type: shell
-    run: ["codeorca", "summary", "${{ run.id }}"]
+    type: python
+    script: helpers/summary.py                            # `codeorca summary <run id>` for this project
+    args: ["${{ run.id }}"]

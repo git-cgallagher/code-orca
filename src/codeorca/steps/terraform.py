@@ -146,12 +146,17 @@ def backend_config(project: Project, stack: Stack) -> dict[str, object]:
 
 
 def resolve_stack_secrets(
-    stack_name: str, stack: Stack, registry: SecretRegistry, resolve_secret: SecretResolver | None
+    stack_name: str,
+    stack: Stack,
+    registry: SecretRegistry,
+    resolve_secret: SecretResolver | None,
+    unprotected: list[str] | None = None,
 ) -> dict[str, str]:
     """``stacks.<name>.secrets`` (``{ENV_NAME: ssm:/path}``) resolved for the CHILD env only, each value registered
     before it is returned (the resolver registers; this registers again, harmlessly, so an injected resolver that
     does not still cannot leak). No provider (boto3 missing): ``NO_PROVIDER_MESSAGE``; an ``SSMError`` keeps its
-    value-free message. A stack without secrets never touches the resolver."""
+    value-free message. A stack without secrets never touches the resolver. The env names whose value is too short
+    for the registry (nothing scrubs it) are appended to ``unprotected`` (names only): the step result warns."""
     if not stack.secrets:
         return {}
     from codeorca.providers import NO_PROVIDER_MESSAGE, SSMError
@@ -169,6 +174,8 @@ def resolve_stack_secrets(
         if value is None:
             raise StepError(f"stack {stack_name!r}: secret {name}: {ref} resolved to nothing")
         registry.add(str(value))
+        if unprotected is not None and len(str(value).strip()) < registry.min_length:
+            unprotected.append(str(name))
         resolved[str(name)] = str(value)
     return resolved
 
@@ -313,6 +320,17 @@ class StackSession:
     emit: Callable[[str, str], None] = lambda channel, line: None  # (channel, redacted line) -> the log sink
     durations: dict[str, float] = field(default_factory=dict)
     engine_version: str | None = None
+    unprotected_secrets: list[str] = field(default_factory=list)  # stack secrets too short to scrub: names only
+
+    def note_unprotected(self, result: StepResult) -> StepResult:
+        """Name, in the step result, every stack secret too short for the registry: nothing scrubs it."""
+        if self.unprotected_secrets:
+            result.result["unprotected_secrets"] = list(self.unprotected_secrets)
+            result.result.setdefault("warnings", []).append(
+                "stack secret(s) shorter than the registry minimum are not scrubbed from logs: "
+                + ", ".join(self.unprotected_secrets)
+            )
+        return result
 
     def record(self) -> None:
         _write_json(self.step_dir / "argv.json", [list(r.argv) for r in self.runner.history])
@@ -371,7 +389,8 @@ def open_session(
     then ``required_env`` is checked against that env (a name listed in both is satisfied by the secret)."""
     stack, workdir = resolve_stack(project, stack_name)
     assert project is not None and project.root is not None
-    secret_env = resolve_stack_secrets(stack_name, stack, registry, resolve_secret)
+    unprotected: list[str] = []
+    secret_env = resolve_stack_secrets(stack_name, stack, registry, resolve_secret, unprotected)
     env = {**env, **secret_env}
     check_required_env(stack, env)
     state_dir = project.root / project.state_dir
@@ -405,7 +424,9 @@ def open_session(
         plugin_cache_dir=child_env.get("TF_PLUGIN_CACHE_DIR"),
         deadline=None if timeout is None else time.monotonic() + timeout,
     )
-    return StackSession(project, stack_name, stack, workdir, registry, step_dir, runner, flush, state_dir, emit)
+    session = StackSession(project, stack_name, stack, workdir, registry, step_dir, runner, flush, state_dir, emit)
+    session.unprotected_secrets = unprotected
+    return session
 
 
 @dataclass
@@ -606,7 +627,7 @@ def execute(
         finally:
             session.record()
         result.outputs.setdefault("stack", stack_name)
-        return result
+        return session.note_unprotected(result)
 
 
 def _validate(session: StackSession) -> StepResult:
@@ -853,7 +874,7 @@ def apply_step(
         finally:
             session.record()
         result.outputs.setdefault("stack", str(step.stack))
-        return result
+        return session.note_unprotected(result)
 
 
 def _apply(session: StackSession, ctx: StepContext, plan_path: Path, producer: str, approval: Approval) -> StepResult:
@@ -959,7 +980,7 @@ def migrate_step(
             session.record()
         result["gate"] = approval.gate_id
         result["approver"] = approval.approver
-        return StepResult("succeeded", result=result, outputs={"stack": str(step.stack)})
+        return session.note_unprotected(StepResult("succeeded", result=result, outputs={"stack": str(step.stack)}))
 
 
 _COPY_IGNORE = shutil.ignore_patterns(".terraform", "terraform.tfstate", "terraform.tfstate.*", "*.tfplan")

@@ -434,3 +434,21 @@ def test_resume_with_the_same_project_still_runs_the_plan_gate(project, engine):
     record = rd.read_run()
     assert record["project_sha256"] and record["steps"]["apply"]["status"] == "failed"
     assert calls(engine, "apply") == 0
+
+
+def test_a_short_stack_secret_is_named_in_the_step_result(project, engine):
+    """Review finding: the terraform step said nothing when a stack secret was too short to scrub."""
+    import yaml
+
+    config = project.root / "codeorca.yaml"
+    data = yaml.safe_load(config.read_text(encoding="utf-8"))
+    data["stacks"]["app"]["secrets"] = {"TF_VAR_pin": "ssm:/example/app/pin"}
+    config.write_text(yaml.safe_dump(data), encoding="utf-8")
+    edited = load_project(config)
+    registry = SecretRegistry(b"example-not-secret-key", "env:test")
+    tf = terraform_step.make_executor(registry, resolve_secret=lambda ref: "493817")
+    r = run(edited, workflow([PLAN, GATE, APPLY]), engine, registry=registry, extra={"terraform": tf})
+    for sid in ("plan", "apply"):
+        result = r.run_dir.read_result(sid)
+        assert result["unprotected_secrets"] == ["TF_VAR_pin"], sid
+        assert any("TF_VAR_pin" in w for w in result["warnings"]), sid

@@ -123,3 +123,14 @@ def test_drift_and_run_take_the_stack_secret_from_the_resolver(tmp_path, monkeyp
     assert scan_outputs(root / "specs", check) == []
     for names in runs.rglob("env-names.json"):
         assert "TF_VAR_app_secret" in json.loads(names.read_text(encoding="utf-8"))
+
+
+def test_a_secret_too_short_to_register_is_reported_by_name():
+    """Review finding: a short stack secret reached Terraform's env with no warning (registry.add's False was
+    dropped, and SSMSecrets.unprotected is never read)."""
+    registry = SecretRegistry(b"example-not-secret", "env:test")
+    unprotected: list[str] = []
+    refs = stack(TF_VAR_pin="ssm:/example/pin", TF_VAR_app_secret="ssm:/example/app/secret")
+    values = {"ssm:/example/pin": "493817", "ssm:/example/app/secret": SECRET}
+    out = resolve_stack_secrets("app", refs, registry, values.__getitem__, unprotected)
+    assert out["TF_VAR_pin"] == "493817" and unprotected == ["TF_VAR_pin"]

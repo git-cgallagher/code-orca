@@ -20,7 +20,9 @@
 
 The output (``--output-file``, defaulting to ``$CODEORCA_OUTPUT_FILE``; stdout otherwise) is JSON:
 ``{bucket, region, account_id, created, changed: [...], dry_run, backend_files: [...], diff: {setting: {before,
-after}}, notes: [...]}``. Nothing in it is secret: settings, the bucket's own name, a KMS key ARN. Under
+after}}, notes: [...]}``. Nothing in it is secret: settings, the bucket's own name, a KMS key ARN. A replaced
+``backend.hcl`` appears as ``{sha256, bytes}`` before and the new (settings-only) text after: the previous file's
+content is never copied (a hand-written one can hold credentials; a note says so when it looks like it did). Under
 ``--dry-run`` (or ``CODEORCA_DRY_RUN=1``, which the python step sets) nothing is written, in AWS or on disk, and the
 diff is what a real run would change.
 
@@ -36,14 +38,17 @@ covers a hung credential provider); errors carry an AWS error code, never a resp
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
+import re
 import sys
 import tempfile
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from codeorca.adapters.terraform import CREDENTIAL_KEY_PATTERN
 from codeorca.project import Backend, Project, Stack, load_project
 from codeorca.providers.ssm import aws_config, boto3_available, call_with_deadline, describe_error
 
@@ -106,6 +111,17 @@ def render_backend_hcl(settings: dict[str, object]) -> str:
         text = ("true" if value else "false") if isinstance(value, bool) else _hcl_string(str(value))
         lines.append(f"{key.ljust(width)} = {text}")
     return "\n".join(lines) + "\n"
+
+
+def _file_digest(data: bytes | None) -> dict[str, Any] | None:
+    if data is None:
+        return None
+    return {"sha256": hashlib.sha256(data).hexdigest(), "bytes": len(data)}
+
+
+_CREDENTIAL_LINE = re.compile(
+    r"^\s*\w*(" + CREDENTIAL_KEY_PATTERN.pattern.removeprefix("(?i)") + r")\w*\s*=", re.IGNORECASE | re.MULTILINE
+)
 
 
 def desired_policy_statement(bucket: str) -> dict[str, Any]:
@@ -396,10 +412,20 @@ def bootstrap(
     backend_files: list[str] = []
     for name, target in targets:
         text = render_backend_hcl(backend_settings(project, project.stacks[name]))
-        previous = target.read_text(encoding="utf-8") if target.exists() else None
+        previous = target.read_bytes() if target.exists() else None
         rel = os.path.relpath(target, project.root)
         backend_files.append(rel)
-        if record(f"backend_file:{name}", previous, text) and not dry_run:
+        if previous == text.encode("utf-8"):
+            continue
+        # the previous file is described by digest and size only: a hand-written backend.hcl can hold credentials
+        # (the very thing this file replaces), and the diff lands in output.json, result.json and run.json
+        record(f"backend_file:{name}", _file_digest(previous), text)
+        if previous is not None and _CREDENTIAL_LINE.search(previous.decode("utf-8", "replace")):
+            notes.append(
+                f"backend_file:{name}: the previous {rel} held credential-looking settings; they are gone from the "
+                "file (rotate them if it was ever committed); credentials belong in the environment"
+            )
+        if not dry_run:
             _atomic_write(target, text)
 
     return {

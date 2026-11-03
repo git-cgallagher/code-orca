@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import subprocess
@@ -333,3 +334,23 @@ def test_main_honours_codeorca_dry_run_and_output_file_env(tmp_path, monkeypatch
 def test_main_returns_2_with_the_reason_on_refusal(capsys):
     assert main(["--project", str(REFERENCE)]) == 2
     assert "local backend has nothing to bootstrap" in capsys.readouterr().err
+
+
+def test_a_previous_backend_hcl_is_recorded_by_digest_never_by_content(tmp_path):
+    """Review finding: the diff copied the previous backend.hcl's text, credentials included, into the helper's
+    output (and from there result.json, outputs/ and run.json)."""
+    cred = "FIXTURE-SECRET-old-backend-secret-key-0001"
+    old = f'bucket     = "old"\naccess_key = "AKIAEXAMPLEEXAMPLE00"\nsecret_key = "{cred}"\n'
+    hcl = tmp_path / "terraform/app/backend.hcl"
+    project_file = write_project(tmp_path)
+    hcl.write_text(old)
+    out = tmp_path / "output.json"
+    assert main(["--project", str(project_file), "--output-file", str(out)]) == 0
+    text = out.read_text()
+    assert cred not in text and "AKIAEXAMPLE" not in text
+    doc = json.loads(text)
+    entry = doc["diff"]["backend_file:app"]
+    assert entry["before"] == {"sha256": hashlib.sha256(old.encode()).hexdigest(), "bytes": len(old.encode())}
+    assert entry["after"] == hcl.read_text() and "secret_key" not in entry["after"]
+    assert any("backend_file:app" in n and "credential-looking" in n for n in doc["notes"])
+    assert doc["diff"]["backend_file:net"]["before"] is None  # a new file

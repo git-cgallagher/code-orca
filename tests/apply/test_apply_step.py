@@ -271,6 +271,27 @@ def test_a_gate_that_recorded_no_plan_time_is_refused(project, engine):
     assert calls(engine, "apply") == 0
 
 
+def test_a_tie_in_decision_time_goes_to_the_downstream_gate(project, engine, monkeypatch):
+    """Review finding: with both gates decided in the same second, max() picked the alphabetically-first gate, so
+    an earlier gate's allow_delete_of governed instead of the final gate's (which waives nothing)."""
+    engine["FAKE_STDOUT_show"] = json.dumps({**PLAN_DOC, "resource_changes": [DELETE]})
+    first = {
+        "id": "a_waive",
+        "type": "gate",
+        "needs": ["plan"],
+        "message": "w",
+        "allow_delete_of": ["aws_s3_bucket.logs"],
+    }
+    final = {"id": "b_final", "type": "gate", "needs": ["a_waive"], "message": "final, no waiver"}
+    fixed = datetime.now(UTC).replace(microsecond=0).isoformat()
+    monkeypatch.setattr(gate_step, "now_utc", lambda: fixed)  # both decided "in the same second"
+    r = run(project, workflow([PLAN, first, final, {**APPLY, "needs": ["b_final"]}]), engine)
+    assert r.run_dir.read_result("a_waive")["decided_at"] == r.run_dir.read_result("b_final")["decided_at"]
+    assert r.states["apply"]["status"] == "failed" and "plan gate: aws_s3_bucket.logs" in r.states["apply"]["error"]
+    assert "gate b_final's allow_delete_of" in r.states["apply"]["error"]
+    assert calls(engine, "apply") == 0
+
+
 def _gate(prompt):
     return gate_step.make_executor(
         SecretRegistry(b"example-not-secret-key", "env:test"), prompt=prompt, isatty=lambda fd: True, out=lambda t: None

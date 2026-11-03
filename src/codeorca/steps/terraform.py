@@ -748,7 +748,11 @@ def find_approval(step, ctx: StepContext, plan_path: Path | None = None) -> Appr
     if not found:
         detail = "; ".join(reasons) or "the step needs no gate"
         raise Refused(f"step {step.id} needs an approving gate upstream ({detail})")
-    return max(found, key=lambda a: a.decided_at)
+    # newest first by decision time; decided_at has second precision, so a tie goes to the gate downstream of
+    # the others (it was decided after them), never to whichever id sorts first
+    graph = ctx.workflow.graph()  # type: ignore[union-attr]
+    found_ids = {a.gate_id for a in found}
+    return max(found, key=lambda a: (a.decided_at, len(_ancestors(graph, a.gate_id) & found_ids)))
 
 
 def check_approval_age(project: Project | None, approval: Approval) -> None:

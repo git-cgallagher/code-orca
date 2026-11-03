@@ -350,3 +350,66 @@ def test_a_dry_run_approval_never_counts_in_a_real_run(project, engine):
     )
     with pytest.raises(terraform_step.Refused, match="auto-approved by --dry-run"):
         terraform_step.find_approval(r.workflow.steps[2], ctx)
+
+
+def _waiting_run(project, wf, engine) -> RunDir:
+    registry = SecretRegistry(b"example-not-secret-key", "env:test")
+    executors = default_executors()
+    executors["terraform"] = terraform_step.make_executor(registry)
+    executors["gate"] = gate_step.make_executor(registry, isatty=lambda fd: False, out=lambda text: None)
+    rd = RunDir(project.root / project.state_dir)
+    assert Runner(project, wf, {}, rd, executors, env=engine, sleep=lambda s: None).run() == 3
+    return rd
+
+
+def _resume(project, rd, wf, engine):
+    from codeorca.resume import resume
+
+    registry = SecretRegistry(b"example-not-secret-key", "env:test")
+    executors = default_executors()
+    executors["terraform"] = terraform_step.make_executor(registry)
+    executors["gate"] = _gate(lambda text, t: "approve")
+    return resume(
+        project,
+        rd,
+        "approve",
+        executors=executors,
+        isatty=lambda fd: True,
+        workflow=wf,
+        env=engine,
+        registry=registry,
+        cwd=project.root,
+        getuser=lambda: "alice",
+    )
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [("aws_s3_bucket", "aws_nothing_here"), ("max_age: 24h", "max_age: 9999h")],
+    ids=["stateful_types", "max_age"],
+)
+def test_resume_refuses_when_the_project_changed_since_the_stop(project, engine, old, new):
+    """Review finding: resume pinned the workflow but not codeorca.yaml, so dropping a stateful type (or raising
+    gate.max_age) between the exit-3 stop and the human's resume let the approved apply delete a bucket."""
+    from codeorca.resume import ResumeRefused
+
+    engine["FAKE_STDOUT_show"] = json.dumps({**PLAN_DOC, "resource_changes": [DELETE]})
+    wf = workflow([PLAN, GATE, APPLY])
+    rd = _waiting_run(project, wf, engine)
+    config = project.root / "codeorca.yaml"
+    text = config.read_text(encoding="utf-8")
+    assert old in text
+    config.write_text(text.replace(old, new), encoding="utf-8")
+    with pytest.raises(ResumeRefused, match=r"the project \(codeorca.yaml\) changed"):
+        _resume(load_project(config), rd, wf, engine)
+    assert rd.read_run()["status"] == "waiting" and calls(engine, "apply") == 0
+
+
+def test_resume_with_the_same_project_still_runs_the_plan_gate(project, engine):
+    engine["FAKE_STDOUT_show"] = json.dumps({**PLAN_DOC, "resource_changes": [DELETE]})
+    wf = workflow([PLAN, GATE, APPLY])
+    rd = _waiting_run(project, wf, engine)
+    _resume(load_project(project.root / "codeorca.yaml"), rd, wf, engine)
+    record = rd.read_run()
+    assert record["project_sha256"] and record["steps"]["apply"]["status"] == "failed"
+    assert calls(engine, "apply") == 0

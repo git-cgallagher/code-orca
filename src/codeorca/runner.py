@@ -181,6 +181,15 @@ def workflow_sha256(workflow: Workflow) -> str:
     return hashlib.sha256(workflow.model_dump_json(by_alias=True).encode("utf-8")).hexdigest()
 
 
+def project_sha256(project: Project | None) -> str | None:
+    """A digest of the loaded project (codeorca.yaml as validated): what decides whether an approved apply may
+    proceed (``policy``, ``gate.max_age``, ``backend``, ``stacks``) comes from it, so a resume refuses when it
+    changed since the run stopped, as it does for the workflow."""
+    if project is None:
+        return None
+    return hashlib.sha256(project.model_dump_json(by_alias=True).encode("utf-8")).hexdigest()
+
+
 def _git_sha(cwd: Path | None) -> str | None:
     try:
         out = subprocess.run(
@@ -293,6 +302,7 @@ class Runner:
         self.exit_code: int | None = None
         self.transient = [re.compile(p) for p in (project.policy.transient_errors if project else [])]
         self.workflow_sha256 = workflow_sha256(workflow)
+        self.project_sha256 = project_sha256(project)
         self.resumes: list[dict[str, Any]] = []
         if _restored is not None:
             self._restore(_restored)
@@ -680,6 +690,7 @@ class Runner:
             "codeorca": __version__,
             "workflow": self.workflow.name,
             "workflow_sha256": self.workflow_sha256,
+            "project_sha256": self.project_sha256,
             "project": self.project.project if self.project else None,
             "git_sha": self.git_sha,
             "dry_run": self.dry_run,

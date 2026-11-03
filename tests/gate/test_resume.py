@@ -356,7 +356,13 @@ def test_a_resupplied_value_must_match_the_recorded_placeholder(tmp_path):
             "inputs": {"blob": {"type": "string"}},
             "steps": [
                 {"id": "approve", "type": "gate", "message": "m"},
-                {"id": "b", "type": "shell", "needs": ["approve"], "run": ["${{ inputs.blob }}"]},
+                {
+                    "id": "b",
+                    "type": "shell",
+                    "needs": ["approve"],
+                    "run": ["${{ inputs.blob }}"],
+                    "outputs": {"echo": "seen ${{ inputs.blob }}"},
+                },
             ],
         }
     )
@@ -366,8 +372,14 @@ def test_a_resupplied_value_must_match_the_recorded_placeholder(tmp_path):
     assert rd.read_run()["inputs"]["blob"].startswith("<redacted:hmac:")
     fresh = SecretRegistry(KEY, "env:test")
     with pytest.raises(ResumeRefused, match="does not match"):
-        go(rd, calls, fresh, wf=wf, secret_inputs={"blob": "FIXTURE-SECRET-some-other-value"})
+        go(rd, calls, SecretRegistry(KEY, "env:test"), wf=wf, secret_inputs={"blob": "FIXTURE-SECRET-some-other-value"})
     assert go(rd, calls, fresh, wf=wf, secret_inputs={"blob": SECRET}) == EXIT_OK
+    assert calls.argv["b"] == [SECRET]
+    # the re-supplied value (a name the key denylist does not cover) is registered: nothing under the run dir
+    # holds it in clear after the resume (run.json inputs, the step's outputs, its result)
+    for path in rd.path.rglob("*"):
+        if path.is_file():
+            assert SECRET.encode() not in path.read_bytes(), path
 
 
 @pytest.mark.parametrize(

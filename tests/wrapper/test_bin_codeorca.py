@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import pty
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -28,15 +29,39 @@ SECRETS = {
     "TF_VAR_db_password": "FIXTURE-SECRET-wrapper-002",
 }
 
-# Records each call as one JSON line: argv, plus whether the call is the chown. The codeorca run exits
-# FAKE_DOCKER_RC, the chown FAKE_CHOWN_RC, so exit-code propagation is tested on the run that matters.
+# Records each call as one JSON line: argv, plus its kind ("info", "chown" or "run"). `docker info` answers from
+# FAKE_DOCKER_DAEMON (down -> exit 1) and FAKE_DOCKER_ROOTLESS; the codeorca run exits FAKE_DOCKER_RC, the chown
+# FAKE_CHOWN_RC, so exit-code propagation is tested on the run that matters.
 FAKE_DOCKER = f"""#!{sys.executable}
 import json, os, sys
 argv = sys.argv[1:]
-chown = "--entrypoint" in argv and argv[argv.index("--entrypoint") + 1] == "chown"
+if argv[:1] == ["info"]:
+    kind = "info"
+elif "--entrypoint" in argv and argv[argv.index("--entrypoint") + 1] == "find":
+    kind = "chown"
+else:
+    kind = "run"
 with open(os.environ["FAKE_DOCKER_LOG"], "a") as f:
-    f.write(json.dumps({{"argv": argv, "chown": chown}}) + "\\n")
-sys.exit(int(os.environ.get("FAKE_CHOWN_RC" if chown else "FAKE_DOCKER_RC", "0")))
+    f.write(json.dumps({{"argv": argv, "kind": kind, "chown": kind == "chown"}}) + "\\n")
+if kind == "info":
+    if os.environ.get("FAKE_DOCKER_DAEMON") == "down":
+        print("failed to connect to the docker API", file=sys.stderr)
+        sys.exit(1)
+    opts = ["name=seccomp,profile=builtin"] + (["name=rootless"] if os.environ.get("FAKE_DOCKER_ROOTLESS") else [])
+    print(json.dumps(opts))
+    sys.exit(0)
+sys.exit(int(os.environ.get("FAKE_CHOWN_RC" if kind == "chown" else "FAKE_DOCKER_RC", "0")))
+"""
+
+# The caller's uid:gid is the test's, not the process's: the suite also runs as root (inside the image), where the
+# wrapper deliberately skips the chown.
+FAKE_UID, FAKE_GID = "1001", "1002"
+FAKE_ID = f"""#!/bin/sh
+case $1 in
+  -u) echo "${{FAKE_UID:-{FAKE_UID}}}" ;;
+  -g) echo "${{FAKE_GID:-{FAKE_GID}}}" ;;
+  *) exit 1 ;;
+esac
 """
 
 
@@ -44,9 +69,9 @@ sys.exit(int(os.environ.get("FAKE_CHOWN_RC" if chown else "FAKE_DOCKER_RC", "0")
 def sandbox(tmp_path):
     fakebin = tmp_path / "fakebin"
     fakebin.mkdir()
-    docker = fakebin / "docker"
-    docker.write_text(FAKE_DOCKER)
-    docker.chmod(0o755)
+    for name, text in (("docker", FAKE_DOCKER), ("id", FAKE_ID)):
+        (fakebin / name).write_text(text)
+        (fakebin / name).chmod(0o755)
     home = tmp_path / "home"
     home.mkdir()
     project = tmp_path / "project"
@@ -54,7 +79,7 @@ def sandbox(tmp_path):
     log = tmp_path / "docker.log"
     # A clean environment: whatever the developer's shell exports (real AWS_* included) never reaches the test.
     env = {"PATH": f"{fakebin}:/usr/bin:/bin", "HOME": str(home), "FAKE_DOCKER_LOG": str(log)}
-    return {"env": env, "project": project, "home": home, "log": log}
+    return {"env": env, "project": project, "home": home, "log": log, "fakebin": fakebin}
 
 
 def run(sandbox, *args, extra_env=None, **kwargs):
@@ -70,7 +95,7 @@ def run(sandbox, *args, extra_env=None, **kwargs):
 
 
 def the_run(calls):
-    runs = [c["argv"] for c in calls if not c["chown"]]
+    runs = [c["argv"] for c in calls if c["kind"] == "run"]
     assert len(runs) == 1, calls
     return runs[0]
 
@@ -212,10 +237,14 @@ def chown_targets(calls):
     assert len(chowns) == 1
     argv = chowns[0]
     assert argv[: argv.index("--entrypoint")] == ["run", "--rm", "-v", argv[3], "-w", "/work"]
-    tail = argv[argv.index("--") + 1 :]
-    owner = argv[argv.index("--") - 1]
-    assert owner == f"{os.getuid()}:{os.getgid()}"
-    return tail
+    # find -P <targets> -uid 0 -exec chown -h <uid>:<gid> -- {} +: only root-owned files change, never through a link
+    tail = argv[argv.index("--entrypoint") + 3 :]
+    assert tail[0] == "-P"
+    i = tail.index("-uid")
+    assert tail[i:] == ["-uid", "0", "-exec", "chown", "-h", f"{FAKE_UID}:{FAKE_GID}", "--", "{}", "+"]
+    targets = tail[1:i]
+    assert all(t.startswith("./") for t in targets)  # never parsed as a find expression
+    return [t[2:] for t in targets]
 
 
 def test_chown_targets_only_state_and_specs_dirs(sandbox):
@@ -247,19 +276,79 @@ def test_chown_follows_the_project_file(sandbox, flag):
     assert chown_targets(calls) == ["sub/state", "sub/specs"]
 
 
-def test_chown_with_an_absolute_project_path_under_pwd(sandbox):
+@pytest.mark.parametrize(
+    "form",
+    [
+        lambda p: ["-p", p],
+        lambda p: ["--project", p],
+        lambda p: [f"-p{p}"],
+        lambda p: [f"--project={p}"],
+    ],
+)
+def test_an_absolute_project_path_under_pwd_is_rewritten_for_the_container(sandbox, form):
     proj = sandbox["project"]
-    (proj / "codeorca.yaml").write_text("api: codeorca/v1\n")
-    (proj / "specs").mkdir()
-    _, calls = run(sandbox, "run", "x", "-p", str(proj / "codeorca.yaml"))
-    assert chown_targets(calls) == ["specs"]
+    (proj / "sub").mkdir()
+    (proj / "sub" / "codeorca.yaml").write_text("api: codeorca/v1\n")
+    (proj / "sub" / "specs").mkdir()
+    proc, calls = run(sandbox, "run", "x", *form(str(proj / "sub" / "codeorca.yaml")))
+    assert proc.returncode == 0, proc.stderr
+    argv = the_run(calls)
+    tail = argv[argv.index("codeorca") :]
+    assert tail == ["codeorca", "run", "x", *form("sub/codeorca.yaml")]  # the path the container sees
+    assert str(proj) not in " ".join(tail)
+    assert chown_targets(calls) == ["sub/specs"]
 
 
-def test_chown_refuses_paths_outside_the_tree_and_symlinks(sandbox, tmp_path):
+@pytest.mark.parametrize("path", ["/etc/codeorca.yaml", "../outside/codeorca.yaml", "sub/../../codeorca.yaml"])
+def test_a_project_file_outside_pwd_is_refused(sandbox, path):
+    proc, calls = run(sandbox, "run", "x", "-p", path)
+    assert proc.returncode == 64
+    assert b"only" in proc.stderr and b"mounted" in proc.stderr
+    assert calls == []  # not even docker info
+
+
+@pytest.mark.parametrize(
+    ("line", "command"),
+    [
+        ("state_dir: /var/tmp/codeorca/runs", "run"),
+        ("state_dir: ../escape/runs", "resume"),
+        ("specs_dir: /tmp/specs", "drift"),
+        ("specs_dir: ../../specs", "summary"),
+    ],
+)
+def test_a_state_or_specs_dir_outside_pwd_is_refused(sandbox, line, command):
+    (sandbox["project"] / "codeorca.yaml").write_text(f"api: codeorca/v1\n{line}\n")
+    proc, calls = run(sandbox, command, "latest")
+    assert proc.returncode == 64, proc.stderr
+    assert line.split(":")[0].encode() in proc.stderr
+    assert calls == []
+
+
+def test_paths_outside_pwd_do_not_block_commands_that_never_touch_them(sandbox):
+    (sandbox["project"] / "codeorca.yaml").write_text("api: codeorca/v1\nstate_dir: /var/tmp/runs\n")
+    for command in (["doctor"], ["validate", "workflows/x.yaml"]):
+        proc, calls = run(sandbox, *command)
+        assert proc.returncode == 0, proc.stderr
+        assert chown_targets(calls) is None  # an absolute state_dir is never chowned
+        sandbox["log"].unlink()
+
+
+def test_a_state_dir_leaving_the_project_root_but_not_pwd_runs_and_is_not_chowned(sandbox):
+    proj = sandbox["project"]
+    (proj / "sub").mkdir()
+    (proj / "sub" / "codeorca.yaml").write_text("api: codeorca/v1\nstate_dir: ../shared/runs\n")
+    (proj / "shared" / "runs").mkdir(parents=True)
+    (proj / "sub" / "specs").mkdir()
+    proc, calls = run(sandbox, "run", "x", "-p", "sub/codeorca.yaml")
+    assert proc.returncode == 0, proc.stderr
+    assert chown_targets(calls) == ["sub/specs"]
+
+
+def test_chown_refuses_symlinks_and_absolute_paths(sandbox, tmp_path):
     proj = sandbox["project"]
     outside = tmp_path / "outside"
     outside.mkdir()
-    (proj / "codeorca.yaml").write_text("api: codeorca/v1\nstate_dir: ../escape/runs\nspecs_dir: specs\n")
+    (proj / "codeorca.yaml").write_text("api: codeorca/v1\nspecs_dir: specs\n")
     (proj / "specs").symlink_to(outside)
     _, calls = run(sandbox, "run", "x")
     assert chown_targets(calls) is None  # nothing eligible: no chown container at all
@@ -267,15 +356,93 @@ def test_chown_refuses_paths_outside_the_tree_and_symlinks(sandbox, tmp_path):
     sandbox["log"].unlink()
     (proj / "codeorca.yaml").write_text("api: codeorca/v1\nspecs_dir: /etc\n")
     (proj / ".codeorca").mkdir()
-    _, calls = run(sandbox, "run", "x")
+    _, calls = run(sandbox, "doctor")
     assert chown_targets(calls) == [".codeorca"]
 
-    sandbox["log"].unlink()
-    _, calls = run(sandbox, "run", "x", "-p", "../outside/codeorca.yaml")
-    assert chown_targets(calls) is None
+
+@pytest.mark.parametrize(
+    ("yaml", "dirs", "want"),
+    [
+        ("state_dir: ./.codeorca/runs", [".codeorca/runs", "specs"], [".codeorca", "specs"]),
+        ("state_dir: ././.codeorca//runs/.", [".codeorca/runs", "specs"], [".codeorca", "specs"]),
+        ("specs_dir: .", [".codeorca/runs"], [".codeorca"]),
+        ("specs_dir: ./", [".codeorca/runs"], [".codeorca"]),
+        ("state_dir: .\nspecs_dir: specs/..", [".codeorca"], None),
+    ],
+)
+def test_chown_never_targets_the_project_root(sandbox, yaml, dirs, want):
+    proj = sandbox["project"]
+    (proj / "codeorca.yaml").write_text(f"api: codeorca/v1\n{yaml}\n")
+    for d in dirs:
+        (proj / d).mkdir(parents=True)
+    _, calls = run(sandbox, "run", "plan-only")
+    assert chown_targets(calls) == want
 
 
 def test_no_chown_without_a_project_file(sandbox):
     (sandbox["project"] / ".codeorca").mkdir()
     _, calls = run(sandbox, "validate")
     assert chown_targets(calls) is None
+
+
+def test_no_chown_for_a_root_caller_or_under_rootless_docker(sandbox):
+    (sandbox["project"] / "codeorca.yaml").write_text("api: codeorca/v1\n")
+    (sandbox["project"] / ".codeorca").mkdir()
+    _, calls = run(sandbox, "run", "x")
+    assert chown_targets(calls) == [".codeorca"]
+    for extra in ({"FAKE_UID": "0", "FAKE_GID": "0"}, {"FAKE_DOCKER_ROOTLESS": "1"}):
+        sandbox["log"].unlink()
+        proc, calls = run(sandbox, "run", "x", extra_env=dict(extra, FAKE_DOCKER_RC="3"))
+        assert proc.returncode == 3
+        assert chown_targets(calls) is None, extra
+
+
+def test_docker_missing(sandbox, tmp_path):
+    # A PATH holding only what the wrapper needs, so a docker in /usr/bin (Linux runners) is not found either.
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    for tool in ("bash", "env", "uname", "sed", "head", "dirname", "mkdir"):
+        found = shutil.which(tool, path="/usr/bin:/bin")
+        assert found, tool
+        (tools / tool).symlink_to(found)
+    (tools / "id").symlink_to(sandbox["fakebin"] / "id")
+    proc, calls = run(sandbox, "run", "x", extra_env={"PATH": str(tools)})
+    assert proc.returncode == 69
+    assert b"docker is not on PATH" in proc.stderr
+    assert b"could not chown" not in proc.stderr
+    assert calls == []
+
+
+def test_docker_daemon_unreachable(sandbox):
+    (sandbox["project"] / "codeorca.yaml").write_text("api: codeorca/v1\n")
+    (sandbox["project"] / ".codeorca").mkdir()
+    proc, calls = run(sandbox, "run", "x", extra_env={"FAKE_DOCKER_DAEMON": "down"})
+    assert proc.returncode == 69  # never 1, which is codeorca's "workflow failed"
+    assert b"cannot reach the Docker daemon" in proc.stderr
+    assert [c["kind"] for c in calls] == ["info"]
+
+
+@pytest.mark.parametrize("rc", [125, 126, 127])
+def test_no_chown_when_the_container_never_started(sandbox, rc):
+    (sandbox["project"] / "codeorca.yaml").write_text("api: codeorca/v1\n")
+    (sandbox["project"] / ".codeorca").mkdir()
+    proc, calls = run(sandbox, "run", "x", extra_env={"FAKE_DOCKER_RC": str(rc)})
+    assert proc.returncode == rc
+    assert chown_targets(calls) is None
+    assert b"did not start" in proc.stderr
+
+
+def test_home_unset(sandbox):
+    env = {k: v for k, v in sandbox["env"].items() if k != "HOME"}
+    proc = subprocess.run(
+        [str(WRAPPER), "validate", "x.yaml"],
+        cwd=sandbox["project"],
+        env=env,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        timeout=60,
+    )
+    assert proc.returncode == 0, proc.stderr
+    calls = [json.loads(line) for line in sandbox["log"].read_text().splitlines()]
+    argv = the_run(calls)
+    assert not any("known_hosts" in a or "plugin-cache" in a for a in argv)

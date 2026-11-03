@@ -66,11 +66,25 @@ CODEORCA_IMAGE=ghcr.io/git-cgallagher/code-orca-runtime:X.Y.Z bin/codeorca docto
   Molecule or `community.docker` need it).
 - ssh agent (Docker Desktop's `/run/host-services/ssh-auth.sock` on macOS, `$SSH_AUTH_SOCK` on Linux),
   `~/.ssh/known_hosts` read-only, and `~/.terraform.d/plugin-cache` (created if absent) are mounted.
-- **The image runs as root.** On Linux, files it writes under `$PWD` are root-owned; after the run the wrapper
-  chowns the project's state dir (the first component of `state_dir`, normally `.codeorca`) and `specs_dir` back
-  to the caller, nothing else (a symlinked dir, an absolute path or one with `..` is skipped). Terraform's own
-  working files (`.terraform/`, `.terraform.lock.hcl`) and the plugin cache stay root-owned on Linux. On Docker
-  Desktop for macOS files already show as the caller's. The wrapper's exit code is always codeorca's.
+- **Everything must live under `$PWD`**, the only tree mounted. An absolute `-p`/`--project` under `$PWD` is
+  rewritten to the relative path the container sees; a project file outside it is refused (exit 64). For `run`,
+  `resume`, `drift`, `render`, `summary` and `runs`, a project whose `state_dir` or `specs_dir` is absolute or
+  leaves `$PWD` is refused too (exit 64): codeorca would write the run dir or specs into the container's own
+  filesystem, `--rm` would delete them, and a run stopped at a gate could never be resumed. codeorca's parser
+  takes no abbreviated options (`--proj` is an error), so the wrapper always sees the project file codeorca uses.
+- **The image runs as root.** On Linux with rootful Docker, files it writes under `$PWD` are root-owned; after the
+  run a second container chowns back to the caller the **root-owned** files (`find -P … -uid 0 -exec chown -h`)
+  under the project's state dir (the first component of `state_dir` below the project root, normally
+  `.codeorca`) and `specs_dir`, nothing else: never the project root itself (`specs_dir: .`), never through a
+  symlink, never a path that is absolute or leaves the project root. Skipped for a root caller, under rootless
+  Docker (`docker info` reports `name=rootless`: container root is the caller there, so a chown would hand the
+  files to a subordinate uid; Podman is not tested), and when the run container never started. Terraform's own
+  working files (`.terraform/`, `.terraform.lock.hcl`) and the plugin cache stay root-owned on rootful Linux. On
+  Docker Desktop for macOS files already show as the caller's.
+- **Exit codes:** codeorca's (0, 1 failed, 2 drift, 3 waiting at a gate), whatever the chown does; docker's
+  125/126/127 when the run container could not start; 64 when the wrapper refuses its arguments or the project's
+  paths; 69 when the `docker` CLI is missing or the daemon cannot be reached (checked with `docker info` first).
+- `HOME` unset or empty: the `known_hosts` and plugin-cache mounts are skipped (the image has its own empty cache).
 - The image defaults to `:latest`. Set `CODEORCA_IMAGE` to the same image as the project's `runtime.image` so
   `codeorca doctor` checks the image you meant.
 

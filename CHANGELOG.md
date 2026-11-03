@@ -5,6 +5,12 @@
 - Phase 4 review fixes: `container/requirements/lock.sh` locks inside the image on the Dockerfile's literal
   `AS pinned-base` line again (it had read `ARG BASE_IMAGE=`, which names the stage since the Dependabot refactor,
   and ran `docker run pinned-base`); a `BASE_IMAGE` override must be digest-pinned; `--print-base`.
+  `bin/codeorca`: an absolute `-p` under `$PWD` is rewritten for the container (it failed "not found"), a project file,
+  `state_dir` or `specs_dir` outside `$PWD` is refused (exit 64) instead of being written to the container's
+  throwaway filesystem; the chown changes only root-owned files, never the project root (`./.codeorca/runs`,
+  `specs_dir: .` had chowned the whole tree), and is skipped under rootless Docker and when the container never
+  started; a missing `docker` or unreachable daemon exits 69 (it had exited 1, like a failed workflow); `HOME` unset
+  no longer aborts. codeorca takes no abbreviated long options (`--proj`), on any subcommand.
 - Container image (Phase 4): `container/Dockerfile` builds `code-orca-runtime` on ansible-runtime 1.3.0 with
   Terraform 1.14.7 (GPG-verified release zip + its BSL 1.1 license), PowerShell 7.6.9 LTS + PSScriptAnalyzer 1.25.0
   and the code-orca wheel under the base's pins (no venv, `pip check` in the build); `container/tests/smoke.sh`

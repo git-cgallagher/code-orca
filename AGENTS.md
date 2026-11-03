@@ -16,7 +16,7 @@ Consumers keep their own `codeorca.yaml`, `workflows/`, `specs/` in their own (u
 |---|---|
 | `src/codeorca/models.py` | Pydantic v2 models: the single source of truth for workflow files and the JSON Schema |
 | `src/codeorca/config.py` | YAML 1.2 loader (ruamel, pure) |
-| `src/codeorca/cli.py` | `codeorca validate`, `schema export [--check]` (workflow + project schemas), `run` (registers the terraform, ansible, spec-render, gate, python and powershell executors; one SSM resolver per run, `make_resolver`, handed to the helpers and the terraform step), `resume <run-id\|latest> (--approve [--field k=v] \| --reject)` (terminal check first, before anything is read; secret inputs via `getpass` from `resume.needed_secret_inputs`, never a flag), `drift` (stack secrets through the resolver too), `doctor`, `render`, `summary`, `runs gc`, `lint ansible` (`-p` optional there), `lint powershell <paths> [--ansible-settings]`; every project command takes `-p`; the registry gets `key_fetcher=ssm_key_fetcher(project)`. Nothing here passes `isatty=`/`prompt=` (a test greps the source) |
+| `src/codeorca/cli.py` | `codeorca validate`, `schema export [--check]` (workflow + project schemas), `run` (registers the terraform, ansible, spec-render, gate, python and powershell executors; one SSM resolver per run, `make_resolver`, handed to the helpers and the terraform step), `resume <run-id\|latest> (--approve [--field k=v] \| --reject)` (terminal check first, before anything is read; secret inputs via `getpass` from `resume.needed_secret_inputs`, never a flag; `--field` refused for a field named like a secret, which is asked with `getpass` instead; `--approve` prints `describe_gate` and asks for a typed `approve`; `run` records `redaction_key_id`), `drift` (stack secrets through the resolver too), `doctor`, `render`, `summary`, `runs gc`, `lint ansible` (`-p` optional there), `lint powershell <paths> [--ansible-settings]`; every project command takes `-p`; the registry gets `key_fetcher=ssm_key_fetcher(project)`. Nothing here passes `isatty=`/`prompt=` (a test greps the source) |
 | `src/codeorca/secrets.py` | run-wide redaction wiring: `build_registry(project, env, *, key_fetcher=None)` (HMAC key: `CODEORCA_REDACTION_KEY` when set, SSM not called; else the SecureString `redaction.hmac_key` through `key_fetcher` = `ssm_key_fetcher(project)`, key id `<ref>@<version>`; else fail closed naming the parameter; seeds from `AWS_SECRET_ACCESS_KEY`/`AWS_SESSION_TOKEN` + every stack's `secrets:`/`required_env` values), `seed_inputs` (inputs whose name matches the key denylist), `line_hook` for `Runner(stream=)`, `record_filter` for `Runner(redact=)`, `terraform_stream` (a `StreamRedactor` per channel) for `TerraformRunner(stream=)` |
 | `src/codeorca/providers/` | secret providers (plan 5.9): `ssm.py` (`SSMSecrets(registry, *, session_factory, region, timeout_s)`: `get`/`resolve_secret`/`fetch`, a SecureString or any value fetched as a secret registered before it is returned, per-run in-memory cache, `__reduce__` raises; `fetch_parameter`, `aws_config` (connect/read timeout, `retries={'max_attempts': 2}`), `call_with_deadline` (wall-clock limit on a daemon thread, covers a hung credential provider); errors carry the parameter + error code only); `__init__.py` `make_resolver(project, registry)` (`None` without boto3), `make_secrets`, `declared_secret_refs`, `NO_PROVIDER_MESSAGE`; boto3 is the `aws` extra, imported lazily |
 | `src/codeorca/bootstrap/s3.py` | S3 state-backend bootstrap (plan 5.11; `python -m codeorca.bootstrap.s3 --project … [--dry-run] [--output-file]`, `main(argv)`, `bootstrap(project, *, dry_run, session_factory, timeout_s)`): refuses a local backend and a caller outside `backend.account_id`, creates the bucket, refuses an Object Lock default retention before any write, converges public access block / versioning / encryption / TLS-only policy statement (Sid `CodeOrcaDenyInsecureTransport`, merged) / noncurrent-expiry lifecycle rule (merged by ID) / `managed-by=code-orca` tag, writes each stack's `backend.hcl` (`backend_settings`, `render_backend_hcl`); output `{bucket, region, account_id, created, changed, dry_run, backend_files, diff, notes}`; never touches objects |
@@ -30,8 +30,8 @@ Consumers keep their own `codeorca.yaml`, `workflows/`, `specs/` in their own (u
 | `src/codeorca/lint/` | `lint_playbooks(paths, key_denylist, lookup_denylist)` -> `{file, line, rule, level, message}`: `no-hostvars-dump`, `debug-secret-name`, `secret-to-plain-param` (module `no_log` from DOCUMENTATION plus a source scan of `argument_spec`; `resolve_module` injectable), `unknown-module` (info), `redundant-task-no-log` (info) |
 | `tests/specs/test_ansible_host*.py`, `tests/lint/`, `tests/fixtures/ansible_host/` | host spec and lint tests; the fixture inventory (2 hosts, templated/int/vaulted/lookup/password-named vars, `roles/app_config` with an argument spec and a template; the vault password is the placeholder `vault-pass.txt`); the subprocess and installed-module tests skip without ansible-core (`pip install -e '.[ansible]'`) |
 | `src/codeorca/steps/terraform.py` | the `terraform` executor (`make_executor(registry, resolve_secret=None)`): stack resolution, the stack's `secrets:` resolved into the child env only and registered first (`resolve_stack_secrets`; before `required_env` is checked; no resolver -> `NO_PROVIDER_MESSAGE`, `SSMError` -> its value-free message), per-stack flock, non-secret backend config (`backend_config` = `bootstrap.s3.backend_settings` for s3), pre-plan registration of sensitive `var_overrides` / `TF_VAR_*`, `init` (`-lockfile=readonly` under `CI`), `validate`/`plan`/`output`/`test`; `apply` (`apply_step`: `resolve_plan_file` = this run's own plan output for the stack, `find_approval` = an approving gate the step transitively needs whose recorded sha256 matches, `check_approval_age` against `gate.max_age`, `show -json` seeds the registry, applyable/complete check, plan gate again with the gate's `allow_delete_of`, adapter apply, redacted `tf_outputs`, plan file deleted; retries only after a lock error before any change, via `apply-attempt.json`; `--dry-run` = skipped) and `migrate_backend` (`migrate_step`/`migrate_stack`: approving gate, `state list` probe of the target from a temp copy of the stack, then `init -migrate-state -force-copy` without `-json`); `open_session` + `plan_stack` are what `codeorca drift` reuses |
-| `src/codeorca/steps/gate.py` | the `gate` executor (`make_executor(registry, *, prompt, isatty, out, getuser)`): `--dry-run` auto-approves (`approver: dry-run`); on a terminal (stdin AND stdout) prints the redacted message, staged specs and plan files + sha256, asks approve/reject and the typed `fields`, records approver/decision/`decided_at`/`plans` (the binding); no terminal: `non_interactive: wait` -> `waiting` (exit 3), `fail` -> failed; `timeout` bounds the prompt, no `on_timeout` approves; helpers `collect_plans`, `plan_binding_problems`, `coerce_fields`, `is_terminal`, `terminal_prompt` |
-| `src/codeorca/resume.py` | `needed_secret_inputs(workflow, record)` (what the CLI asks for), `resume(project, run_dir, decision, *, fields, executors, isatty, secret_inputs, workflow, env, stream, redact, registry, …)`: terminal required (no env var or keyword bypass), refuses non-waiting runs, a changed workflow (`workflow_sha256`), on approve a gate older than `gate.max_age` or a changed/missing plan file; redacted inputs a remaining step needs must be re-supplied (`secret_inputs`); settles the gate, replays completed steps, runs the rest and `finally` once; `ResumeRefused` |
+| `src/codeorca/steps/gate.py` | the `gate` executor (`make_executor(registry, *, prompt, isatty, out, getuser, secret_prompt)`): `--dry-run` auto-approves (`approver: dry-run`); on a terminal (stdin AND stdout) prints the redacted message, staged specs and plan files + sha256, asks approve/reject and the typed `fields` (a field named like a secret through `terminal_secret_prompt`, echo off; one too short to register is named in `unprotected_fields` + `warning`), records approver/decision/`decided_at`/`waiting_since`/`plans` (the binding: `{path, sha256, planned_at}`); no terminal: `non_interactive: wait` -> `waiting` (exit 3), `fail` -> failed; `timeout` bounds the prompt, no `on_timeout` approves; helpers `collect_plans`, `plan_binding_problems`, `coerce_fields`, `is_terminal`, `terminal_prompt` |
+| `src/codeorca/resume.py` | `needed_secret_inputs(workflow, record)` (what the CLI asks for), `waiting_gate`/`describe_gate` (what `resume --approve` shows), `resume(project, run_dir, decision, *, fields, executors, isatty, secret_inputs, workflow, env, stream, redact, registry, …)` (`isatty` resolved at call time): terminal required (no env var or keyword bypass), refuses non-waiting runs, a changed workflow (`workflow_sha256`), project (`project_sha256`) or redaction key (`redaction_key_id`), a remaining step that references a scrubbed step output (`unreplayable_outputs`, from the runner's `scrubbed_outputs`), on approve a gate or plan older than `gate.max_age` or a changed/missing plan file; re-supplied inputs are checked part by part (`matches_recorded`) and never quoted in a refusal; references to `inputs`/`vars` that are not literal names fail closed (every redacted name is needed); redacted inputs a remaining step needs must be re-supplied (`secret_inputs`); settles the gate, replays completed steps, runs the rest and `finally` once; `ResumeRefused` |
 | `tests/gate/`, `tests/apply/` | gate executor + model rules + resume (injected prompt/terminal, counting executors); apply on a fake engine (binding, max_age, plan gate, lock-only retry, dry-run), the reference stack plan -> wait -> resume -> apply with real Terraform, `migrate_backend` over two local backends (`path=`) |
 | `src/codeorca/steps/spec_render.py` | the `spec-render` executor (`terraform_plan` and `ansible` sources; `terraform_state` is not implemented) and `render_run` behind `codeorca render` (plan specs from `plan.json`, host specs from `host-vars.json`, nothing re-run) |
 | `src/codeorca/steps/host_spec.py` | `spec-render` with `source.ansible`: the play-scope playbook, its roles' `defaults`/`vars` and `vars_files` read first (vault-aware, fail closed), staged inventory (playbook-adjacent `group_vars`/`host_vars` copied) in the 0700 handoff dir, inventory scope via `run_vars_subprocess` (every roles dir, the producer's kept `extra-vars.json` overlaid on top), play scope via `AnsibleRunner` (only the plays that target the host, `--check --diff`, a random vault password, markers incl. `<vault>` and masked nested trees in a 0600 `-e @` file, secret leaves registered before it runs, output held until clear values are registered), `merge_play_scope` (`scope: inventory`/`play`, `source` = the play-scope source that won), `host-vars.json` (0600) + `write_spec` |
@@ -91,7 +91,12 @@ Consumers keep their own `codeorca.yaml`, `workflows/`, `specs/` in their own (u
   gate and nothing further. The gate asks only when stdin AND stdout are terminals; `resume` refuses otherwise,
   for either decision, and there is no environment variable or keyword that skips the check (tests assert both;
   `isatty` is injectable for tests only and the CLI must never pass it). An apply runs only a plan file whose
-  sha256 an approving gate recorded, within `gate.max_age`; a dry-run approval never counts in a real run.
+  sha256 an approving gate recorded, within `gate.max_age` (measured from the decision, from when the gate started
+  asking or waiting, and from when the plan was made); a dry-run approval never counts in a real run. A resume
+  refuses when the workflow, the project (`project_sha256`) or the redaction key (`redaction_key_id`) changed since
+  the stop; `resume --approve` shows what the approval binds and the approver types `approve` to confirm. A gate
+  may not sit in `finally` or carry `retry`. Gate fields named like secrets are read without echo and never taken
+  from `--field`.
 - One PR at a time against `main`; merge by hand once every check is green (`gh pr merge --admin`
   satisfies the "external contributor review" ruleset for the owner's own PRs).
 
@@ -257,7 +262,9 @@ Phase 3 gate / resume / apply (2026-11-02):
   `<redacted:key>` (no placeholder to check a re-supplied value against); an input that is only *registered*
   persists as `<redacted:hmac:…>` and is checked. Resume therefore keeps inputs verbatim (never re-coerces them:
   `<redacted:key>` is not an int) and asks again only for redacted inputs a remaining step (or a var it uses)
-  references; a var built from one is rendered again. Step outputs that were redacted stay placeholders.
+  references; a var built from one is rendered again. A step output the persisted scrub changed (the runner names
+  it in the step's `scrubbed_outputs`) cannot be replayed either: resume refuses when a remaining step references
+  one (an output that was already a placeholder at its source replays as it was).
 - **The runner's retry cannot be vetoed by an executor**, and `retry.policy: transient` matches any
   `policy.transient_errors` entry (`Throttling`, `429`), so the apply step keeps `apply-attempt.json` in its step
   dir and refuses attempt 2+ unless attempt 1 failed with `Error acquiring the state lock` before any
@@ -303,10 +310,13 @@ Phase 3 integration (2026-11-02):
   `fail_fast` cancellations carry none) now cancels the run: exit 1, `cancelled()` true, unrelated steps cancelled.
 - **Once the CLI passes `key_fetcher`, any test that builds a registry without `CODEORCA_REDACTION_KEY` asks real
   SSM** with whatever the shell has (aws-vault hangs on a locked keychain). `tests/conftest.py` neutralises AWS for
-  every test; a test that must prove "no AWS call" uses `no_boto3_session`. `resume(..., isatty=os.isatty)` binds
-  `os.isatty` at definition time: monkeypatching `os.isatty` does nothing, inject `isatty=` (tests only).
-- **A CLI terminal check under pytest relies on fd capture** (fd 1 is a pipe): `pytest -s` would make
-  `resume`'s refusal tests see a terminal.
+  every test; a test that must prove "no AWS call" uses `no_boto3_session`. A default argument
+  `isatty=os.isatty` binds at definition time (monkeypatching `os.isatty` then does nothing): `resume()` takes
+  `isatty=None` and resolves `os.isatty` at call time, so a CLI test patches `os.isatty` (plus `getpass.getpass`
+  and `builtins.input`) and drives the CLI's own resume wiring.
+- **A terminal check under pytest must not rely on fd capture** (fd 1 is a pipe only under the default capture):
+  with `pytest -s` in a terminal, a refusal test would approve or a run would block on a real prompt. The tests
+  that need "no terminal" patch `os.isatty` to return False.
 - **`${{ steps.x.outputs.tf.a.value | default(y) }}` still raises when `x` was skipped**: outputs are `None`, `.tf`
   is a StrictUndefined and `.a` on it raises before `default` runs. Default the first level that can be missing:
   `(steps.x.outputs.tf | default(steps.plan.outputs.planned)).a.value` (`planned` = the plan's `prior_outputs`, the
@@ -326,6 +336,34 @@ Phase 3 integration (2026-11-02):
   reference workflow has its own `FIXTURE-SECRET-*` values (all covered by CI's `FIXTURE-SECRET` grep).
 - **`resume --reject` still asks for redacted inputs the remaining steps reference** (they are computed before the
   decision, and `when: always()` steps may still run); type anything for a step that the reject will omit.
+
+Phase 3 review fixes (2026-11-02):
+- **A helper's output file is not always UTF-8**: PowerShell 5.1's `Out-File` default (and `-Encoding unicode`)
+  is UTF-16LE with a BOM, and a Python helper may write Latin-1. A strict UTF-8 read raised before the scrubbed
+  rewrite and left the raw file (with the helper's secret) in the run dir. `shell.decode_output` decodes by BOM, else
+  UTF-8 with `surrogateescape`; a rewrite that fails deletes the file; `scan_outputs` also reads files with NUL
+  bytes as UTF-16.
+- **An interactive gate with no `timeout` can stay open for days**: `decided_at` is "now" when the approver
+  finally types, so `gate.max_age` also bounds `waiting_since` (recorded on both paths) and each plan's
+  `planned_at` (the plan step's finish time from run.json, in the gate's `plans` binding); a binding without a
+  plan time is refused.
+- **`decided_at` has second precision**: two gates answered in the same second tie; the tie goes to the gate with
+  the most approving gates upstream of it, never to the id that sorts first.
+- **Resume pins more than the workflow**: the plan gate's `stateful_types`/`critical_tag`, `gate.max_age` and the
+  `migrate_backend` target come from `codeorca.yaml` at resume time, so run.json records `project_sha256`; and
+  `redaction_key_id`, so run and resume cannot use different keys (env override vs SSM, or a rotated parameter).
+- **botocore resolves credentials in `create_client`, not in `boto3.Session()`**: a `credential_process` (aws-vault)
+  runs when the first client is built, with no timeout. Build the clients inside `call_with_deadline`, never just
+  the session. The abandoned child cannot be killed (botocore owns the `Popen`): `SSMSecrets` shares one session
+  per run and, after the first `SSMTimeout`, fails later fetches at once instead of spawning another child.
+- **A gate in `finally` or with `retry` broke the approval contract** (exit 0 with the gate unanswered and the run
+  unresumable; a typed reject asked again with a fresh timeout): both are refused by the model.
+- **A replaced `backend.hcl` is recorded by digest only** (`{sha256, bytes}` before): a hand-written one can hold
+  credentials and the diff lands in output.json, result.json, outputs/ and run.json.
+- **An inline `(?i)` flag cannot be embedded mid-pattern** (Python 3.11+ raises "global flags not at the start"):
+  reuse a pattern's text with `.removeprefix("(?i)")` and pass `re.IGNORECASE`.
+- **CI fails on any skipped test**: terraform, ansible-core, moto, boto3 and pwsh are all installed there, so a
+  skip means a broken install. `faulthandler_timeout = 300` names a hung test instead of a silent 30-minute timeout.
 
 Terraform (1.14.7):
 - `show -json` (plan and state), `output -json`, plan files, the plan's `variables` block and `TF_LOG` all
@@ -437,10 +475,10 @@ Container (for the image phase):
    - **TTY faking**: the gate and `resume` trust `isatty(0)` and `isatty(1)`; anything that hands a process a
      pseudo-terminal (`script`, `expect`, `unbuffer`, a pty library) passes. The invariant holds against agents and
      pipes as launched today, not against a deliberately faked terminal; the operator's own launch is the boundary.
-   - **Redaction key across a resume**: a run started with `CODEORCA_REDACTION_KEY` and resumed with the SSM key (or
-     vice versa) is not refused (`<redacted:key>` inputs carry no placeholder to compare); the resumed half writes
-     placeholders and spec headers under the other key id. Not a leak, but a split audit trail: resume with the same
-     key source.
+   - **Redaction key across a resume**: refused since the review fixes (run.json `redaction_key_id`); a run.json
+     from before them carries none and is not checked.
+   - **Abandoned credential_process children**: a hung aws-vault child outlives the deadline (and codeorca) until it
+     exits on its own; only one per run, after which SSM fetches fail fast.
    - **Object Lock (plan V15)**: a bucket with Object Lock but no default retention is accepted and believed
      harmless for `.tflock`; unverified.
    - **Real AWS never exercised**: the SSM provider, the SSM redaction key, the bootstrap and an s3 backend init are

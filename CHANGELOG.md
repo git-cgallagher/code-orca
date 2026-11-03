@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- Phase 3 review fixes: a helper's non-UTF-8 output file (UTF-16 `Out-File`, Latin-1) is rewritten scrubbed or
+  deleted, never left raw, and `scan_outputs` reads UTF-16; `gate.max_age` also bounds when the gate started asking
+  (`waiting_since`) and when the plan was made (`planned_at` in the binding); resume refuses a changed project
+  (`project_sha256`) or redaction key (`redaction_key_id`), a remaining step that references a scrubbed step output
+  (`scrubbed_outputs`), a non-literal `inputs`/`vars` reference without every redacted input, and a re-supplied
+  input that differs from the recorded one part by part; a mistyped secret input or field is never quoted; a gate
+  in `finally` or with `retry` is refused; a same-second approval tie goes to the downstream gate; gate fields named
+  like secrets are read without echo, never taken from `--field`, and a short one is named in a warning;
+  `resume --approve` shows the gate's message, specs, plan sha256s and waivers and asks for a typed confirmation;
+  the S3 bootstrap records a replaced `backend.hcl` by digest and builds its clients (credential resolution) inside
+  the deadline; `SSMSecrets` shares one session per run and fails fast after a hang; stack secrets too short to
+  scrub are named in the step result (`unprotected_secrets`); an apply that fails deletes its plan file unless a
+  retry may use it, and a stack-flock conflict before Terraform ran may be retried. Tests: the CLI's own resume path,
+  the ancestor-gate rule, the adapter's sha256 re-check, re-supplied secrets and fields never in the run dir, no
+  dependence on pytest's fd capture, botocore's legacy credential files closed, `faulthandler_timeout`; CI fails on
+  any skipped test.
+
 - Phase 3 integration: `codeorca run`/`resume` register the `gate`, `python` and `powershell` executors and hand one
   SSM resolver per run to the helpers and the terraform step (a stack's `secrets:` resolved into the child env only,
   registered first, `drift` included; without boto3 only the step that needs a secret fails); the registry takes the

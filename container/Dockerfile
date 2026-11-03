@@ -78,7 +78,6 @@ RUN pip wheel --no-build-isolation --no-deps -w /wheels . && ls /wheels/code_orc
 FROM base AS runtime
 ARG PWSH_VERSION=7.6.9
 ARG PSSA_VERSION=1.25.0
-ARG IMAGE_VERSION=dev
 
 # Terraform and PowerShell for unattended runs: no prompts, no checkpoint or telemetry calls (set before the
 # build's own pwsh runs, too). The plugin cache is where bin/codeorca mounts the host's cache.
@@ -128,8 +127,16 @@ WORKDIR /work
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["codeorca", "--help"]
 
+# The labels' version and revision come from image.yml's build-args (a release tag labels X.Y.Z). They are declared
+# HERE, after the last RUN: BuildKit hands every ARG in scope to each later RUN, so declared earlier a new value would
+# rebuild the PowerShell and pip layers. The licenses name the main components: code-orca and PowerShell (MIT),
+# Terraform (BUSL-1.1, its LICENSE.txt in /usr/share/licenses/terraform), ansible-core and ansible-lint
+# (GPL-3.0-or-later). The base's collections and Debian packages carry their own; the SBOM attestation lists each.
+ARG IMAGE_VERSION=dev
+ARG IMAGE_REVISION=unknown
 LABEL org.opencontainers.image.title="code-orca-runtime" \
       org.opencontainers.image.description="code-orca (Terraform + Ansible orchestrator) with pinned Terraform, ansible-core, PowerShell and PSScriptAnalyzer" \
       org.opencontainers.image.source="https://github.com/git-cgallagher/code-orca" \
-      org.opencontainers.image.licenses="MIT AND BUSL-1.1" \
-      org.opencontainers.image.version="${IMAGE_VERSION}"
+      org.opencontainers.image.licenses="MIT AND BUSL-1.1 AND GPL-3.0-or-later" \
+      org.opencontainers.image.version="${IMAGE_VERSION}" \
+      org.opencontainers.image.revision="${IMAGE_REVISION}"

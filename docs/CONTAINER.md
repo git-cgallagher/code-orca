@@ -10,14 +10,15 @@ closed on any mismatch.
 | Layer | Source | Why |
 |---|---|---|
 | Base | `ghcr.io/git-cgallagher/ansible-runtime` (the Dockerfile's `BASE_IMAGE` default, pinned by tag **and** multi-arch index digest) | Debian 13 trixie, Python 3.13, ansible-core and the shared collections. Layered on, not forked, so the estate has one source of truth for Ansible and Python pins (`/usr/share/ansible-runtime/constraints.txt`). Runs as root deliberately, as the base does: the forwarded ssh-agent socket and the Docker socket need it. Entrypoint is the base's `tini`. |
-| Terraform | the HashiCorp release zip (`TF_VERSION`), GPG-verified against HashiCorp's key (fingerprint `C874 011F 0AB4 0511 0D02 1055 3436 5D94 72D7 468F`) and its `SHA256SUMS` | Not the `hashicorp/terraform` image: it ships no `LICENSE.txt`, and BSL 1.1 wants the license to travel with the binary. The license is installed at `/usr/share/licenses/terraform/LICENSE.txt`, and the image is labelled `org.opencontainers.image.licenses="MIT AND BUSL-1.1"`. |
+| Terraform | the HashiCorp release zip (`TF_VERSION`), GPG-verified against HashiCorp's key (fingerprint `C874 011F 0AB4 0511 0D02 1055 3436 5D94 72D7 468F`) and its `SHA256SUMS` | Not the `hashicorp/terraform` image: it ships no `LICENSE.txt`, and BSL 1.1 wants the license to travel with the binary. The license is installed at `/usr/share/licenses/terraform/LICENSE.txt`. The image is labelled `org.opencontainers.image.licenses="MIT AND BUSL-1.1 AND GPL-3.0-or-later"`: the main components (code-orca and PowerShell MIT, Terraform BUSL-1.1, ansible-core and ansible-lint GPL-3.0-or-later); the base's collections and Debian packages carry their own licenses, which the SBOM attestation lists. |
 | PowerShell | Microsoft's apt repo for Debian 13 (`packages-microsoft-prod.deb`), `powershell=<PWSH_VERSION>-1.deb`, on both arches | The `powershell` helper step and `codeorca lint powershell`. Pinned to the 7.6 LTS line (7.4 and 7.5 are end of life). Trixie's apt rejects Microsoft's legacy `microsoft.asc` key, so the repo comes from the `.deb`. |
 | PSScriptAnalyzer | PowerShell Gallery, `PSSA_VERSION`, `Install-PSResource -Scope AllUsers` | `codeorca lint powershell`. The smoke test proves it with `Invoke-ScriptAnalyzer` (`Get-InstalledPSResource` reports nothing even after a good install). |
 | code-orca | this repository, installed under the base's constraints | So the orchestrator can never upgrade a package ansible-core or the collections rely on. |
 
 The exact pins live in `container/Dockerfile` (ARG defaults) and `container/requirements/`; this page does not
-repeat them, so it cannot go stale. `docker inspect` on an image shows its labels; `codeorca doctor --lock`
-prints the versions it observes.
+repeat them, so it cannot go stale. `docker inspect` on an image shows its labels (`org.opencontainers.image.version`
+is `X.Y.Z` for a release, `sha-<short>` for any other CI build, `dev` for a local one; `…revision` is the commit);
+`codeorca doctor --lock` prints the versions it observes.
 
 ## Build and smoke-test locally
 

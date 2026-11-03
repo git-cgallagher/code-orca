@@ -11,6 +11,8 @@
   `specs_dir: .` had chowned the whole tree), and is skipped under rootless Docker and when the container never
   started; a missing `docker` or unreachable daemon exits 69 (it had exited 1, like a failed workflow); `HOME` unset
   no longer aborts. codeorca takes no abbreviated long options (`--proj`), on any subcommand.
+  The image's OCI labels: `version` is `X.Y.Z` on a release (it was always `dev`), a new `revision` carries the commit,
+  and `licenses` adds `GPL-3.0-or-later` (ansible-core, ansible-lint).
 - Container image (Phase 4): `container/Dockerfile` builds `code-orca-runtime` on ansible-runtime 1.3.0 with
   Terraform 1.14.7 (GPG-verified release zip + its BSL 1.1 license), PowerShell 7.6.9 LTS + PSScriptAnalyzer 1.25.0
   and the code-orca wheel under the base's pins (no venv, `pip check` in the build); `container/tests/smoke.sh`

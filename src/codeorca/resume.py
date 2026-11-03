@@ -354,10 +354,18 @@ def _resolve_inputs(
         )
     inputs = dict(persisted)
     for name, raw in secret_inputs.items():
+        if registry is not None:
+            # before coercion: whatever goes wrong next, nothing printed or written may carry what was typed
+            for leaf in {str(raw), *_leaves(raw)}:
+                registry.add(leaf)
         try:
             value = coerce_input(name, workflow.inputs[name], raw)
-        except InputError as e:
-            raise ResumeRefused(str(e)) from None
+        except InputError:
+            # value-free: InputError quotes the value, and a short one is not registered
+            raise ResumeRefused(
+                f"input {name!r}: the value typed again is not a valid {workflow.inputs[name].type}"
+                + (" (or not one of its enum values)" if workflow.inputs[name].enum is not None else "")
+            ) from None
         recorded = persisted.get(name)
         if registry is not None and isinstance(recorded, str) and PLACEHOLDER_RE.fullmatch(recorded):
             if registry.placeholder(str(value)) != recorded:

@@ -368,3 +368,37 @@ def test_a_resupplied_value_must_match_the_recorded_placeholder(tmp_path):
     with pytest.raises(ResumeRefused, match="does not match"):
         go(rd, calls, fresh, wf=wf, secret_inputs={"blob": "FIXTURE-SECRET-some-other-value"})
     assert go(rd, calls, fresh, wf=wf, secret_inputs={"blob": SECRET}) == EXIT_OK
+
+
+@pytest.mark.parametrize(
+    ("spec", "typed"),
+    [
+        ({"type": "list"}, '["FIXTURE-SECRET-token-abcdefgh-0001"'),
+        ({"type": "int"}, "FIXTURE-SECRET-token-abcdefgh-0001"),
+        ({"type": "string", "enum": ["a", "b"]}, "FIXTURE-SECRET-token-abcdefgh-0001"),
+        ({"type": "string", "enum": ["a", "b"]}, "short1"),  # too short to register: the message must not quote it
+    ],
+    ids=["list", "int", "enum", "short-enum"],
+)
+def test_a_mistyped_secret_input_is_not_quoted_in_the_refusal(tmp_path, spec, typed):
+    """Review finding: coerce_input's InputError quoted the getpass-typed value before it was registered, and the
+    CLI printed it in clear."""
+    wf = Workflow.model_validate(
+        {
+            "api": "codeorca/v1",
+            "kind": "workflow",
+            "name": "p",
+            "inputs": {"api_token": spec},
+            "steps": [
+                {"id": "approve", "type": "gate", "message": "m"},
+                {"id": "b", "type": "shell", "needs": ["approve"], "run": ["b", "${{ inputs.api_token | string }}"]},
+            ],
+        }
+    )
+    good = {"list": '["x"]', "int": "1", "string": "a"}[spec["type"]]
+    rd, calls, _ = start(tmp_path, wf=wf, inputs={"api_token": json.loads(good) if spec["type"] != "string" else good})
+    fresh = SecretRegistry(KEY, "env:test")
+    with pytest.raises(ResumeRefused) as e:
+        go(rd, calls, fresh, wf=wf, secret_inputs={"api_token": typed})
+    shown = fresh.redact(str(e.value))  # what the CLI prints
+    assert "api_token" in shown and "FIXTURE-SECRET" not in shown and "short1" not in shown

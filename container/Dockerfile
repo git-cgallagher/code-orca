@@ -75,6 +75,16 @@ ARG PWSH_VERSION=7.6.9
 ARG PSSA_VERSION=1.25.0
 ARG IMAGE_VERSION=dev
 
+# Terraform and PowerShell for unattended runs: no prompts, no checkpoint or telemetry calls (set before the
+# build's own pwsh runs, too). The plugin cache is where bin/codeorca mounts the host's cache.
+ENV TF_IN_AUTOMATION=1 \
+    TF_INPUT=0 \
+    TF_PLUGIN_CACHE_DIR=/root/.terraform.d/plugin-cache \
+    CHECKPOINT_DISABLE=1 \
+    POWERSHELL_TELEMETRY_OPTOUT=1 \
+    POWERSHELL_UPDATECHECK=Off
+RUN mkdir -p /root/.terraform.d/plugin-cache
+
 # Terraform + its license (nothing else from the download stage: no gnupg, unzip or curl ships).
 COPY --from=terraform /out/ /
 
@@ -106,16 +116,6 @@ RUN --mount=type=bind,source=container/requirements,target=/mnt/req \
       /mnt/wheels/code_orca-*-py3-none-any.whl \
  && pip check \
  && codeorca --version
-
-# Terraform and PowerShell for unattended runs: no prompts, no checkpoint or telemetry calls. The plugin cache
-# is where bin/codeorca mounts the host's cache.
-ENV TF_IN_AUTOMATION=1 \
-    TF_INPUT=0 \
-    TF_PLUGIN_CACHE_DIR=/root/.terraform.d/plugin-cache \
-    CHECKPOINT_DISABLE=1 \
-    POWERSHELL_TELEMETRY_OPTOUT=1 \
-    POWERSHELL_UPDATECHECK=Off
-RUN mkdir -p /root/.terraform.d/plugin-cache
 
 # Root, deliberately, as in ansible-runtime: the forwarded SSH-agent socket is root:root 0660, the Docker socket
 # needs it, and GitHub `container:` jobs expect it. The container is single-use (`docker run --rm`).

@@ -61,7 +61,7 @@ def test_apply_stream_parses_and_sensitive_output_carries_no_value():
     assert summary["changes"]["add"] == 2 and summary["changes"]["remove"] == 0
     outputs = next(m for m in messages if m["type"] == "outputs")["outputs"]
     assert outputs["app_token"]["sensitive"] is True and "value" not in outputs["app_token"]
-    assert SECRET not in (FIXTURES / "apply.jsonl").read_text(encoding="utf-8")  # 1.14.7 and 1.17.1 omit it (AGENTS.md gotcha)
+    assert SECRET not in (FIXTURES / "apply.jsonl").read_text(encoding="utf-8")  # omitted (AGENTS.md gotcha)
 
 
 def test_diagnostics_filters_by_level():

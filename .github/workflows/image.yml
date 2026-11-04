@@ -15,7 +15,7 @@ name: image
 #   (Dependabot's docker entry). A schedule runs on main, so it never produces a release tag.
 # A manual run on any other branch builds and tests only (PUBLISH is false there).
 on:
-  # No `paths:` filter on pull_request: `image (amd64)` and `image (arm64)` are meant to become
+  # No `paths:` filter on pull_request: `image (amd64)` and `image (arm64)` are
   # required checks, and a required check whose workflow a path filter skipped stays "Expected"
   # forever, blocking the PR (ansible-runtime has no filter for the same reason).
   pull_request:
@@ -49,9 +49,8 @@ concurrency:
 # Terraform and PowerShell layers).
 jobs:
   # One job per architecture, each on a native runner (no QEMU). The job names
-  # `image (amd64)` and `image (arm64)` are meant to become required checks on the
-  # "main protection" ruleset once they have run once (that ruleset change is a separate,
-  # manual step; this workflow never edits rulesets). Do not rename them.
+  # `image (amd64)` and `image (arm64)` are required checks on the "main protection"
+  # ruleset (since 2026-11-04; this workflow never edits rulesets). Do not rename them.
   image:
     name: image (${{ matrix.arch }})
     runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}

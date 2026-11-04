@@ -113,8 +113,8 @@ the checkout is fresh, so even an ignored path a misdirected run would write (`e
 fails the job. Outside pull requests each pushes its image
 by digest; the `manifest` job joins the two digests under the tags, then attaches build provenance
 (`actions/attest-build-provenance`) and an SPDX SBOM (`anchore/sbom-action` + `actions/attest-sbom`) to the
-multi-arch index, both pushed to the registry. `image (amd64)` and `image (arm64)` are meant to be required
-checks on the "main protection" ruleset once they have run once.
+multi-arch index, both pushed to the registry. `image (amd64)` and `image (arm64)` are required checks on the
+"main protection" ruleset (since 2026-11-04), next to `test`; do not rename them.
 
 **Releasing X.Y.Z:**
 

@@ -31,7 +31,7 @@ RUN apt-get update \
 # the signature must be a VALIDSIG whose PRIMARY key fingerprint is HashiCorp's (the last field of the status
 # line), so a swapped key file cannot verify anything.
 FROM downloader AS terraform
-ARG TF_VERSION=1.14.7
+ARG TF_VERSION=1.17.1
 ARG TARGETARCH
 RUN set -eu; \
     test -n "${TARGETARCH}" || { echo "TARGETARCH is empty: build with buildx/BuildKit" >&2; exit 1; }; \

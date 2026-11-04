@@ -7,7 +7,7 @@ runtime:                         # the expected execution environment; `codeorca
   # Matches the code-orca-runtime image exactly (container/Dockerfile pins; container/tests/smoke.sh runs
   # `codeorca doctor` against this block inside the image, so a pin bump without this block fails the smoke test).
   image: ghcr.io/git-cgallagher/code-orca-runtime:0.1.0
-  terraform: "1.14.7"            # exact; container/Dockerfile TF_VERSION
+  terraform: "1.17.1"            # exact; container/Dockerfile TF_VERSION
   ansible_core: "2.21.5"         # exact; the base image's pin (ansible-runtime 1.3.0)
   python: ">=3.13,<3.14"         # the base is Python 3.13
   pwsh: "7.6.*"                  # PowerShell 7.6 LTS; container/Dockerfile PWSH_VERSION

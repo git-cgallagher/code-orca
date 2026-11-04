@@ -5,6 +5,10 @@ one image holding the orchestrator plus every tool its steps call, at exact vers
 `linux/arm64`. `codeorca doctor` checks a running environment against a project's `runtime:` block and fails
 closed on any mismatch.
 
+The package is public so CI and `bin/codeorca` can pull it without credentials, not because it is offered for
+outside use: it is built for Chris's own code-orca projects, with no support or stability promise. Being public
+is also why the build refuses fixable critical vulnerabilities (Terraform moved from 1.14.7 to 1.17.1 for that).
+
 ## What is in it, and why
 
 | Layer | Source | Why |

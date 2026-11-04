@@ -249,7 +249,7 @@ a state).
 ## Container
 
 `ghcr.io/git-cgallagher/code-orca-runtime` holds everything a run needs: ansible-core 2.21.5 and Python 3.13 from
-the `ansible-runtime` base, Terraform 1.14.7 (from HashiCorp's GPG-verified release zip, license included),
+the `ansible-runtime` base, Terraform 1.17.1 (from HashiCorp's GPG-verified release zip, license included),
 PowerShell 7.6 with PSScriptAnalyzer, and code-orca itself, installed under the base's `constraints.txt` so the
 estate keeps one version of every Python package. `bin/codeorca` runs it in the current directory:
 

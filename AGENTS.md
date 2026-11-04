@@ -45,7 +45,7 @@ Consumers keep their own `codeorca.yaml`, `workflows/`, `specs/` in their own (u
 | `src/codeorca/steps/ansible.py` | the `ansible` executor (`make_executor(registry)`): playbook or generated `import_role` play (`gather_facts` default true; project `roles`/`collections` as playbook-adjacent symlinks in the handoff dir), 0600 inventory + extra-vars handoff files deleted after the run, `<step dir>/inventory.yml` kept redacted for the host-spec renderer, pre-run registration of denylist-named `extra_vars`/inventory values and of the literal secret leaves of the vars files the play reads (`group_vars`/`host_vars`, playbook `vars`/`vars_files`, role `defaults`/`vars`, argument-spec `no_log`), `events.jsonl` through the stream redactor, `--check --diff` under `--dry-run`, `check_unsupported` policy (stricter of project and step) |
 | `tests/steps/test_spec_render_ansible.py`, `tests/integration/test_reference_configure_local.py`, `tests/cli/test_lint_cli.py` | host-spec step (pure helpers without ansible; live runs over the host-spec fixture with and without play scope, and the failing-subprocess path), the reference `configure-local` workflow end to end (determinism, `codeorca render` with ansible patched out, `scan_outputs`), `lint ansible` output and exit codes |
 | `tests/ansible/`, `tests/fixtures/ansible/` | callback, adapter and step tests over an offline `connection: local` fixture playbook (ok/changed/skipped/failed/no_log/loop/check-unsupported tasks), a `sleep` playbook for timeouts and a role with `meta/argument_specs.yml`; they need `ansible-playbook` on PATH or next to the test interpreter (`pip install -e '.[dev,ansible]'`) and skip otherwise |
-| `tests/fixtures/terraform/` | 1.14.7 captures from the reference stack via `regenerate.py` (plan, replace plan, state, outputs, providers schema, init/apply streams) + hand-made `delete-plan.json` and `init-mixed.jsonl`; the placeholder secret is in them on purpose |
+| `tests/fixtures/terraform/` | 1.17.1 captures (re-captured from 1.14.7 on 2026-11-04) from the reference stack via `regenerate.py` (plan, replace plan, state, outputs, providers schema, init/apply streams) + hand-made `delete-plan.json` and `init-mixed.jsonl`; the placeholder secret is in them on purpose |
 | `src/codeorca/project.py` | Pydantic models for the project file `codeorca.yaml` (`load_project`, `project_json_schema`): s3 backend needs bucket/region/account_id, stack `depends_on` DAG, `max_parallel` must be 1 |
 | `src/codeorca/expr.py` | `${{ … }}` expressions: sandboxed Jinja2 + StrictUndefined, `render`/`render_value`/`render_tree`, `evaluate_when` (must be a bool), GHA-style `success()`/`always()`/`failure()`/`cancelled()` |
 | `src/codeorca/rundir.py` | `RunDir` (`<state_dir>/<run_id>/{run.json, steps/<id>/, outputs/, handoff/ (0700), specs/}`), run id format, `stack_lock` (flock), `list_runs`, `gc` |
@@ -113,11 +113,11 @@ Consumers keep their own `codeorca.yaml`, `workflows/`, `specs/` in their own (u
 ## ⚠️ Gotchas (learned during the design research, 2026-11-01)
 
 Phase 1 integration (2026-11-01):
-- **`prior_state.values.outputs` is not the previous value.** On 1.14.7 it holds the root outputs re-evaluated
+- **`prior_state.values.outputs` is not the previous value.** On 1.14.7 and 1.17.1 it holds the root outputs re-evaluated
   against the *current* configuration and variables (a first plan already lists them; a plan that changes an output
   shows the new value there). The value the state recorded is `output_changes[name].before`
   (`tfjson.previous_outputs`); `prior_outputs` is the fallback for outputs with no change entry.
-- **`init -json` and `-migrate-state` are mutually exclusive** on 1.14.7; the `migrate_backend` action (Phase 3) must
+- **`init -json` and `-migrate-state` are mutually exclusive** on 1.14.7 and 1.17.1; the `migrate_backend` action (Phase 3) must
   run its init without `-json` (tolerant text parsing) or not at all.
 - **(Superseded in Phase 3: see the Phase 3 gotchas.) The redaction key is `CODEORCA_REDACTION_KEY` in Phase 1** (bytes of its UTF-8; key id `env:<sha256[:8]>` in
   spec headers). There is no SSM wrapper yet, so `redaction.hmac_key` is validated but unused; a project with
@@ -282,7 +282,7 @@ Phase 3 gate / resume / apply (2026-11-02):
 - **A resumed apply runs in a fresh registry**: nothing from the first process is registered, so the apply runs
   `show -json` first and `seed_registry` over it before the apply streams (the plan file carries the variables,
   so no input needs re-supplying for an apply).
-- **`terraform state list` with no state exits 1** with "No state file was found!" on stderr (1.14.7); the
+- **`terraform state list` with no state exits 1** with "No state file was found!" on stderr (1.14.7, 1.17.1); the
   `migrate_backend` probe treats exactly that as empty. A state that exists but lists **no resources** is
   treated as empty too and would be overwritten by `-force-copy` (residual). `init -backend-config=path=…` works
   only when the configuration declares `backend "local" {}` explicitly; `-migrate-state -force-copy` from local
@@ -375,18 +375,22 @@ Phase 3 review fixes (2026-11-02):
 - **CI fails on any skipped test**: terraform, ansible-core, moto, boto3 and pwsh are all installed there, so a
   skip means a broken install. `faulthandler_timeout = 300` names a hung test instead of a silent 30-minute timeout.
 
-Terraform (1.14.7):
+Terraform (observed on 1.14.7; rechecked on 1.17.1, 2026-11-04):
 - `show -json` (plan and state), `output -json`, plan files, the plan's `variables` block and `TF_LOG` all
   hold sensitive values in **plain text**; only sibling flag maps mark them, and the flags do **not**
   follow a secret into a computed attribute (`terraform_data.output` echoed a sensitive input unmarked).
 - `init -json` emits non-JSON lines: parse `-json` streams tolerantly.
+- 1.17 adds an optional `store` block to `terraform_data` (it shows as `"store": null` in plan and state
+  JSON) and raises the machine-readable UI version from 1.2 to 1.3; plan `format_version` stays 1.2.
+- Every 1.14.x is built with Go 1.25.8 and fails the image's grype gate on fixable criticals in Go's standard
+  library and `x/crypto`/`x/net`/`grpc`; 1.17.1 has none. That is why the image moved to 1.17.1 (2026-11-04).
 - Plan JSON `format_version` is 1.2 while the docs say 1.0; the streaming `planned_change` message and
   the plan file use different action vocabularies (`replace` vs `[delete, create]`).
 - `plan -detailed-exitcode` exits 2 on success-with-changes; never run it under `set -e` or through a
   pipe that loses the status.
 - `state pull` is reading the state file by another name; `.terraform/terraform.tfstate` holds
   `-backend-config` values in plain text; committed tfvars outrank `TF_VAR_*`.
-- The apply `-json` stream omitted sensitive output values on 1.14.7 although the docs say otherwise.
+- The apply `-json` stream omitted sensitive output values on 1.14.7 and 1.17.1 although the docs say otherwise.
 
 Ansible (core 2.21.5):
 - No built-in `json` stdout callback (`ANSIBLE_STDOUT_CALLBACK=json` fails to load); an aggregate callback

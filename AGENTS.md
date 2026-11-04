@@ -71,7 +71,7 @@ Consumers keep their own `codeorca.yaml`, `workflows/`, `specs/` in their own (u
 | `tests/container/` | `lock.sh` against a fake `docker`, the two release scripts, and static checks on the Dockerfile + `image.yml` (label ARG order, identical build-args, release-check wiring) |
 | `bin/codeorca` | local launch wrapper (bash 3.2-safe; header lists every mount, env name and exit code): checks `docker` is on PATH and `docker info` answers (else exit 69), then `docker run --rm` of `CODEORCA_IMAGE` (default `code-orca-runtime:latest`) with `$PWD` at `/work`, `-it` only when stdin and stdout are TTYs, AWS/`CODEORCA_*`/`TF_VAR_*` by name only (`compgen -e`; `CODEORCA_IMAGE`/`CODEORCA_DOCKER_SOCKET` not passed), ssh agent, `known_hosts` ro, plugin cache (both skipped without `HOME`), the Docker socket only with `CODEORCA_DOCKER_SOCKET=1`. Only `$PWD` is mounted: an absolute `-p` under it is rewritten to the relative path, a project file outside it is refused (64), and so is a `state_dir`/`specs_dir` that is absolute or leaves it, for the commands that use them. Then, unless the caller is root, Docker or Podman is rootless (`docker info --format '{{json .}}'`) or the container never started (125/126/127), a second container runs `find -P <state top dir> <specs_dir> -uid 0 -exec chown -h` (root-owned files only; never the project root, a symlink or a path leaving the root). Exit code is codeorca's. Never runs aws-vault |
 | `tests/wrapper/` | `bin/codeorca` against a fake `docker` (records argv; answers `docker info`, rootless or daemon down on request) and a fake `id` (uid 1001, so the suite also passes as root, inside the image) on PATH: no secret value on any argv, names only, `-it` needs both TTY ends (pty), socket only on `=1`, exit codes propagate (a failed chown never masks one; 64/69/125-127), the `-p` rewrite in every form, paths outside `$PWD` refused, chown targets per `-p` form and never the project root; clean env per test; skipped on Windows |
-| `docs/CONTAINER.md` | what the image holds and why, local arm64 build + smoke, `bin/codeorca`, the trigger table, releasing (tag == pyproject version), pulling + `gh attestation verify`, GHCR visibility (manual), bumping the base / Terraform / PowerShell / PSScriptAnalyzer |
+| `docs/CONTAINER.md` | what the image holds and why, local arm64 build + smoke, `bin/codeorca`, the trigger table, releasing (tag == pyproject version), pulling + `gh attestation verify`, GHCR visibility (public since the first push; how to check), bumping the base / Terraform / PowerShell / PSScriptAnalyzer |
 
 ## Conventions
 
@@ -494,9 +494,10 @@ Container (for the image phase):
   under specs/.
 - A `paths:` filter on `pull_request` and a required check do not mix: a skipped workflow leaves the check
   "Expected" and the PR unmergeable. `image.yml` filters only its `push` trigger.
-- A container package pushed to GHCR from Actions starts private for a personal account; making it public is a
-  UI-only step in the package settings (Chris). Check with an anonymous token + manifest fetch after the first
-  push (`docs/CONTAINER.md`), not `docker logout`.
+- GitHub's docs say a container package pushed from Actions starts private, but `code-orca-runtime` came out
+  public on its first push from `main` (2026-11-04; probably inherited from this public repo, unconfirmed).
+  Check visibility with an anonymous token + manifest fetch (`docs/CONTAINER.md`), not `docker logout`;
+  changing it is UI-only, in the package settings (Chris).
 - On Docker Desktop for macOS, files a root container writes into a bind mount already show as the host user, so
   `bin/codeorca`'s chown is a no-op there; it matters on Linux. Under rootless Docker (and Podman) container root IS the caller, and a
   `chown` to the caller's uid inside the container maps to a subordinate uid on the host: the wrapper asks
@@ -552,8 +553,8 @@ Container (for the image phase):
 4. ~~Container image~~ done (Phase 4): `container/Dockerfile` on `ansible-runtime` 1.3.0, `bin/codeorca`, the
    `image` workflow. The pyproject ranges are for pip users only; in the image the base's `constraints.txt` fixes
    every version, and anything the base lacks is hash-pinned in `container/requirements/codeorca.txt` (nothing
-   today). Residuals: amd64 is verified only in CI; the GHCR package starts private (Chris makes it public in its
-   settings); `image (amd64)` and `image (arm64)` join the required checks after their first run; the image is
+   today). Residuals: amd64 is verified only in CI (its first push published `:main`, public, on 2026-11-04);
+   `image (amd64)` and `image (arm64)` join the required checks after their first run; the image is
    about 1.24 GB, 279 MB of it PSScriptAnalyzer's compatibility profiles (kept for the PSUseCompatible* rules).
    Also open: nothing stops a `v*` tag from being CREATED on a non-main commit (both rulesets target
    `~DEFAULT_BRANCH`); `release-check.sh` refuses to publish one, and a tag ruleset restricting `v*` creation is

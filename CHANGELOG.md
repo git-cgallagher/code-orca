@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Docs: the GHCR package `code-orca-runtime` was public from its first push (2026-11-04); `docs/CONTAINER.md`
+  and AGENTS.md no longer describe making it public as a required manual step.
+
 - Phase 4 review fixes: `container/requirements/lock.sh` locks inside the image on the Dockerfile's literal
   `AS pinned-base` line again (it had read `ARG BASE_IMAGE=`, which names the stage since the Dependabot refactor,
   and ran `docker run pinned-base`); a `BASE_IMAGE` override must be digest-pinned; `--print-base`.

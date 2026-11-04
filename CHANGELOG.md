@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- CI: `image (amd64)` and `image (arm64)` are required checks on the "main protection" ruleset (2026-11-04).
 - Docs: the GHCR package `code-orca-runtime` was public from its first push (2026-11-04); `docs/CONTAINER.md`
   and AGENTS.md no longer describe making it public as a required manual step.
 

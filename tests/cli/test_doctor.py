@@ -18,7 +18,7 @@ REFERENCE = ROOT / "examples" / "reference" / "codeorca.yaml"
 
 RUNTIME = Runtime(
     image="ghcr.io/example/runtime:0.1.0",
-    terraform="1.14.7",
+    terraform="1.17.1",
     ansible_core="2.21.5",
     python=">=3.13,<3.15",
     pwsh="7.6.*",
@@ -26,7 +26,7 @@ RUNTIME = Runtime(
     python_packages={"boto3": "1.42.*"},
 )
 GOOD = {
-    "terraform": lambda: "1.14.7",
+    "terraform": lambda: "1.17.1",
     "ansible_core": lambda: "2.21.5",
     "python": lambda: "3.14.0",
     "pwsh": lambda: "7.6.1",
@@ -101,9 +101,10 @@ def project_file(tmp_path: Path) -> Path:
     text = (root / "codeorca.yaml").read_text(encoding="utf-8")
     text = text.replace('python: ">=3.13,<3.14"', 'python: ">=3.13,<3.15"')
     text = text.replace("collections: {}", 'collections: { "amazon.aws": "10.1.0" }')
-    text = text.replace("python_packages: {}", 'python_packages: { boto3: "1.42.*" }')
+    text = text.replace('boto3: ">=1.35"', 'boto3: "1.42.*"')
     (root / "codeorca.yaml").write_text(text, encoding="utf-8")
-    assert load_project(root / "codeorca.yaml").runtime.collections == {"amazon.aws": "10.1.0"}
+    runtime = load_project(root / "codeorca.yaml").runtime
+    assert runtime.collections == {"amazon.aws": "10.1.0"} and runtime.python_packages == {"boto3": "1.42.*"}
     return root / "codeorca.yaml"
 
 
@@ -111,8 +112,8 @@ def test_cli_table_lock_and_json(monkeypatch, capsys, project_file):
     monkeypatch.setattr(doctor, "default_probes", lambda runtime: GOOD)
     assert cli.main(["doctor", "-p", str(project_file), "--lock"]) == 0
     out = capsys.readouterr().out
-    assert re.search(r"^terraform\s+1\.14\.7\s+1\.14\.7\s+ok$", out, re.MULTILINE) and "doctor: ok" in out
-    assert "runtime:\n" in out and "  terraform: 1.14.7\n" in out and "  amazon.aws: 10.1.0" in out
+    assert re.search(r"^terraform\s+1\.17\.1\s+1\.17\.1\s+ok$", out, re.MULTILINE) and "doctor: ok" in out
+    assert "runtime:\n" in out and "  terraform: 1.17.1\n" in out and "  amazon.aws: 10.1.0" in out
 
     monkeypatch.setattr(doctor, "default_probes", lambda runtime: dict(GOOD, pwsh=lambda: None))
     assert cli.main(["doctor", "-p", str(project_file), "--json"]) == 1

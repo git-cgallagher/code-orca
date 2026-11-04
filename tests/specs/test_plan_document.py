@@ -80,7 +80,7 @@ def test_first_plan_seeds_the_sensitive_input_and_masks_it_everywhere(registry):
     assert doc["summary"]["counts"] == {"add": 2, "change": 0, "remove": 0, "replace": 0}
     assert doc["summary"]["exit_code"] == 2 and doc["summary"]["gate"]["passed"] is True
     assert doc["never_rendered"] == {"outputs": ["app_token"], "resources": []}
-    assert doc["engine"] == {"name": "terraform", "version": "1.14.7"}
+    assert doc["engine"] == {"name": "terraform", "version": "1.17.1"}
     assert "timestamp" not in dumped
 
 

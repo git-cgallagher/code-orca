@@ -1,6 +1,6 @@
 {
   "format_version": "1.0",
-  "terraform_version": "1.14.7",
+  "terraform_version": "1.17.1",
   "values": {
     "outputs": {
       "app_bucket": {
@@ -43,7 +43,7 @@
           },
           "type": "terraform_data",
           "values": {
-            "id": "499b4adc-1cb3-dfe4-7fa5-5bc9e1e8c0f0",
+            "id": "e6115134-8cbe-ffa0-c575-24e00a6424c3",
             "input": {
               "name": "example-app-dev",
               "secret": "FIXTURE-SECRET-tf-input-001"
@@ -52,6 +52,7 @@
               "name": "example-app-dev",
               "secret": "FIXTURE-SECRET-tf-input-001"
             },
+            "store": null,
             "triggers_replace": [
               "dev"
             ]
@@ -68,9 +69,10 @@
           },
           "type": "terraform_data",
           "values": {
-            "id": "1275305d-b55c-b65e-bb2e-e8b95a09fe23",
+            "id": "a175c7a7-15b8-31db-355c-95c0405f4c69",
             "input": "FIXTURE-SECRET-tf-input-001",
             "output": "FIXTURE-SECRET-tf-input-001",
+            "store": null,
             "triggers_replace": null
           }
         }

@@ -40,7 +40,7 @@ def test_parse_json_stream_keeps_non_json_lines_and_drops_blanks():
 def test_parse_json_stream_raw_init_capture_is_all_json():
     messages = tfjson.parse_json_stream(lines("init.jsonl"))
     assert messages and all("type" in m for m in messages)
-    assert messages[0]["type"] == "version" and messages[0]["terraform"] == "1.14.7"
+    assert messages[0]["type"] == "version" and messages[0]["terraform"] == "1.17.1"
 
 
 def test_parse_json_stream_accepts_a_string_and_non_object_json():
@@ -61,7 +61,7 @@ def test_apply_stream_parses_and_sensitive_output_carries_no_value():
     assert summary["changes"]["add"] == 2 and summary["changes"]["remove"] == 0
     outputs = next(m for m in messages if m["type"] == "outputs")["outputs"]
     assert outputs["app_token"]["sensitive"] is True and "value" not in outputs["app_token"]
-    assert SECRET not in (FIXTURES / "apply.jsonl").read_text(encoding="utf-8")  # 1.14.7 omits it (AGENTS.md gotcha)
+    assert SECRET not in (FIXTURES / "apply.jsonl").read_text(encoding="utf-8")  # omitted (AGENTS.md gotcha)
 
 
 def test_diagnostics_filters_by_level():

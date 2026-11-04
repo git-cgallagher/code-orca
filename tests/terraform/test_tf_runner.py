@@ -340,8 +340,8 @@ def test_live_exit_code_2_preserved_end_to_end_and_apply_bound_to_sha256(tmp_pat
         "app_fqdn": "app-dev.example.com",
         "app_host": "127.0.0.1",
     }
-    if init.messages[0].get("terraform", "").startswith("1.14."):
-        # observed on 1.14.7 only (the fixture-pinned test in test_tf_json.py is the record): re-evaluated outputs
+    if init.messages[0].get("terraform", "").startswith(("1.14.", "1.17.")):
+        # observed on 1.14.7 and 1.17.1 (the fixture-pinned test in test_tf_json.py is the record): re-evaluated outputs
         assert tfjson.prior_outputs(replace_doc)["app_fqdn"] == "app-prod.example.com"
 
     # every argv the run directory will record, in order, all policy-checked

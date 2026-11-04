@@ -78,6 +78,9 @@
         }
       },
       "provider": {
+        "block": {
+          "description_kind": "plain"
+        },
         "version": 0
       },
       "resource_identity_schemas": {
@@ -115,6 +118,48 @@
                 "description_kind": "plain",
                 "optional": true,
                 "type": "dynamic"
+              }
+            },
+            "block_types": {
+              "store": {
+                "block": {
+                  "attributes": {
+                    "input": {
+                      "description_kind": "plain",
+                      "optional": true,
+                      "type": "dynamic",
+                      "write_only": true
+                    },
+                    "output": {
+                      "computed": true,
+                      "description_kind": "plain",
+                      "type": "dynamic"
+                    },
+                    "replace": {
+                      "description_kind": "plain",
+                      "optional": true,
+                      "type": "bool"
+                    },
+                    "sensitive": {
+                      "description_kind": "plain",
+                      "optional": true,
+                      "type": "bool"
+                    },
+                    "sensitive_output": {
+                      "computed": true,
+                      "description_kind": "plain",
+                      "sensitive": true,
+                      "type": "dynamic"
+                    },
+                    "version": {
+                      "description_kind": "plain",
+                      "optional": true,
+                      "type": "dynamic"
+                    }
+                  },
+                  "description_kind": "plain"
+                },
+                "nesting_mode": "single"
               }
             },
             "description_kind": "plain"

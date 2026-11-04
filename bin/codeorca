@@ -1,0 +1,207 @@
+#!/usr/bin/env bash
+# codeorca: run code-orca from the code-orca-runtime image, in the current directory.
+#   bin/codeorca validate -p codeorca.yaml
+#   aws-vault exec <profile> -- bin/codeorca run plan-only -p codeorca.yaml
+#   CODEORCA_IMAGE=ghcr.io/git-cgallagher/code-orca-runtime:main bin/codeorca doctor
+#
+# This wrapper never runs aws-vault (or any other credential helper) itself: the caller wraps it, so the
+# credentials exist only in that one process tree, e.g. `aws-vault exec <profile> -- bin/codeorca run ...`.
+# It never starts, stops or restarts Docker (Docker Desktop is shared with other workloads).
+#
+# What the container gets, and nothing else:
+#   mounts   $PWD -> /work (also the working directory)
+#            ~/.ssh/known_hosts -> /root/.ssh/known_hosts, read-only (when the file exists)
+#            the ssh agent -> /ssh-agent (macOS: Docker Desktop's /run/host-services/ssh-auth.sock;
+#              Linux: $SSH_AUTH_SOCK, when it is a socket)
+#            ~/.terraform.d/plugin-cache -> /root/.terraform.d/plugin-cache (created if absent)
+#              (neither ~ mount when HOME is unset or empty)
+#            /var/run/docker.sock, ONLY when CODEORCA_DOCKER_SOCKET=1 (host-root-equivalent; Molecule and
+#              community.docker need it, nothing else does)
+#   env, by NAME only (docker copies each value from this shell; no value is ever on the argv, which
+#   `ps` and `docker inspect` show, and there is never an --env-file):
+#            AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_CREDENTIAL_EXPIRATION
+#            AWS_REGION AWS_DEFAULT_REGION AWS_PROFILE (each only when set)
+#            every CODEORCA_* (CODEORCA_REDACTION_KEY included) except CODEORCA_IMAGE and
+#            CODEORCA_DOCKER_SOCKET, which configure this wrapper; every TF_VAR_*
+#   env, by value (none secret): SSH_AUTH_SOCK=/ssh-agent, TF_PLUGIN_CACHE_DIR=/root/.terraform.d/plugin-cache
+#   -it      only when stdin AND stdout are terminals: a human at a terminal can answer a gate or
+#            `resume --approve`; an agent or pipe gets no TTY, so the gate refuses (the approval invariant)
+#
+# Only $PWD is mounted, so everything codeorca reads or writes must live under it:
+#   - an absolute -p/--project under $PWD is rewritten to the relative path the container sees;
+#   - a project file outside $PWD (absolute, or a '..' path leaving it) is refused;
+#   - for run, resume, drift, render, summary and runs, a project whose state_dir or specs_dir is absolute or
+#     leaves $PWD is refused: codeorca would write the run dir or specs into the container's own filesystem,
+#     which --rm deletes, and a run stopped at a gate could never be resumed.
+#
+# The image runs as root, so on Linux (rootful Docker) the files it writes under $PWD are root-owned. After the
+# run, a second container chowns back to the caller's uid:gid the ROOT-OWNED files (find -uid 0) under the
+# project's state dir (the first component of state_dir below the project root, e.g. .codeorca/) and its specs
+# dir; nothing else in the tree is touched, and the project root itself never is. Skipped when the caller is
+# root, under rootless Docker or Podman (container root IS the caller there, so a chown would hand the files to a
+# subordinate uid), and when the run container never started. On Docker Desktop for macOS the files already show
+# as the caller's.
+#
+# Exit codes: codeorca's (0 ok, 1 failed, 2 drift, 3 waiting at a gate), whatever the chown does; docker's own
+# 125/126/127 when the run container could not start; 64 when this wrapper refuses its arguments or the project's
+# paths; 69 when the docker CLI is missing or the daemon cannot be reached.
+set -euo pipefail
+
+image=${CODEORCA_IMAGE:-ghcr.io/git-cgallagher/code-orca-runtime:latest}
+home=${HOME:-}
+
+refuse() { echo "codeorca wrapper: $*" >&2; exit 64; }
+
+# REL (a relative path) with '.' and '..' collapsed; '.' for $PWD itself. Fails when the path leaves $PWD.
+norm() {
+  local rest=$1 out= part
+  while [ -n "$rest" ]; do
+    part=${rest%%/*}
+    if [ "$part" = "$rest" ]; then rest=; else rest=${rest#*/}; fi
+    case $part in
+      ''|.) ;;
+      ..) [ -n "$out" ] || return 1
+          case $out in */*) out=${out%/*} ;; *) out= ;; esac ;;
+      *) out=${out:+$out/}$part ;;
+    esac
+  done
+  printf '%s\n' "${out:-.}"
+}
+# The project path as the container sees it (relative to $PWD), or a refusal.
+container_path() {
+  local p=$1 rel
+  case $p in
+    "$PWD") refuse "-p/--project names the current directory, not a project file" ;;
+    "$PWD"/*) p=${p#"$PWD"/} ;;
+    /*) refuse "project file $p is outside the current directory; only $PWD is mounted into the container" ;;
+  esac
+  rel=$(norm "$p") || refuse "project file $1 leaves the current directory; only $PWD is mounted into the container"
+  printf '%s\n' "$rel"
+}
+# `key: value  # comment` -> value, quotes stripped; empty when the key is absent.
+yaml_scalar() {
+  sed -n "s/^$1:[[:space:]]*//p" "$2" | head -n1 | sed -e 's/[[:space:]]#.*$//' -e 's/[[:space:]]*$//' \
+    -e "s/^[\"']//" -e "s/[\"']\$//"
+}
+
+# --- the arguments: find the project file, rewrite an absolute one --------------------------------------------
+# The same forms codeorca's -p/--project accepts (its parser takes no abbreviations: allow_abbrev=False).
+project=codeorca.yaml
+command=
+cargs=()
+prev=
+for a in "$@"; do
+  case $prev in
+    -p|--project) project=$(container_path "$a"); cargs+=("$project"); prev=; continue ;;
+  esac
+  case $a in
+    --project=*) project=$(container_path "${a#--project=}"); cargs+=("--project=$project") ;;
+    -p?*) project=$(container_path "${a#-p}"); cargs+=("-p$project") ;;
+    *) cargs+=("$a") ;;
+  esac
+  if [ -z "$command" ]; then case $a in -*) ;; *) command=$a ;; esac; fi
+  prev=$a
+done
+
+# --- the project's state_dir and specs_dir, relative to its root ------------------------------------------------
+state_dir=
+specs_dir=
+root=.
+if [ -f "$project" ]; then
+  root=$(dirname "$project")
+  state_dir=$(yaml_scalar state_dir "$project"); state_dir=${state_dir:-.codeorca/runs}
+  specs_dir=$(yaml_scalar specs_dir "$project"); specs_dir=${specs_dir:-specs}
+  case $command in
+    run|resume|drift|render|summary|runs)
+      for kv in "state_dir=$state_dir" "specs_dir=$specs_dir"; do
+        key=${kv%%=*}; val=${kv#*=}
+        case $val in
+          /*) refuse "$project: $key '$val' is absolute; with the container it must be a path under $PWD, relative to the project" ;;
+        esac
+        norm "$root/$val" > /dev/null ||
+          refuse "$project: $key '$val' leaves $PWD; only $PWD is mounted, so the container would write it to its own filesystem and delete it on exit"
+      done ;;
+  esac
+fi
+
+# --- docker -----------------------------------------------------------------------------------------------------
+if ! command -v docker > /dev/null 2>&1; then
+  echo "codeorca wrapper: docker is not on PATH" >&2
+  exit 69
+fi
+# The whole info document: Docker reports rootless as SecurityOptions "name=rootless", Podman (aliased as docker) as
+# host.security "rootless":true, and Podman has no .SecurityOptions field to ask for by name.
+if ! info=$(docker info --format '{{json .}}' 2> /dev/null); then
+  echo "codeorca wrapper: cannot reach the Docker daemon (is Docker running? check DOCKER_HOST / docker context)" >&2
+  exit 69
+fi
+
+args=(--rm -v "$PWD":/work -w /work)
+if [ -t 0 ] && [ -t 1 ]; then args+=(-it); fi
+
+for name in AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_CREDENTIAL_EXPIRATION \
+            AWS_REGION AWS_DEFAULT_REGION AWS_PROFILE; do
+  if [ -n "${!name+x}" ]; then args+=(-e "$name"); fi
+done
+# compgen -e lists exported variable NAMES only (no values to parse, so a multi-line value can't
+# smuggle in a fake name).
+while IFS= read -r name; do
+  case $name in
+    CODEORCA_IMAGE|CODEORCA_DOCKER_SOCKET) ;;
+    CODEORCA_*|TF_VAR_*) args+=(-e "$name") ;;
+  esac
+done < <(compgen -e)
+
+if [ "$(uname -s)" = Darwin ]; then
+  args+=(-v /run/host-services/ssh-auth.sock:/ssh-agent -e SSH_AUTH_SOCK=/ssh-agent)
+elif [ -n "${SSH_AUTH_SOCK:-}" ] && [ -S "$SSH_AUTH_SOCK" ]; then
+  args+=(-v "$SSH_AUTH_SOCK":/ssh-agent -e SSH_AUTH_SOCK=/ssh-agent)
+fi
+if [ -n "$home" ]; then
+  if [ -f "$home/.ssh/known_hosts" ]; then
+    args+=(-v "$home/.ssh/known_hosts":/root/.ssh/known_hosts:ro)
+  fi
+  mkdir -p "$home/.terraform.d/plugin-cache"
+  args+=(-v "$home/.terraform.d/plugin-cache":/root/.terraform.d/plugin-cache
+         -e TF_PLUGIN_CACHE_DIR=/root/.terraform.d/plugin-cache)
+fi
+
+if [ "${CODEORCA_DOCKER_SOCKET:-}" = 1 ]; then
+  args+=(-v /var/run/docker.sock:/var/run/docker.sock)
+fi
+
+set +e
+docker run "${args[@]}" "$image" codeorca ${cargs[@]+"${cargs[@]}"}
+rc=$?
+set -e
+
+# --- chown what the root container wrote, back to the caller --------------------------------------------------
+case $rc in
+  125|126|127)
+    echo "codeorca wrapper: the container did not start (docker exit $rc)" >&2
+    exit "$rc" ;;
+esac
+[ "$(id -u)" = 0 ] && exit "$rc"
+case $info in *name=rootless*|*'"rootless":true'*|*'"rootless": true'*) exit "$rc" ;; esac
+[ -f "$project" ] || exit "$rc"
+
+targets=()
+for kv in "state=$state_dir" "specs=$specs_dir"; do
+  key=${kv%%=*}; val=${kv#*=}
+  case $val in /*) continue ;; esac
+  # relative to the project root, and never the root itself or anything above it
+  rel=$(norm "$val") || continue
+  [ "$rel" = . ] && continue
+  # the state dir's first component (.codeorca for .codeorca/runs), so the parent codeorca created is included
+  [ "$key" = state ] && rel=${rel%%/*}
+  p=$(norm "$root/$rel") || continue
+  # a symlinked dir is skipped: chown would follow it to wherever it points
+  if [ -e "$p" ] && [ ! -L "$p" ]; then targets+=("./$p"); fi
+done
+[ "${#targets[@]}" -eq 0 ] && exit "$rc"
+
+if ! docker run --rm -v "$PWD":/work -w /work --entrypoint find "$image" \
+    -P "${targets[@]}" -uid 0 -exec chown -h "$(id -u):$(id -g)" -- {} +; then
+  echo "codeorca wrapper: could not chown ${targets[*]} back to $(id -u):$(id -g)" >&2
+fi
+exit "$rc"

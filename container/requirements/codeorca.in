@@ -1,0 +1,9 @@
+# code-orca's runtime dependencies that the BASE image (ghcr.io/git-cgallagher/ansible-runtime) does NOT
+# already install. One line per package, each with a why/who comment. Versions are not written here: they are
+# resolved against the base's /usr/share/ansible-runtime/constraints.txt so nothing the base pins can move.
+#
+# Empty on purpose (checked 2026-11-03 against ansible-runtime 1.3.0): every dependency in pyproject.toml is
+# already pinned by the base: jinja2 3.1.6, pydantic 2.14.2 (+ pydantic-core, annotated-types,
+# typing-extensions, typing-inspection), ruamel.yaml 0.19.1, markupsafe 3.0.4, and the extras' ansible-core
+# 2.21.5 and boto3/botocore 1.43.123. Add a line here only when code-orca needs a package the base lacks, then
+# regenerate codeorca.txt (command in its header and in container/requirements/README.md).

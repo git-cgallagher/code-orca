@@ -1,0 +1,5 @@
+# The wheel's build backend, for the Dockerfile's builder stage only (never shipped in the image).
+# The base image has no setuptools, so without this pip's build isolation would fetch whatever setuptools PyPI
+# serves that day, unhashed. Pinned and hash-checked instead, and the wheel is built with --no-build-isolation.
+# setuptools: pyproject.toml's [build-system] (>=77 for the PEP 639 license expression). Who: code-orca.
+setuptools>=77

@@ -1,0 +1,31 @@
+# Build context for container/Dockerfile (docker buildx build -f container/Dockerfile .). Allow-list: only what
+# the wheel build and the Dockerfile's bind mounts read. The smoke test runs from a bind-mounted checkout, so the
+# reference project, tests and docs never need to be in the context.
+*
+!pyproject.toml
+!README.md
+!LICENSE
+!src/
+!container/requirements/
+
+# Never in the context even under an allowed path: caches, run state, Terraform working files, build output.
+**/__pycache__
+**/*.py[cod]
+**/*.egg-info
+**/.pytest_cache
+**/.ruff_cache
+.git
+.venv
+.codeorca
+**/.codeorca
+examples/reference/specs
+examples/reference/.codeorca
+**/.terraform*
+**/*.tfstate
+**/*.tfstate.*
+**/*.tfplan
+dist
+build
+**/.env
+**/*.pem
+**/*.key

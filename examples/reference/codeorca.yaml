@@ -4,13 +4,18 @@
 api: codeorca/v1
 project: example
 runtime:                         # the expected execution environment; `codeorca doctor` fails closed on any mismatch
+  # Matches the code-orca-runtime image exactly (container/Dockerfile pins; container/tests/smoke.sh runs
+  # `codeorca doctor` against this block inside the image, so a pin bump without this block fails the smoke test).
   image: ghcr.io/git-cgallagher/code-orca-runtime:0.1.0
-  terraform: "1.14.7"            # exact
-  ansible_core: "2.21.5"         # exact
-  python: ">=3.13,<3.14"
-  pwsh: "7.6.*"
-  collections: {}                # exact pins; `codeorca doctor --lock` can fill this in
-  python_packages: {}            # subset the workflows rely on
+  terraform: "1.17.1"            # exact; container/Dockerfile TF_VERSION
+  ansible_core: "2.21.5"         # exact; the base image's pin (ansible-runtime 1.3.0)
+  python: ">=3.13,<3.14"         # the base is Python 3.13
+  pwsh: "7.6.*"                  # PowerShell 7.6 LTS; container/Dockerfile PWSH_VERSION
+  # exact pins of the collections the workflows use. None: the reference plays use ansible.builtin only. The
+  # image ships more (`codeorca doctor --lock` lists them); a consumer pins the ones its playbooks call.
+  collections: {}
+  python_packages:               # subset the workflows rely on
+    boto3: ">=1.35"              # bootstrap-backend's helper (codeorca.bootstrap.s3); the `aws` extra's floor
   # collections_from_file: requirements/collections.yml   # optional: reuse an EE repo's own pin file
 state_dir: .codeorca/runs
 specs_dir: specs

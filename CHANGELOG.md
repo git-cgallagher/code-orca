@@ -2,6 +2,38 @@
 
 ## Unreleased
 
+- Phase 4 review fixes: `container/requirements/lock.sh` locks inside the image on the Dockerfile's literal
+  `AS pinned-base` line again (it had read `ARG BASE_IMAGE=`, which names the stage since the Dependabot refactor,
+  and ran `docker run pinned-base`); a `BASE_IMAGE` override must be digest-pinned; `--print-base`.
+  `bin/codeorca`: an absolute `-p` under `$PWD` is rewritten for the container (it failed "not found"), a project file,
+  `state_dir` or `specs_dir` outside `$PWD` is refused (exit 64) instead of being written to the container's
+  throwaway filesystem; the chown changes only root-owned files, never the project root (`./.codeorca/runs`,
+  `specs_dir: .` had chowned the whole tree), and is skipped under rootless Docker and when the container never
+  started; a missing `docker` or unreachable daemon exits 69 (it had exited 1, like a failed workflow); `HOME` unset
+  no longer aborts. codeorca takes no abbreviated long options (`--proj`), on any subcommand.
+  The image's OCI labels: `version` is `X.Y.Z` on a release (it was always `dev`), a new `revision` carries the commit,
+  and `licenses` adds `GPL-3.0-or-later` (ansible-core, ansible-lint).
+  Releases (`.github/ci/release-check.sh`, `refuse-overwrite.sh`): only a strict `vX.Y.Z` tag on a `main` commit
+  publishes (a prerelease tag had published only `:latest`; a branch tag published at all); `:latest` and `:X.Y` move
+  only for the highest release (a backport or racing tags had moved them backwards); the overwrite refusal fails on
+  any registry error but "not found" (it had failed open), and lets a re-run with the same digests re-attest a
+  release whose attestation failed after the tags went out.
+  The weekly schedule no longer claims to deliver Debian security updates (it cannot: digest-pinned base, cached
+  layers; it re-scans with a fresh grype database). The clean-checkout check includes ignored files.
+  The smoke test and CI's leak check fail on a plan file or any archive under specs/
+  (`container/tests/no_plan_in_specs.py`): `grep -ra` cannot see a secret in a plan's deflated zip entries.
+- Container image (Phase 4): `container/Dockerfile` builds `code-orca-runtime` on ansible-runtime 1.3.0 with
+  Terraform 1.17.1 (GPG-verified release zip + its BSL 1.1 license), PowerShell 7.6.9 LTS + PSScriptAnalyzer 1.25.0
+  and the code-orca wheel under the base's pins (no venv, `pip check` in the build); `container/tests/smoke.sh`
+  checks the pins and runs the reference project end to end inside the image; the reference `runtime:` block lists
+  `boto3` (bootstrap-backend) and documents where each pin comes from.
+- Container pipeline: `.github/workflows/image.yml` builds, smoke-tests and grype-scans
+  `ghcr.io/git-cgallagher/code-orca-runtime` on native amd64 + arm64 runners, publishes `:main`/`:sha-<short>` from
+  main and `:X.Y.Z`/`:X.Y`/`:latest` from a `vX.Y.Z` tag matching pyproject's version (never re-tagging a release),
+  with build provenance and an SPDX SBOM attested on the index; `bin/codeorca` runs code-orca in the image (secrets
+  by name only, `-it` only on a terminal, Docker socket only on request, state/specs chowned back); tests in
+  `tests/wrapper/`; Dependabot's docker entry; `docs/CONTAINER.md`.
+
 - Phase 3 review fixes: a helper's non-UTF-8 output file (UTF-16 `Out-File`, Latin-1) is rewritten scrubbed or
   deleted, never left raw, and `scan_outputs` reads UTF-16; `gate.max_age` also bounds when the gate started asking
   (`waiting_since`) and when the plan was made (`planned_at` in the binding); resume refuses a changed project

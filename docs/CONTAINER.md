@@ -153,12 +153,13 @@ Verify the index digest (what `imagetools inspect` prints), which is what the at
 describes the `linux/amd64` image (syft resolves the index to the runner's platform); both architectures are
 built from the same pins. Pin consumers by tag and digest: `code-orca-runtime:X.Y.Z@sha256:...`.
 
-## GHCR package visibility (one manual step, Chris)
+## GHCR package visibility
 
-GitHub's documentation says a newly published package starts **private**; for a personal account only the owner
-can change that, in the UI: GitHub, Your profile, Packages, `code-orca-runtime`, Package settings, Danger Zone,
-Change visibility, Public. After the first push from
-`main`, check it anonymously (this leaves any GHCR login alone), and make it public if it prints anything but 200:
+The package came out **public** on its first push from `main` (2026-11-04: an anonymous token and manifest fetch
+of `:main` returned 200, with no manual step), although GitHub's documentation says a newly published package
+starts private. Why is unconfirmed; the likely reason is that the package is linked to this public repository
+(the image's `org.opencontainers.image.source` label) and took its visibility. Check it anonymously after any
+change to the package (this leaves any GHCR login alone); anything but 200 means it is private:
 
 ```bash
 t=$(curl -fsS "https://ghcr.io/token?scope=repository:git-cgallagher/code-orca-runtime:pull" | python3 -c 'import json, sys; print(json.load(sys.stdin)["token"])')
@@ -166,7 +167,9 @@ curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $t" \
   -H 'Accept: application/vnd.oci.image.index.v1+json' https://ghcr.io/v2/git-cgallagher/code-orca-runtime/manifests/main
 ```
 
-While it is private the pipeline itself still works (it logs in with `GITHUB_TOKEN`); anonymous pulls (consumers, `bin/codeorca` on a machine without a GHCR login) do not.
+For a personal account only the owner can change visibility, in the UI: GitHub, Your profile, Packages,
+`code-orca-runtime`, Package settings, Danger Zone, Change visibility. While private, the pipeline itself still
+works (it logs in with `GITHUB_TOKEN`); anonymous pulls (`bin/codeorca` on a machine without a GHCR login) do not.
 
 ansible-runtime's package is public today (an anonymous token and manifest fetch for `:1.3.0` succeeded on
 2026-11-03), but its AGENTS.md, README and CHANGELOG do not record how or when it was made public, so whether

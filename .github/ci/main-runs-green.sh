@@ -6,6 +6,7 @@
 # filtered to event=push on branch main: the tag run's own jobs share the commit SHA, so check-runs on the commit
 # would count them too.
 # Fails if either run is missing (not a main commit, or the run never started), still running, or not a success.
+# A cancelled image run is possible: GitHub cancels a PENDING run when a third main run joins the concurrency group.
 set -euo pipefail
 
 fail() { echo "::error::$*" >&2; exit 1; }
@@ -14,7 +15,7 @@ sha=${1:?usage: main-runs-green.sh <commit sha>}
 repo=${GITHUB_REPOSITORY:?}
 
 runs=$(gh api "repos/$repo/actions/runs?head_sha=$sha&event=push&branch=main&per_page=100" \
-  --jq '.workflow_runs[] | [.path, .status, (.conclusion // ""), (.id | tostring)] | @tsv') ||
+  --jq '.workflow_runs[] | [.path, .status, (.conclusion // "none"), (.id | tostring)] | @tsv') ||
   fail "could not list the workflow runs for $sha"
 
 for wf in .github/workflows/ci.yml .github/workflows/image.yml; do
@@ -23,6 +24,11 @@ for wf in .github/workflows/ci.yml .github/workflows/image.yml; do
   [ -n "$line" ] || fail "no push run of $wf on main for $sha: tag a main commit whose $wf run passed"
   IFS=$'\t' read -r _ status conclusion id <<< "$line"
   [ "$status" = completed ] || fail "$wf on main for $sha is $status (run $id): wait for it, then re-run this job"
+  if [ "$conclusion" = cancelled ]; then
+    fail "$wf on main for $sha was cancelled (run $id; a later main run superseded it in the image concurrency group):" \
+      "tag a later green main commit whose pyproject still says the version. Do not re-run that old main run: its" \
+      "manifest job would move :main back to this commit"
+  fi
   [ "$conclusion" = success ] || fail "$wf on main for $sha concluded $conclusion (run $id): release a later green commit"
 done
 echo "main's ci and image runs passed for $sha"

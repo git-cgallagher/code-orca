@@ -1,5 +1,5 @@
 """The release scripts .github/workflows/image.yml runs on a tag push: .github/ci/release-check.sh, refuse-overwrite.sh,
-release-source.sh, published-versions.sh and main-runs-green.sh.
+release-source.sh, counted-releases.sh and main-runs-green.sh.
 
 release-check runs against throwaway git repos; the others against a fake ``docker`` or ``gh`` (nothing is called).
 """
@@ -239,41 +239,95 @@ def test_release_commit_wins_over_github_sha(repo):
     assert proc.returncode == 1 and "is not on main" in proc.stderr
 
 
-# ------------------------------------------------------------------------- release-source and published-versions
+# --------------------------------------------------------------- release-source, counted-releases, main-runs-green
 SOURCE = CI / "release-source.sh"
-PUBLISHED = CI / "published-versions.sh"
+COUNTED = CI / "counted-releases.sh"
+GREEN = CI / "main-runs-green.sh"
 COMMIT = "1234567" + "0" * 33
+INDEX = "sha256:" + "9" * 64
 
+# A fake ``docker buildx imagetools inspect``: ``<ref>`` with --format '{{json .Manifest.Digest}}', --raw or
+# --format '{{json .Image}}'. A tag resolves through FAKE_IMAGES' "tags" to an index digest; "indexes" hold the content.
 FAKE_DOCKER_INSPECT = f"""#!{sys.executable}
 import json, os, sys
 assert sys.argv[1:4] == ["buildx", "imagetools", "inspect"], sys.argv
-ref = sys.argv[-1] if "--format" not in sys.argv else sys.argv[sys.argv.index("--format") - 1]
-images = json.load(open(os.environ["FAKE_IMAGES"]))
+args = [a for a in sys.argv[4:] if a != "--raw"]
+fmt = args[args.index("--format") + 1] if "--format" in args else None
+ref = [a for a in args if a != "--format" and a != fmt][0]
+reg = json.load(open(os.environ["FAKE_IMAGES"]))
 if os.environ.get("FAKE_ERROR"):
     print("ERROR: failed to do request: 503 Service Unavailable", file=sys.stderr); sys.exit(1)
-if ref not in images:
+digest = ref.split("@", 1)[1] if "@" in ref else reg["tags"].get(ref)
+if digest not in reg["indexes"]:
     print("ERROR: " + ref + ": not found", file=sys.stderr); sys.exit(1)
-img = images[ref]
-if "--raw" in sys.argv:
-    print(json.dumps({{"manifests": [{{"digest": d, "platform": dict(zip(("os", "architecture"), p.split("/")))}}
-                                    for p, d in img["platforms"].items()]}}))
-else:
+img = reg["indexes"][digest]
+if fmt == "{{{{json .Manifest.Digest}}}}":
+    print(json.dumps(digest))
+elif fmt == "{{{{json .Image}}}}":
     print(json.dumps({{p: {{"config": {{"Labels": {{"org.opencontainers.image.revision": img["revision"].get(p)}}}}}}
                        for p in img["platforms"]}}))
+else:
+    print(json.dumps({{"manifests": [{{"digest": d, "platform": dict(zip(("os", "architecture"), p.split("/")))}}
+                                    for p, d in img["platforms"].items()]}}))
+"""
+
+# A fake ``gh api <url> --jq <expr>``: serves FAKE_RUNS as the runs API would (filtered by the query's event, branch
+# and head_sha), then runs the script's own --jq expression through the real jq.
+FAKE_GH = f"""#!{sys.executable}
+import json, os, subprocess, sys
+from urllib.parse import parse_qs, urlsplit
+assert sys.argv[1] == "api" and sys.argv[3] == "--jq", sys.argv
+url = urlsplit(sys.argv[2])
+q = {{k: v[0] for k, v in parse_qs(url.query).items()}}
+runs = json.load(open(os.environ["FAKE_RUNS"]))
+if "/workflows/" in url.path:
+    wf = url.path.split("/workflows/")[1].split("/")[0]
+    runs = [r for r in runs if r["path"].endswith("/" + wf)]
+for key, field in (("event", "event"), ("branch", "head_branch"), ("head_sha", "head_sha")):
+    if key in q:
+        runs = [r for r in runs if r[field] == q[key]]
+proc = subprocess.run(["jq", "-r", sys.argv[4]], input=json.dumps({{"workflow_runs": runs}}), text=True)
+sys.exit(proc.returncode)
 """
 
 
+def index(platforms=("linux/amd64", "linux/arm64"), revision=COMMIT):
+    return {
+        "platforms": {p: f"sha256:{c * 64}" for p, c in zip(platforms, "abcdef", strict=False)},
+        "revision": {p: revision for p in platforms},
+    }
+
+
+def run_(wf, *, status="completed", conclusion="success", id=1, branch="main", sha=COMMIT):
+    return {
+        "path": f".github/workflows/{wf}",
+        "status": status,
+        "conclusion": conclusion,
+        "id": id,
+        "event": "push",
+        "head_branch": branch,
+        "head_sha": sha,
+    }
+
+
 @pytest.fixture
-def fake_registry(tmp_path):
+def fakes(tmp_path):
     fakebin = tmp_path / "fakebin2"
     fakebin.mkdir()
-    (fakebin / "docker").write_text(FAKE_DOCKER_INSPECT)
-    (fakebin / "docker").chmod(0o755)
-    images = tmp_path / "images.json"
+    for name, body in (("docker", FAKE_DOCKER_INSPECT), ("gh", FAKE_GH)):
+        (fakebin / name).write_text(body)
+        (fakebin / name).chmod(0o755)
+    images, runs_file = tmp_path / "images.json", tmp_path / "runs.json"
 
-    def run(script, *args, registry, error=False):
-        images.write_text(json.dumps(registry))
-        env = {"PATH": f"{fakebin}:{os.environ['PATH']}", "FAKE_IMAGES": str(images)}
+    def run(script, *args, tags=None, indexes=None, runs=(), error=False):
+        images.write_text(json.dumps({"tags": tags or {}, "indexes": indexes or {}}))
+        runs_file.write_text(json.dumps(list(runs)))
+        env = {
+            "PATH": f"{fakebin}:{os.environ['PATH']}",
+            "FAKE_IMAGES": str(images),
+            "FAKE_RUNS": str(runs_file),
+            "GITHUB_REPOSITORY": "o/r",
+        }
         if error:
             env["FAKE_ERROR"] = "1"
         return subprocess.run([str(script), *args], env=env, capture_output=True, text=True, timeout=60)
@@ -281,96 +335,86 @@ def fake_registry(tmp_path):
     return run
 
 
-def sha_image(platforms=("linux/amd64", "linux/arm64"), revision=COMMIT):
-    return {
-        "platforms": {p: f"sha256:{c * 64}" for p, c in zip(platforms, "abcdef", strict=False)},
-        "revision": {p: revision for p in platforms},
-    }
+def test_jq_is_available():
+    # the fake gh runs the scripts' own --jq expressions; CI fails on a skipped test, so jq must be there
+    assert subprocess.run(["jq", "--version"], capture_output=True).returncode == 0
 
 
-def test_release_source_writes_both_platform_digests(fake_registry, tmp_path):
+def test_release_source_writes_both_platform_digests(fakes, tmp_path):
     out = tmp_path / "digests"
     out.mkdir()
-    proc = fake_registry(SOURCE, "img", COMMIT, str(out), registry={"img:sha-1234567": sha_image()})
+    proc = fakes(SOURCE, "img", COMMIT, str(out), tags={"img:sha-1234567": INDEX}, indexes={INDEX: index()})
     assert proc.returncode == 0, proc.stderr
     assert sorted(p.name for p in out.iterdir()) == [A, B]
+    assert proc.stdout == f"amd64=img@sha256:{A}\n"  # the amd64 image, by digest, for the release-time scan
 
 
 @pytest.mark.parametrize(
-    ("registry", "message"),
+    ("indexes", "message"),
     [
         ({}, "is missing"),
-        ({"img:sha-1234567": sha_image(revision="1234567" + "f" * 33)}, "revision label"),
-        ({"img:sha-1234567": sha_image(platforms=("linux/amd64",))}, "not exactly"),
-        ({"img:sha-1234567": sha_image(platforms=("linux/amd64", "linux/arm64", "linux/s390x"))}, "not exactly"),
+        ({INDEX: index(revision="1234567" + "f" * 33)}, "revision label"),
+        ({INDEX: index(platforms=("linux/amd64",))}, "not exactly"),
+        ({INDEX: index(platforms=("linux/amd64", "linux/arm64", "linux/s390x"))}, "not exactly"),
     ],
 )
-def test_release_source_refuses_anything_but_main_s_image(fake_registry, tmp_path, registry, message):
+def test_release_source_refuses_anything_but_main_s_image(fakes, tmp_path, indexes, message):
     out = tmp_path / "digests"
     out.mkdir()
-    proc = fake_registry(SOURCE, "img", COMMIT, str(out), registry=registry)
+    tags = {"img:sha-1234567": INDEX} if indexes else {}
+    proc = fakes(SOURCE, "img", COMMIT, str(out), tags=tags, indexes=indexes)
     assert proc.returncode == 1 and message in proc.stderr
     assert not list(out.iterdir())
 
 
-def test_published_versions(fake_registry):
-    registry = {"img:0.1.0": sha_image(), "img:0.3.0": sha_image()}
-    proc = fake_registry(PUBLISHED, "img", "0.1.0", "0.2.0", "0.3.0", registry=registry)
+def test_counted_releases(fakes):
+    other = "sha256:" + "8" * 64
+    proc = fakes(
+        COUNTED,
+        "img",
+        "0.1.0",
+        "0.2.0",
+        "0.3.0",
+        "0.4.0",
+        "0.5.0",
+        tags={"img:0.1.0": INDEX, "img:0.3.0": other},
+        indexes={INDEX: index(), other: index()},
+        runs=[
+            run_("image.yml", branch="v0.2.0", conclusion="failure", id=5),  # failed, no image: a stray tag
+            run_("image.yml", branch="v0.4.0", status="in_progress", conclusion=None, id=6),  # racing: counts
+            run_("image.yml", branch="v0.5.0", conclusion="failure", id=7),
+            run_("image.yml", branch="v0.5.0", status="queued", conclusion=None, id=8),  # re-run pending: counts
+            run_("ci.yml", branch="v0.2.0", id=9),  # another workflow's run never decides
+        ],
+    )
     assert proc.returncode == 0, proc.stderr
-    assert proc.stdout.split() == ["0.1.0", "0.3.0"]
-    assert fake_registry(PUBLISHED, "img", registry={}).stdout.strip() == ""
+    assert proc.stdout.split() == ["0.1.0", "0.3.0", "0.4.0", "0.5.0"]
+    assert fakes(COUNTED, "img").stdout.strip() == ""
 
 
-def test_published_versions_never_treats_a_registry_error_as_absent(fake_registry):
-    proc = fake_registry(PUBLISHED, "img", "0.1.0", registry={}, error=True)
+def test_counted_releases_never_treats_a_registry_error_as_absent(fakes):
+    proc = fakes(COUNTED, "img", "0.1.0", error=True)
     assert proc.returncode == 1 and "registry error" in proc.stderr
 
 
-# ----------------------------------------------------------------------------------------------- main-runs-green
-GREEN = CI / "main-runs-green.sh"
-FAKE_GH = f"""#!{sys.executable}
-import json, os, sys
-assert sys.argv[1] == "api" and "event=push&branch=main" in sys.argv[2], sys.argv
-runs = json.load(open(os.environ["FAKE_RUNS"]))
-print("\\n".join("\\t".join([r["path"], r["status"], r.get("conclusion") or "", str(r["id"])]) for r in runs))
-"""
-
-
-@pytest.fixture
-def runs(tmp_path):
-    fakebin = tmp_path / "fakebin3"
-    fakebin.mkdir()
-    (fakebin / "gh").write_text(FAKE_GH)
-    (fakebin / "gh").chmod(0o755)
-    data = tmp_path / "runs.json"
-
-    def run(*workflow_runs):
-        data.write_text(json.dumps(list(workflow_runs)))
-        env = {"PATH": f"{fakebin}:{os.environ['PATH']}", "FAKE_RUNS": str(data), "GITHUB_REPOSITORY": "o/r"}
-        return subprocess.run([str(GREEN), COMMIT], env=env, capture_output=True, text=True, timeout=60)
-
-    return run
-
-
-def r(wf, status="completed", conclusion="success", id=1):
-    return {"path": f".github/workflows/{wf}", "status": status, "conclusion": conclusion, "id": id}
-
-
-def test_main_runs_green(runs):
-    proc = runs(r("ci.yml"), r("image.yml", id=2))
+def test_main_runs_green(fakes):
+    tag_run = run_("image.yml", status="in_progress", conclusion=None, id=99, branch="v0.1.0")  # the tag's own run
+    proc = fakes(GREEN, COMMIT, runs=[run_("ci.yml"), run_("image.yml", id=2), tag_run])
     assert proc.returncode == 0, proc.stderr
 
 
 @pytest.mark.parametrize(
-    ("workflow_runs", "message"),
+    ("runs", "message"),
     [
-        ((r("ci.yml"),), "no push run of .github/workflows/image.yml"),
-        ((r("ci.yml"), r("image.yml", status="in_progress", conclusion=None)), "is in_progress"),
-        ((r("ci.yml", conclusion="failure"), r("image.yml")), "concluded failure"),
+        ([run_("ci.yml")], "no push run of .github/workflows/image.yml"),
+        ([run_("ci.yml"), run_("image.yml", sha="f" * 40)], "no push run of .github/workflows/image.yml"),
+        ([run_("ci.yml"), run_("image.yml", status="in_progress", conclusion=None, id=42)], "is in_progress (run 42)"),
+        ([run_("ci.yml", conclusion="failure"), run_("image.yml")], "concluded failure"),
+        ([run_("ci.yml"), run_("image.yml", conclusion="cancelled", id=3)], "Do not re-run that old main run"),
         # the newest run (highest id) decides
-        ((r("ci.yml"), r("image.yml", id=1), r("image.yml", conclusion="failure", id=9)), "failure"),
+        ([run_("ci.yml"), run_("image.yml", id=1), run_("image.yml", conclusion="failure", id=9)], "failure"),
     ],
 )
-def test_main_runs_not_green(runs, workflow_runs, message):
-    proc = runs(*workflow_runs)
+def test_main_runs_not_green(fakes, runs, message):
+    proc = fakes(GREEN, COMMIT, runs=runs)
     assert proc.returncode == 1 and message in proc.stderr

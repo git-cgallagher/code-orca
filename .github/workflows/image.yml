@@ -4,14 +4,17 @@ name: image
 # ansible-runtime/.github/workflows/build.yml. See docs/CONTAINER.md.
 # PR: build on both architectures, smoke-test, scan. Nothing is pushed.
 # main (push, weekly schedule, manual run): the same, then :main; a push also gets :sha-<short>.
-#   Every push to main builds (no paths filter), so every main commit has a :sha-<short> to release.
+#   Every push to main builds (no paths filter), so normally every main commit has a :sha-<short> to
+#   release. Exception: GitHub cancels a PENDING run when a third main run (push, schedule, manual)
+#   joins the image-refs/heads/main group; that commit has no :sha-<short>, so tag a later one.
 # Tag v* (push only; the `release` job, no build): promotes the :sha-<short> image main's run built
 #   and tested to :X.Y.Z, so a release is byte-for-byte what main tested. Checks first:
 #   .github/ci/release-check.sh (strict vX.Y.Z, equal to pyproject.toml's version, on main) and
 #   .github/ci/main-runs-green.sh (main's `ci` and `image` push runs passed for that commit). :X.Y and
-#   :latest move only when it is the highest PUBLISHED release of its line / overall
-#   (.github/ci/published-versions.sh), so neither a backport, racing tags nor a stray tag whose run
-#   failed moves them backwards. An existing :X.Y.Z is never re-pointed
+#   :latest move only when it is the highest counted release of its line / overall
+#   (.github/ci/counted-releases.sh: on the registry, or its tag run not failed), so neither a
+#   backport, racing tags nor a stray tag whose run failed moves them backwards. The promoted amd64
+#   image is grype-scanned again against today's database. An existing :X.Y.Z is never re-pointed
 #   (.github/ci/refuse-overwrite.sh), except by a re-run with the same digests. The new index gets
 #   build provenance and an SPDX SBOM attestation. Tags are guarded on GitHub too: rulesets
 #   "release tags: create" (only the admin role creates v*) and "release tags: locked" (nobody moves
@@ -28,7 +31,7 @@ on:
   # forever, blocking the PR (ansible-runtime has no filter for the same reason).
   pull_request:
   # No `paths:` filter on main either: a release promotes the tagged commit's :sha-<short>, which
-  # only exists if main's run built that commit. `v*`, not `v*.*.*`: a malformed v* tag runs and
+  # only exists if main's run built that commit (and was not cancelled while pending). `v*`, not `v*.*.*`: a malformed v* tag runs and
   # fails release-check loudly instead of sitting there unnoticed.
   push:
     branches: [main]
@@ -289,25 +292,37 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: The image main tested
+        id: source
         env:
           COMMIT: ${{ steps.commit.outputs.sha }}
         run: |
           mkdir -p "$RUNNER_TEMP/digests"
           .github/ci/release-source.sh "$IMAGE" "$COMMIT" "$RUNNER_TEMP/digests"
 
-      # Earlier releases are the strict tags on main whose :X.Y.Z exists: a stray tag whose run
-      # failed (the locked ruleset keeps it) never counts. Outputs version, latest, minor.
-      - name: Published releases, and whether this one moves :latest and :X.Y
+      # The same gate as the image job, against today's vulnerability database: main may have
+      # scanned this image days or weeks ago. Pulls the amd64 image by digest; builds nothing.
+      - name: Scan for fixable critical vulnerabilities
+        uses: anchore/scan-action@27805bf3b4e84b4a5c980df22ed233c00390a439  # v7.4.2
+        with:
+          image: ${{ steps.source.outputs.amd64 }}
+          severity-cutoff: critical
+          only-fixed: true
+          output-format: table
+
+      # Earlier releases: the strict tags on main that counted-releases.sh counts (a stray tag whose
+      # run failed does not; one whose run is still going does). Outputs version, latest, minor.
+      - name: Counted releases, and whether this one moves :latest and :X.Y
         id: release
         env:
           REF: ${{ github.ref_name }}
           RELEASE_COMMIT: ${{ steps.commit.outputs.sha }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           versions=$(git tag -l 'v*' --merged origin/main | sed -n 's/^v\([0-9][0-9.]*\)$/\1/p')
           # shellcheck disable=SC2086  # tag-derived X.Y.Z words
-          RELEASED_VERSIONS=$(.github/ci/published-versions.sh "$IMAGE" $versions)
+          RELEASED_VERSIONS=$(.github/ci/counted-releases.sh "$IMAGE" $versions)
           export RELEASED_VERSIONS
-          echo "published: ${RELEASED_VERSIONS:-none}"
+          echo "counted: ${RELEASED_VERSIONS:-none}"
           .github/ci/release-check.sh "$REF"
 
       # GHCR tags are mutable. A release version must never be re-pointed: consumers pin it.
@@ -319,7 +334,7 @@ jobs:
           VERSION: ${{ steps.release.outputs.version }}
         run: .github/ci/refuse-overwrite.sh "$IMAGE" "$VERSION" "$RUNNER_TEMP/digests"
 
-      # :X.Y.Z always; :X.Y and :latest only when release-check says this is the highest published
+      # :X.Y.Z always; :X.Y and :latest only when release-check says this is the highest counted
       # release of its line / overall. No `image-release` concurrency group: GitHub cancels a
       # PENDING run when a third joins the group, which would silently drop a release; the
       # highest-version rule makes the order irrelevant instead.

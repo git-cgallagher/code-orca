@@ -1,7 +1,7 @@
 """Static checks on container/Dockerfile and .github/workflows/image.yml for rules nothing else can test locally.
 
 The image is built and published only in CI (amd64 is never built on this Mac), so these pin the review fixes:
-the labels reach a released image without rebuilding layers, and a release can only come from a strict tag on main.
+the label build-args never rebuild layers, and a tag never builds: a release only promotes main's tested image.
 """
 
 from __future__ import annotations
@@ -82,7 +82,8 @@ def test_the_release_promotes_main_s_image_and_never_builds():
         "A release tag is strict, equals pyproject.toml's version and is on main",
         "Main's ci and image runs passed for this commit",
         "The image main tested",
-        "Published releases, and whether this one moves :latest and :X.Y",
+        "Scan for fixable critical vulnerabilities",
+        "Counted releases, and whether this one moves :latest and :X.Y",
         "Refuse to overwrite an existing release",
         "Create the release index",
     ]
@@ -97,5 +98,9 @@ def test_latest_and_minor_follow_the_release_check():
     assert create["env"]["LATEST"] == "${{ steps.release.outputs.latest }}"
     assert create["env"]["MINOR"] == "${{ steps.release.outputs.minor }}"
     assert 'args=(-t "$IMAGE:$VERSION")' in create["run"]  # the version tag is always among the tags written
-    published = step("release", "Published releases, and whether this one moves :latest and :X.Y")
-    assert "published-versions.sh" in published["run"]
+    counted = step("release", "Counted releases, and whether this one moves :latest and :X.Y")
+    assert "counted-releases.sh" in counted["run"]
+    scan = step("release", "Scan for fixable critical vulnerabilities")["with"]
+    image_scan = step("image", "Scan for fixable critical vulnerabilities")
+    assert scan == image_scan["with"] | {"image": "${{ steps.source.outputs.amd64 }}"}  # the same gate as main's
+    assert step("release", "Scan for fixable critical vulnerabilities")["uses"] == image_scan["uses"]

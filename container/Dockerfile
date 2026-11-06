@@ -127,7 +127,8 @@ WORKDIR /work
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["codeorca", "--help"]
 
-# The labels' version and revision come from image.yml's build-args (a release tag labels X.Y.Z). They are declared
+# The labels' version and revision come from image.yml's build-args (always sha-<short> in CI: a release promotes
+# main's image and puts X.Y.Z on its index annotations, not on these labels). They are declared
 # HERE, after the last RUN: BuildKit hands every ARG in scope to each later RUN, so declared earlier a new value would
 # rebuild the PowerShell and pip layers. The licenses name the main components: code-orca and PowerShell (MIT),
 # Terraform (BUSL-1.1, its LICENSE.txt in /usr/share/licenses/terraform), ansible-core and ansible-lint

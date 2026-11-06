@@ -3,18 +3,18 @@
 # so origin/main and every tag are present):
 #   .github/ci/release-check.sh vX.Y.Z
 # Fails unless
-#   - the tag is a strict vX.Y.Z (no prerelease or build suffix: metadata-action emits no version tag for one, so
-#     the image would get only :latest and the overwrite refusal would check a tag that is never written),
+#   - the tag is a strict vX.Y.Z (no prerelease or build suffix: the release job writes :X.Y.Z from it as given, the
+#     ordering below parses it as three integers, and GitHub's tag-name pattern rule is Enterprise-only),
 #   - it equals pyproject.toml's version,
 #   - the commit (RELEASE_COMMIT, else GITHUB_SHA, else HEAD) is on origin/main (a tag on an unreviewed branch commit is not a release).
 # Then writes to $GITHUB_OUTPUT (stdout without it):
 #   version=X.Y.Z
-#   latest=true|false   this is the highest vX.Y.Z on main: only then does it move :latest
-#   minor=true|false    this is the highest vX.Y.* on main: only then does it move :X.Y
+#   latest=true|false   this is the highest counted vX.Y.Z on main: only then does it move :latest
+#   minor=true|false    this is the highest counted vX.Y.* on main: only then does it move :X.Y
 # so a backport (v0.1.5 after v0.2.0) or two tags racing never move :latest or :X.Y backwards.
-# RELEASED_VERSIONS (optional, space-separated X.Y.Z, from published-versions.sh): when set, only tags whose :X.Y.Z
-# image exists count as earlier releases, so a stray v* tag whose run failed (kept by the "release tags: locked"
-# ruleset) never freezes :latest.
+# RELEASED_VERSIONS (optional, space-separated X.Y.Z, from counted-releases.sh): when set, only those tags count as
+# earlier releases, so a stray v* tag whose run failed (kept by the "release tags: locked" ruleset) never freezes
+# :latest, while a tag whose run is still going (two tags pushed together) still counts.
 set -euo pipefail
 
 fail() { echo "::error::$*" >&2; exit 1; }
@@ -33,7 +33,7 @@ commit=${RELEASE_COMMIT:-${GITHUB_SHA:-$(git rev-parse HEAD)}}
 git rev-parse --verify --quiet "$main^{commit}" > /dev/null || fail "$main is not in this checkout (check out with fetch-depth: 0)"
 git merge-base --is-ancestor "$commit" "$main" || fail "$ref ($commit) is not on $main: tag the merge commit on main"
 
-# Released versions: strict vX.Y.Z tags on main (published ones, with RELEASED_VERSIONS), plus this one.
+# Released versions: strict vX.Y.Z tags on main (the counted ones, with RELEASED_VERSIONS), plus this one.
 released=$(git tag -l 'v*' --merged "$main" | grep -E "$strict" || true)
 if [ -n "${RELEASED_VERSIONS+x}" ]; then
   kept=""

@@ -21,7 +21,9 @@ is also why the build refuses fixable critical vulnerabilities (Terraform moved 
 
 The exact pins live in `container/Dockerfile` (ARG defaults) and `container/requirements/`; this page does not
 repeat them, so it cannot go stale. `docker inspect` on an image shows its labels (`org.opencontainers.image.version`
-is `X.Y.Z` for a release, `sha-<short>` for any other CI build, `dev` for a local one; `…revision` is the commit);
+is `sha-<short>` for every CI build, a release included, since a release promotes main's images unchanged, and `dev`
+for a local one; `…revision` is the commit). A release's `X.Y.Z` is its tag and the index annotation
+`org.opencontainers.image.version` (`docker buildx imagetools inspect --raw <image>:X.Y.Z`);
 `codeorca doctor --lock` prints the versions it observes.
 
 ## Build and smoke-test locally
@@ -101,10 +103,10 @@ CODEORCA_IMAGE=ghcr.io/git-cgallagher/code-orca-runtime:X.Y.Z bin/codeorca docto
 | Trigger | Builds + smoke + scan | Pushes |
 |---|---|---|
 | pull request (every PR: no path filter, so the checks can be required) | amd64 + arm64 | nothing |
-| push to `main` (every push: no path filter, so every main commit has a `:sha-<short>` a release can promote) | amd64 + arm64 | `:main`, `:sha-<short>` |
+| push to `main` (every push: no path filter, so every main commit normally gets a `:sha-<short>` a release can promote; a run cancelled while pending does not) | amd64 + arm64 | `:main`, `:sha-<short>` |
 | weekly schedule (Monday 07:00 UTC, on `main`) | amd64 + arm64 (grype with a fresh vulnerability database) | `:main` only, never a release tag. Not a Debian update: the base is pinned by digest and the layers come from the cache, so the image changes only when the base digest is bumped (Dependabot's `docker` entry) |
 | manual run (`workflow_dispatch`) | amd64 + arm64 (nothing on a tag) | `:main` on `main`; nothing on any other branch or tag |
-| tag push `v*` (the `release` job) | nothing: promotes main's `:sha-<short>` | `:X.Y.Z`; `:X.Y` and `:latest` only when it is the highest published release of its line / overall |
+| tag push `v*` (the `release` job) | nothing: promotes main's `:sha-<short>` | `:X.Y.Z`; `:X.Y` and `:latest` only when it is the highest counted release of its line / overall |
 
 Each architecture builds on its own native runner (`image (amd64)` on `ubuntu-24.04`, `image (arm64)` on
 `ubuntu-24.04-arm`), loads the image, runs the smoke test from the checkout, checks the checkout is still clean,
@@ -120,8 +122,11 @@ multi-arch index, both pushed to the registry. `image (amd64)` and `image (arm64
 
 1. In a PR, set `version = "X.Y.Z"` in `pyproject.toml` (and the CHANGELOG), and point
    `examples/reference/codeorca.yaml`'s `runtime.image` at the new tag. Merge it.
+   `codeorca --version` reads the installed package's metadata, so `pyproject.toml` is the only version source.
 2. Wait until `main`'s `ci` and `image` runs for the commit you will tag have passed (`image` publishes its
-   `:sha-<short>`). Any later `main` commit works as long as pyproject still says `X.Y.Z`.
+   `:sha-<short>`). Any later `main` commit works as long as pyproject still says `X.Y.Z`. If that commit's image
+   run was cancelled (GitHub cancels a pending run when a third main run joins its concurrency group), tag a later
+   green commit; never re-run the old main run, whose manifest job would move `:main` back to it.
 3. Tag that commit and push only that tag: `git tag -a vX.Y.Z <sha> -m "vX.Y.Z"`, `git push origin vX.Y.Z`
    (never `--tags`). Chris pushes it, or an agent on his in-session instruction naming the version (AGENTS.md,
    "Release tags").
@@ -133,9 +138,12 @@ multi-arch index, both pushed to the registry. `image (amd64)` and `image (arm64
      would also list this tag run's own jobs;
    - `.github/ci/release-source.sh`: `:sha-<short>` is an index of exactly linux/amd64 + linux/arm64 whose images'
      `org.opencontainers.image.revision` label is the full commit;
-   - `.github/ci/published-versions.sh` + `release-check.sh`: whether the release moves `:latest` (the highest
-     published `vX.Y.Z`) and `:X.Y` (the highest published `vX.Y.*`). Only tags on `main` whose `:X.Y.Z` exists on
-     the registry count, so a backport, two racing tags, or a stray tag whose run failed never move them backwards;
+   - a grype scan of the promoted amd64 image (fixable critical findings) against today's database, since main may
+     have scanned it long before the tag;
+   - `.github/ci/counted-releases.sh` + `release-check.sh`: whether the release moves `:latest` (the highest
+     counted `vX.Y.Z`) and `:X.Y` (the highest counted `vX.Y.*`). A tag on `main` counts unless its `:X.Y.Z` is
+     absent AND its own run completed without success, so neither a backport, two tags pushed together (each run
+     still sees the other as a release), nor a stray tag whose run failed moves them backwards;
    - `.github/ci/refuse-overwrite.sh`: an existing `:X.Y.Z` is never re-pointed. Only a registry "not found" counts
      as absent. A re-run of the same release (same two platform digests: the tags went out, then an attestation
      failed) carbon-copies the existing index and attests again.

@@ -101,10 +101,10 @@ CODEORCA_IMAGE=ghcr.io/git-cgallagher/code-orca-runtime:X.Y.Z bin/codeorca docto
 | Trigger | Builds + smoke + scan | Pushes |
 |---|---|---|
 | pull request (every PR: no path filter, so the checks can be required) | amd64 + arm64 | nothing |
-| push to `main` touching `container/**`, `src/**`, `pyproject.toml`, the workflow or `examples/reference/**` | amd64 + arm64 | `:main`, `:sha-<short>` |
+| push to `main` (every push: no path filter, so every main commit has a `:sha-<short>` a release can promote) | amd64 + arm64 | `:main`, `:sha-<short>` |
 | weekly schedule (Monday 07:00 UTC, on `main`) | amd64 + arm64 (grype with a fresh vulnerability database) | `:main` only, never a release tag. Not a Debian update: the base is pinned by digest and the layers come from the cache, so the image changes only when the base digest is bumped (Dependabot's `docker` entry) |
-| manual run (`workflow_dispatch`) | amd64 + arm64 | `:main` on `main`; nothing on any other branch |
-| tag `vX.Y.Z` (strict, on `main`) | amd64 + arm64 | `:X.Y.Z`; `:X.Y` and `:latest` only when it is the highest release of its line / overall |
+| manual run (`workflow_dispatch`) | amd64 + arm64 (nothing on a tag) | `:main` on `main`; nothing on any other branch or tag |
+| tag push `v*` (the `release` job) | nothing: promotes main's `:sha-<short>` | `:X.Y.Z`; `:X.Y` and `:latest` only when it is the highest published release of its line / overall |
 
 Each architecture builds on its own native runner (`image (amd64)` on `ubuntu-24.04`, `image (arm64)` on
 `ubuntu-24.04-arm`), loads the image, runs the smoke test from the checkout, checks the checkout is still clean,
@@ -120,23 +120,59 @@ multi-arch index, both pushed to the registry. `image (amd64)` and `image (arm64
 
 1. In a PR, set `version = "X.Y.Z"` in `pyproject.toml` (and the CHANGELOG), and point
    `examples/reference/codeorca.yaml`'s `runtime.image` at the new tag. Merge it.
-2. Tag the merge commit `vX.Y.Z` and push the tag (a public release: Chris pushes it).
-3. `.github/ci/release-check.sh` (both jobs, on a full checkout) fails unless the tag is a strict `vX.Y.Z` (no
-   `rc`/`-rc.1`/`+build` suffix: metadata-action would emit no version tag for one, only `:latest`), equals
-   `pyproject.toml`'s version, and its commit is on `origin/main` (a tag on an unreviewed branch commit is not a
-   release). It also decides whether the release moves `:latest` (the highest strict `vX.Y.Z` tag on `main`) and
-   `:X.Y` (the highest `vX.Y.*`), so a backport such as `v0.1.5` after `v0.2.0`, or two tags pushed together, never
-   move them backwards.
-4. `.github/ci/refuse-overwrite.sh` refuses to re-point an existing `:X.Y.Z` (GHCR tags are mutable; consumers pin
-   them). Only a registry "not found" counts as absent: any other registry error fails the job. The one exception
-   is a re-run whose two platform digests equal the existing index's (the tags went out, then an attestation
-   failed): the tags are re-pointed at the existing index as a carbon copy (same digest) and the attestations run
-   again. That re-run must come within a day: the per-arch digest artifacts it compares are kept for one day
-   (`retention-days: 1`), after which it fails at the download step. A broken release is fixed by releasing the
-   next version.
+2. Wait until `main`'s `ci` and `image` runs for the commit you will tag have passed (`image` publishes its
+   `:sha-<short>`). Any later `main` commit works as long as pyproject still says `X.Y.Z`.
+3. Tag that commit and push only that tag: `git tag -a vX.Y.Z <sha> -m "vX.Y.Z"`, `git push origin vX.Y.Z`
+   (never `--tags`). Chris pushes it, or an agent on his in-session instruction naming the version (AGENTS.md,
+   "Release tags").
+4. The `release` job builds nothing. In order, it checks:
+   - `.github/ci/release-check.sh`: the tag is a strict `vX.Y.Z` (no `rc`/`-rc.1`/`+build` suffix), equals
+     `pyproject.toml`'s version, and its commit is on `origin/main`;
+   - `.github/ci/main-runs-green.sh`: `main`'s own push runs of `ci.yml` and `image.yml` for that commit completed
+     with success. It asks the Actions runs API for `event=push&branch=main`, not the commit's check runs, which
+     would also list this tag run's own jobs;
+   - `.github/ci/release-source.sh`: `:sha-<short>` is an index of exactly linux/amd64 + linux/arm64 whose images'
+     `org.opencontainers.image.revision` label is the full commit;
+   - `.github/ci/published-versions.sh` + `release-check.sh`: whether the release moves `:latest` (the highest
+     published `vX.Y.Z`) and `:X.Y` (the highest published `vX.Y.*`). Only tags on `main` whose `:X.Y.Z` exists on
+     the registry count, so a backport, two racing tags, or a stray tag whose run failed never move them backwards;
+   - `.github/ci/refuse-overwrite.sh`: an existing `:X.Y.Z` is never re-pointed. Only a registry "not found" counts
+     as absent. A re-run of the same release (same two platform digests: the tags went out, then an attestation
+     failed) carbon-copies the existing index and attests again.
+5. It then writes a new index over main's two platform images, annotated with `org.opencontainers.image.version`
+   = `X.Y.Z`, `revision` and `source`, tags it `:X.Y.Z` (+ `:X.Y`, `:latest`), and attests provenance and an SPDX
+   SBOM on that index digest. The platform images are byte-for-byte what `main` tested; their own config labels
+   still say `version=sha-<short>`, the index annotation carries `X.Y.Z`.
 
-`pyproject.toml` still says `0.0.1` while the reference project names `code-orca-runtime:0.1.0`, so the first
-release needs the version bump in step 1.
+**If the tag run fails:** a check that ran too early (step 2's runs still in progress) passes on a re-run of the
+tag's run once `main` is green. Anything else: the version is not released; fix it on `main`, bump to the next
+patch version, and tag again. A published `:X.Y.Z` is never re-pointed either: a broken release is fixed by
+releasing the next version.
+
+**Release tags on GitHub** (since 2026-11-06; verified with a throwaway ruleset on `rulesettest-*` tags that
+creating a tag under a no-bypass `update`/`deletion` ruleset works and moving or deleting one is refused, by git
+and by the API):
+
+| Ruleset | Id | Rules on `refs/tags/v*`, `refs/tags/v*/**` | Bypass |
+|---|---|---|---|
+| release tags: create | `26724521` | creation | repository admin role, `always` |
+| release tags: locked | `26724524` | update, deletion, non-fast-forward | none (binds the admin too) |
+
+GitHub cannot tell Chris from his agents (they use his credentials), so "create" stops everyone else (the Actions
+token, Dependabot, Renovate and other apps, deploy keys, any future collaborator) and the agent rule in AGENTS.md is
+the boundary for agents. GitHub's tag-name pattern rule is Enterprise-only: `release-check.sh` stays the format
+check. Bypass is per ruleset, hence two. **Removing a wrong tag** is Chris's alone: set "release tags: locked" to
+disabled, delete the tag, set it back to active:
+
+```bash
+gh api -X PUT repos/git-cgallagher/code-orca/rulesets/26724524 -f enforcement=disabled
+git push origin :refs/tags/vX.Y.Z
+gh api -X PUT repos/git-cgallagher/code-orca/rulesets/26724524 -f enforcement=active
+```
+
+A wrong tag whose run failed published nothing, so this is git-only. Do it promptly: a stray `vX.Y.Z` holds that
+version's name. These rulesets are code-orca's only: the sibling repos create their release tags from the Actions
+token, which "create" would block.
 
 ## Pull and verify
 
@@ -149,7 +185,10 @@ gh attestation verify "oci://ghcr.io/git-cgallagher/code-orca-runtime@$digest" -
   --predicate-type https://spdx.dev/Document/v2.3
 ```
 
-Verify the index digest (what `imagetools inspect` prints), which is what the attestations name. The SBOM
+Verify the index digest (what `imagetools inspect` prints), which is what the attestations name. A release's
+provenance records the tag run that promoted it (`--source-ref refs/tags/vX.Y.Z --signer-workflow
+git-cgallagher/code-orca/.github/workflows/image.yml` both hold); the build itself is `main`'s run, whose
+provenance sits on the `:sha-<short>` index. The SBOM
 describes the `linux/amd64` image (syft resolves the index to the runner's platform); both architectures are
 built from the same pins. Pin consumers by tag and digest: `code-orca-runtime:X.Y.Z@sha256:...`.
 

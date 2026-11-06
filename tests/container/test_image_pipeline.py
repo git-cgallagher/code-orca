@@ -58,28 +58,44 @@ def test_clean_checkout_check_sees_ignored_files():
     assert "git status --porcelain --ignored" in step("image", "The smoke test left the checkout clean")["run"]
 
 
-def test_release_checks_run_in_both_jobs_on_a_full_checkout():
-    for job in ("image", "manifest"):
-        checkout = steps(job)[0]
-        assert checkout["uses"].startswith("actions/checkout@")
-        assert checkout["with"]["fetch-depth"] == 0
-        (check,) = [s for s in steps(job) if ".github/ci/release-check.sh" in s.get("run", "")]
-        assert check["if"] == "startsWith(github.ref, 'refs/tags/v')"
+def test_jobs_split_by_ref():
+    # A tag never builds: the build and :main/:sha jobs skip tag refs, and only a tag PUSH releases (a manual run on
+    # a tag would otherwise publish whatever that ref's workflow file says).
+    assert WORKFLOW["jobs"]["image"]["if"] == "${{ !startsWith(github.ref, 'refs/tags/') }}"
+    jobs = WORKFLOW["jobs"]
+    assert jobs["manifest"]["if"] == "github.event_name != 'pull_request' && github.ref == 'refs/heads/main'"
+    assert WORKFLOW["jobs"]["release"]["if"] == "github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')"
+    assert "refs/tags" not in WORKFLOW["env"]["PUBLISH"]
 
 
-def test_latest_and_minor_tags_follow_the_release_check():
-    tags = step("manifest", "Tags")["with"]["tags"]
-    assert "enable=${{ steps.release.outputs.latest == 'true' }}" in [
-        part for line in tags.splitlines() if "value=latest" in line for part in line.split(",")
+def test_every_main_push_builds_and_every_v_tag_runs():
+    push = WORKFLOW["on"]["push"]
+    assert "paths" not in push  # a release promotes the commit's :sha-<short>, so every main commit needs one
+    assert push["tags"] == ["v*"]  # a malformed v* tag fails release-check loudly
+
+
+def test_the_release_promotes_main_s_image_and_never_builds():
+    release = steps("release")
+    assert not [s for s in release if "build-push-action" in s.get("uses", "")]
+    names = [s.get("name") for s in release]
+    order = [
+        "A release tag is strict, equals pyproject.toml's version and is on main",
+        "Main's ci and image runs passed for this commit",
+        "The image main tested",
+        "Published releases, and whether this one moves :latest and :X.Y",
+        "Refuse to overwrite an existing release",
+        "Create the release index",
     ]
-    (minor,) = [line for line in tags.splitlines() if "{{major}}.{{minor}}" in line]
-    assert "enable=${{ steps.release.outputs.minor == 'true' }}" in minor
+    assert [n for n in names if n in order] == order
+    assert release[0]["with"]["fetch-depth"] == 0
+    assert ".github/ci/release-source.sh" in step("release", "The image main tested")["run"]
+    assert WORKFLOW["jobs"]["release"]["permissions"]["actions"] == "read"
 
 
-def test_the_overwrite_guard_runs_before_the_tags_are_created():
-    names = [s.get("name") for s in steps("manifest")]
-    guard = step("manifest", "Refuse to overwrite an existing release")
-    assert ".github/ci/refuse-overwrite.sh" in guard["run"]
-    assert names.index("Refuse to overwrite an existing release") < names.index("Create the multi-arch manifest")
-    create = step("manifest", "Create the multi-arch manifest")["run"]
-    assert '"$IMAGE:$VERSION"' in create  # the version tag must be among the tags written
+def test_latest_and_minor_follow_the_release_check():
+    create = step("release", "Create the release index")
+    assert create["env"]["LATEST"] == "${{ steps.release.outputs.latest }}"
+    assert create["env"]["MINOR"] == "${{ steps.release.outputs.minor }}"
+    assert 'args=(-t "$IMAGE:$VERSION")' in create["run"]  # the version tag is always among the tags written
+    published = step("release", "Published releases, and whether this one moves :latest and :X.Y")
+    assert "published-versions.sh" in published["run"]

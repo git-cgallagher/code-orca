@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Releases promote, never rebuild: a `v*` tag push runs only the new `release` job in `image.yml`, which checks the
+  tag (`release-check.sh`), that `main`'s own `ci` and `image` push runs passed for the commit (`main-runs-green.sh`,
+  through the Actions runs API, since the tag run's own jobs share the SHA) and that `:sha-<short>` is that commit's
+  two-platform image (`release-source.sh`), then writes `:X.Y.Z` as a new index over main's tested images,
+  annotated with the version. `:latest`/`:X.Y` count only published releases (`published-versions.sh`), so a
+  stray tag whose run failed cannot freeze them. Every push to `main` now builds (no paths filter), the tag
+  trigger is `v*` (a malformed tag fails loudly), and a manual run on a tag does nothing.
+- Release tags are guarded on GitHub: rulesets "release tags: create" (only the admin role creates `v*`) and
+  "release tags: locked" (nobody, the admin included, moves or deletes one), plus an agent rule in AGENTS.md
+  (an agent tags only on Chris's in-session instruction naming the version). `docs/CONTAINER.md` has the release
+  steps and how Chris removes a wrong tag.
 - CI: `image (amd64)` and `image (arm64)` are required checks on the "main protection" ruleset (2026-11-04).
 - Docs: the GHCR package `code-orca-runtime` was public from its first push (2026-11-04); `docs/CONTAINER.md`
   and AGENTS.md no longer describe making it public as a required manual step.

@@ -4,30 +4,38 @@ name: image
 # ansible-runtime/.github/workflows/build.yml. See docs/CONTAINER.md.
 # PR: build on both architectures, smoke-test, scan. Nothing is pushed.
 # main (push, weekly schedule, manual run): the same, then :main; a push also gets :sha-<short>.
-# Tag vX.Y.Z (.github/ci/release-check.sh: strict vX.Y.Z, equal to pyproject.toml's version, on
-#   main): :X.Y.Z, plus :X.Y and :latest only when it is the highest release of its line / overall
-#   (a backport or two racing tags never move them backwards). An existing :X.Y.Z is never
-#   re-pointed (.github/ci/refuse-overwrite.sh), except by a re-run with the same digests. The
-#   index gets build provenance and an SPDX SBOM attestation.
+#   Every push to main builds (no paths filter), so normally every main commit has a :sha-<short> to
+#   release. Exception: GitHub cancels a PENDING run when a third main run (push, schedule, manual)
+#   joins the image-refs/heads/main group; that commit has no :sha-<short>, so tag a later one.
+# Tag v* (push only; the `release` job, no build): promotes the :sha-<short> image main's run built
+#   and tested to :X.Y.Z, so a release is byte-for-byte what main tested. Checks first:
+#   .github/ci/release-check.sh (strict vX.Y.Z, equal to pyproject.toml's version, on main) and
+#   .github/ci/main-runs-green.sh (main's `ci` and `image` push runs passed for that commit). :X.Y and
+#   :latest move only when it is the highest counted release of its line / overall
+#   (.github/ci/counted-releases.sh: on the registry, or its tag run not failed), so neither a
+#   backport, racing tags nor a stray tag whose run failed moves them backwards. The promoted amd64
+#   image is grype-scanned again against today's database. An existing :X.Y.Z is never re-pointed
+#   (.github/ci/refuse-overwrite.sh), except by a re-run with the same digests. The new index gets
+#   build provenance and an SPDX SBOM attestation. Tags are guarded on GitHub too: rulesets
+#   "release tags: create" (only the admin role creates v*) and "release tags: locked" (nobody moves
+#   or deletes one). See docs/CONTAINER.md.
 # Weekly: re-run the build, smoke test and grype against a fresh vulnerability database, and
 #   re-push :main. It does NOT pick up Debian security updates: the base is pinned by digest and
 #   the layers come from the cache, so the image only changes when the base digest is bumped
 #   (Dependabot's docker entry). A schedule runs on main, so it never produces a release tag.
-# A manual run on any other branch builds and tests only (PUBLISH is false there).
+# A manual run on any other branch builds and tests only (PUBLISH is false there). A manual run on a
+#   tag does nothing: only a tag push releases.
 on:
   # No `paths:` filter on pull_request: `image (amd64)` and `image (arm64)` are
   # required checks, and a required check whose workflow a path filter skipped stays "Expected"
   # forever, blocking the PR (ansible-runtime has no filter for the same reason).
   pull_request:
+  # No `paths:` filter on main either: a release promotes the tagged commit's :sha-<short>, which
+  # only exists if main's run built that commit (and was not cancelled while pending). `v*`, not `v*.*.*`: a malformed v* tag runs and
+  # fails release-check loudly instead of sitting there unnoticed.
   push:
     branches: [main]
-    paths:
-      - 'container/**'
-      - 'src/**'
-      - 'pyproject.toml'
-      - '.github/workflows/image.yml'
-      - 'examples/reference/**'
-    tags: ['v*.*.*']
+    tags: ['v*']
   schedule:
     - cron: '0 7 * * 1'
   workflow_dispatch:
@@ -37,7 +45,7 @@ permissions:
 
 env:
   IMAGE: ghcr.io/git-cgallagher/code-orca-runtime
-  PUBLISH: ${{ github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) }}
+  PUBLISH: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
 
 concurrency:
   group: image-${{ github.ref }}
@@ -53,6 +61,7 @@ jobs:
   # ruleset (since 2026-11-04; this workflow never edits rulesets). Do not rename them.
   image:
     name: image (${{ matrix.arch }})
+    if: ${{ !startsWith(github.ref, 'refs/tags/') }}
     runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
     timeout-minutes: 45
     permissions:
@@ -66,26 +75,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
-          fetch-depth: 0  # origin/main and every tag, for the release check
 
-      - name: A release tag is strict, equals pyproject.toml's version and is on main
-        if: startsWith(github.ref, 'refs/tags/v')
-        env:
-          REF: ${{ github.ref_name }}
-        run: .github/ci/release-check.sh "$REF" > /dev/null
-
-      # The OCI version/revision labels. Not pins: a tag run labels X.Y.Z, anything else sha-<short>.
-      # The two ARGs sit just before the Dockerfile's LABEL, so a new value rebuilds no layer.
+      # The OCI version/revision labels. Not pins: always sha-<short> (a release promotes this very
+      # image, and puts X.Y.Z on the release index's annotations instead). The two ARGs sit just
+      # before the Dockerfile's LABEL, so a new value rebuilds no layer.
       - name: Image labels
         id: labels
-        env:
-          REF: ${{ github.ref_name }}
-        run: |
-          case $GITHUB_REF in
-            refs/tags/v*) version=${REF#v} ;;
-            *) version=sha-${GITHUB_SHA::7} ;;
-          esac
-          echo "version=$version" >> "$GITHUB_OUTPUT"
+        run: echo "version=sha-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
 
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069  # v4.4.1
 
@@ -171,7 +167,7 @@ jobs:
 
   # Joins the two per-arch digests into one multi-arch index under the tags, then attests it.
   manifest:
-    if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     needs: image
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -181,19 +177,6 @@ jobs:
       id-token: write      # Sigstore signing of the attestations
       attestations: write  # the repository's attestation store
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          persist-credentials: false
-          fetch-depth: 0  # origin/main and every tag, for the release check
-
-      # Outputs version, latest (highest vX.Y.Z on main) and minor (highest vX.Y.*).
-      - name: A release tag is strict, equals pyproject.toml's version and is on main
-        id: release
-        if: startsWith(github.ref, 'refs/tags/v')
-        env:
-          REF: ${{ github.ref_name }}
-        run: .github/ci/release-check.sh "$REF"
-
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
         with:
           pattern: digest-runtime-*
@@ -206,11 +189,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # main (push, schedule, dispatch): :main; a push to main also :sha-<short>.
-      # A tag: :X.Y.Z; :X.Y and :latest only when release-check says this is the highest of its
-      # line / overall (the semver types only ever match a tag ref). No `image-release`
-      # concurrency group: GitHub cancels a PENDING run when a third joins the group, which would
-      # silently drop a release; the highest-version rule makes the order irrelevant instead.
+      # :main always; a push to main also :sha-<short>, which a release later promotes.
       - name: Tags
         id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302  # v6.2.0
@@ -219,48 +198,22 @@ jobs:
           flavor: |
             latest=false
           tags: |
-            type=raw,value=main,enable=${{ github.ref == 'refs/heads/main' }}
-            type=sha,prefix=sha-,enable=${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}},enable=${{ steps.release.outputs.minor == 'true' }}
-            type=raw,value=latest,enable=${{ steps.release.outputs.latest == 'true' }}
-
-      # GHCR tags are mutable. A release version must never be re-pointed: consumers pin it
-      # (codeorca.yaml's runtime.image), and the weekly rebuild only ever moves :main. Only a
-      # registry "not found" counts as absent; any other error fails. A re-run whose digests equal
-      # the existing index's (the tags went out, then an attestation failed) may proceed.
-      - name: Refuse to overwrite an existing release
-        id: guard
-        if: startsWith(github.ref, 'refs/tags/v')
-        env:
-          VERSION: ${{ steps.release.outputs.version }}
-        run: .github/ci/refuse-overwrite.sh "$IMAGE" "$VERSION" "$RUNNER_TEMP/digests"
+            type=raw,value=main
+            type=sha,prefix=sha-,enable=${{ github.event_name == 'push' }}
 
       - name: Create the multi-arch manifest
         id: create
         working-directory: ${{ runner.temp }}/digests
         env:
           TAGS: ${{ steps.meta.outputs.tags }}
-          VERSION: ${{ steps.release.outputs.version }}
-          RERUN: ${{ steps.guard.outputs.rerun }}
         run: |
           args=()
           while IFS= read -r t; do [ -n "$t" ] && args+=(-t "$t"); done <<< "$TAGS"
           if [ "${#args[@]}" -eq 0 ]; then echo "::error::no tags for $GITHUB_REF"; exit 1; fi
-          if [ -n "$VERSION" ] && ! grep -qxF "$IMAGE:$VERSION" <<< "$TAGS"; then
-            echo "::error::the tags for $GITHUB_REF do not include $IMAGE:$VERSION"
-            exit 1
-          fi
           sources=()
           for d in *; do sources+=("$IMAGE@sha256:$d"); done
           if [ "${#sources[@]}" -ne 2 ]; then echo "::error::expected 2 digests, got ${#sources[@]}"; exit 1; fi
-          if [ "$RERUN" = true ]; then
-            # carbon copy of the existing index: its digest (what consumers pin) does not change
-            existing=$(docker buildx imagetools inspect "$IMAGE:$VERSION" --format '{{json .Manifest.Digest}}' | tr -d '"')
-            docker buildx imagetools create --prefer-index=false "${args[@]}" "$IMAGE@$existing"
-          else
-            docker buildx imagetools create "${args[@]}" "${sources[@]}"
-          fi
+          docker buildx imagetools create "${args[@]}" "${sources[@]}"
           first=$(head -n1 <<< "$TAGS")
           docker buildx imagetools inspect "$first"
           echo "digest=$(docker buildx imagetools inspect "$first" --format '{{json .Manifest.Digest}}' | tr -d '"')" >> "$GITHUB_OUTPUT"
@@ -274,6 +227,154 @@ jobs:
 
       # syft resolves the index to the runner's platform, so the SBOM lists the linux/amd64
       # image's contents; the two arches are built from the same pins.
+      - name: SBOM (SPDX)
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c  # v0.24.3
+        with:
+          image: ${{ env.IMAGE }}@${{ steps.create.outputs.digest }}
+          registry-username: ${{ github.actor }}
+          registry-password: ${{ secrets.GITHUB_TOKEN }}
+          format: spdx-json
+          output-file: ${{ runner.temp }}/sbom.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: Attest the SBOM
+        uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e  # v4.1.0
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.create.outputs.digest }}
+          sbom-path: ${{ runner.temp }}/sbom.spdx.json
+          push-to-registry: true
+
+  # A v* tag push: promote the image main built and tested for that commit. No build: the platform
+  # manifests are exactly main's :sha-<short>; only the index is new (X.Y.Z annotations). Its
+  # provenance therefore records this tag run (the promotion), and the platform images' own
+  # labels say sha-<short>.
+  release:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: read        # main's runs for the tagged commit (main-runs-green.sh)
+      packages: write      # the release tags, and the attestations pushed next to the image
+      id-token: write      # Sigstore signing of the attestations
+      attestations: write  # the repository's attestation store
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0  # origin/main and every tag, for the release check
+
+      # The tagged commit (an annotated tag's GITHUB_SHA is peeled to its commit either way).
+      - name: Commit
+        id: commit
+        run: echo "sha=$(git rev-parse "$GITHUB_SHA^{commit}")" >> "$GITHUB_OUTPUT"
+
+      # Before anything touches the registry: a malformed or off-main tag stops here.
+      - name: A release tag is strict, equals pyproject.toml's version and is on main
+        env:
+          REF: ${{ github.ref_name }}
+          RELEASE_COMMIT: ${{ steps.commit.outputs.sha }}
+        run: .github/ci/release-check.sh "$REF" > /dev/null
+
+      - name: Main's ci and image runs passed for this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMMIT: ${{ steps.commit.outputs.sha }}
+        run: .github/ci/main-runs-green.sh "$COMMIT"
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069  # v4.4.1
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6  # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: The image main tested
+        id: source
+        env:
+          COMMIT: ${{ steps.commit.outputs.sha }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/digests"
+          .github/ci/release-source.sh "$IMAGE" "$COMMIT" "$RUNNER_TEMP/digests"
+
+      # The same gate as the image job, against today's vulnerability database: main may have
+      # scanned this image days or weeks ago. Pulls the amd64 image by digest; builds nothing.
+      - name: Scan for fixable critical vulnerabilities
+        uses: anchore/scan-action@27805bf3b4e84b4a5c980df22ed233c00390a439  # v7.4.2
+        with:
+          image: ${{ steps.source.outputs.amd64 }}
+          severity-cutoff: critical
+          only-fixed: true
+          output-format: table
+
+      # Earlier releases: the strict tags on main that counted-releases.sh counts (a stray tag whose
+      # run failed does not; one whose run is still going does). Outputs version, latest, minor.
+      - name: Counted releases, and whether this one moves :latest and :X.Y
+        id: release
+        env:
+          REF: ${{ github.ref_name }}
+          RELEASE_COMMIT: ${{ steps.commit.outputs.sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          versions=$(git tag -l 'v*' --merged origin/main | sed -n 's/^v\([0-9][0-9.]*\)$/\1/p')
+          # shellcheck disable=SC2086  # tag-derived X.Y.Z words
+          RELEASED_VERSIONS=$(.github/ci/counted-releases.sh "$IMAGE" $versions)
+          export RELEASED_VERSIONS
+          echo "counted: ${RELEASED_VERSIONS:-none}"
+          .github/ci/release-check.sh "$REF"
+
+      # GHCR tags are mutable. A release version must never be re-pointed: consumers pin it.
+      # Only a registry "not found" counts as absent; any other error fails. A re-run (same two
+      # platform digests: the tags went out, then an attestation failed) may proceed.
+      - name: Refuse to overwrite an existing release
+        id: guard
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        run: .github/ci/refuse-overwrite.sh "$IMAGE" "$VERSION" "$RUNNER_TEMP/digests"
+
+      # :X.Y.Z always; :X.Y and :latest only when release-check says this is the highest counted
+      # release of its line / overall. No `image-release` concurrency group: GitHub cancels a
+      # PENDING run when a third joins the group, which would silently drop a release; the
+      # highest-version rule makes the order irrelevant instead.
+      - name: Create the release index
+        id: create
+        working-directory: ${{ runner.temp }}/digests
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+          LATEST: ${{ steps.release.outputs.latest }}
+          MINOR: ${{ steps.release.outputs.minor }}
+          RERUN: ${{ steps.guard.outputs.rerun }}
+          COMMIT: ${{ steps.commit.outputs.sha }}
+        run: |
+          args=(-t "$IMAGE:$VERSION")
+          [ "$MINOR" = true ] && args+=(-t "$IMAGE:${VERSION%.*}")
+          [ "$LATEST" = true ] && args+=(-t "$IMAGE:latest")
+          sources=()
+          for d in *; do sources+=("$IMAGE@sha256:$d"); done
+          if [ "${#sources[@]}" -ne 2 ]; then echo "::error::expected 2 digests, got ${#sources[@]}"; exit 1; fi
+          if [ "$RERUN" = true ]; then
+            # carbon copy of the existing index: its digest (what consumers pin) does not change
+            existing=$(docker buildx imagetools inspect "$IMAGE:$VERSION" --format '{{json .Manifest.Digest}}' | tr -d '"')
+            docker buildx imagetools create --prefer-index=false "${args[@]}" "$IMAGE@$existing"
+          else
+            docker buildx imagetools create "${args[@]}" \
+              --annotation "index:org.opencontainers.image.version=$VERSION" \
+              --annotation "index:org.opencontainers.image.revision=$COMMIT" \
+              --annotation "index:org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
+              "${sources[@]}"
+          fi
+          docker buildx imagetools inspect "$IMAGE:$VERSION"
+          echo "digest=$(docker buildx imagetools inspect "$IMAGE:$VERSION" --format '{{json .Manifest.Digest}}' | tr -d '"')" >> "$GITHUB_OUTPUT"
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.create.outputs.digest }}
+          push-to-registry: true
+
       - name: SBOM (SPDX)
         uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c  # v0.24.3
         with:

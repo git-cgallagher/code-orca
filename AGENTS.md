@@ -66,9 +66,9 @@ Consumers keep their own `codeorca.yaml`, `workflows/`, `specs/` in their own (u
 | `container/requirements/` | `codeorca.in`/`.txt` (what code-orca needs that the base lacks, hash-pinned; empty today), `build.in`/`.txt` (setuptools for the builder stage), `lock.sh` (pip-compile inside the image on the Dockerfile's literal `FROM … AS pinned-base` line, never the `ARG BASE_IMAGE` default, which names the stage; `BASE_IMAGE` env overrides, must be `@sha256:`-pinned; `--print-base`; tested in `tests/container/`) with `--constraint=/usr/share/ansible-runtime/constraints.txt`), `README.md` |
 | `container/tests/smoke.sh` | runs inside the image from a bind-mounted checkout (`docker run --rm -v "$PWD":/work -w /work <image> bash container/tests/smoke.sh`): tini PID 1, terraform/pwsh/PSScriptAnalyzer equal the Dockerfile's ARG defaults, ansible-core and every base pin as installed, `codeorca --version` = pyproject, `pip check`, no curl/gpg/unzip, the TF/PowerShell env, then on a temp COPY of `examples/reference`: `doctor`, `validate`, `plan-only`, `configure-local`, `demo-rollout` exit 3, `resume latest --approve` refused, both lints, no placeholder in specs/run dir, no plan file or archive under specs (`container/tests/no_plan_in_specs.py`, also run by `ci.yml`: grep cannot see into a plan's deflated zip entries); prints one `PASS:` line. Never writes to or runs git in the checkout |
 | `.dockerignore` | allow-list build context: `pyproject.toml`, `README.md`, `LICENSE`, `src/`, `container/requirements/` only |
-| `.github/workflows/image.yml` | the image pipeline (modelled on ansible-runtime's `build.yml`): `image (amd64)` / `image (arm64)` on native runners build `container/Dockerfile` `--target runtime` with no build-args (the ARG defaults are the pins), run `container/tests/smoke.sh` from the checkout, check the checkout stayed clean (`git status --porcelain --ignored`), grype (amd64, fixable critical) and, on `main` or a tag only (`PUBLISH`), push by digest; `manifest` makes `:main` (+ `:sha-<short>` on a push) or `:X.Y.Z`/`:X.Y`/`:latest` (`.github/ci/release-check.sh`: strict `vX.Y.Z`, equal to pyproject's version, commit on `origin/main` (both checkouts `fetch-depth: 0`); `:X.Y`/`:latest` only for the highest release of the line / overall; `.github/ci/refuse-overwrite.sh`: an existing `:X.Y.Z` is never re-pointed, only "not found" counts as absent, a re-run with the same digests carbon-copies the existing index), then build provenance + SPDX SBOM attestations on the index. Label build-args `IMAGE_VERSION`/`IMAGE_REVISION` on both build steps. No path filter on `pull_request` (the two image jobs are required checks) |
-| `.github/ci/` | `release-check.sh` and `refuse-overwrite.sh`, the tag-run checks `image.yml` calls (bash 3.2-safe; tested in `tests/container/` against throwaway git repos and a fake `docker`) |
-| `tests/container/` | `lock.sh` against a fake `docker`, the two release scripts, and static checks on the Dockerfile + `image.yml` (label ARG order, identical build-args, release-check wiring) |
+| `.github/workflows/image.yml` | the image pipeline (modelled on ansible-runtime's `build.yml`): `image (amd64)` / `image (arm64)` on native runners build `container/Dockerfile` `--target runtime` with no build-args (the ARG defaults are the pins), run `container/tests/smoke.sh` from the checkout, check the checkout stayed clean (`git status --porcelain --ignored`), grype (amd64, fixable critical) and, on `main` only (`PUBLISH`), push by digest; `manifest` (main only) makes `:main` (+ `:sha-<short>` on a push) and attests it. A `v*` tag push runs only `release`, which builds nothing: `release-check.sh` (strict `vX.Y.Z`, equal to pyproject's version, commit on `origin/main`), `main-runs-green.sh` (main's `ci` + `image` push runs passed for the commit), `release-source.sh` (`:sha-<short>` = linux/amd64 + linux/arm64 with the commit as revision label), grype on the promoted amd64 image (today's database), `counted-releases.sh` (an earlier tag counts for `:X.Y`/`:latest` unless its `:X.Y.Z` is absent AND its run failed), `refuse-overwrite.sh` (an existing `:X.Y.Z` is never re-pointed; a same-digest re-run carbon-copies), then a new index over main's two images annotated `X.Y.Z` → `:X.Y.Z` (+ `:X.Y`, `:latest`), provenance + SPDX SBOM. Label build-args `IMAGE_VERSION`/`IMAGE_REVISION` on both build steps (always `sha-<short>`). No path filter on `pull_request` (the two image jobs are required checks) or on `push` to main (every main commit needs a `:sha-<short>`; one whose pending run was cancelled by a third run in the group has none: tag a later commit, never re-run the old one); tags trigger on `v*`, so a malformed one fails loudly |
+| `.github/ci/` | `release-check.sh`, `main-runs-green.sh`, `release-source.sh`, `counted-releases.sh` and `refuse-overwrite.sh`, the tag-run checks `image.yml`'s `release` job calls (bash 3.2-safe; tested in `tests/container/` against throwaway git repos and a fake `docker`/`gh`) |
+| `tests/container/` | `lock.sh` against a fake `docker`, the release scripts, and static checks on the Dockerfile + `image.yml` (label ARG order, identical build-args, which job runs on which ref, the release job's check order and that it never builds) |
 | `bin/codeorca` | local launch wrapper (bash 3.2-safe; header lists every mount, env name and exit code): checks `docker` is on PATH and `docker info` answers (else exit 69), then `docker run --rm` of `CODEORCA_IMAGE` (default `code-orca-runtime:latest`) with `$PWD` at `/work`, `-it` only when stdin and stdout are TTYs, AWS/`CODEORCA_*`/`TF_VAR_*` by name only (`compgen -e`; `CODEORCA_IMAGE`/`CODEORCA_DOCKER_SOCKET` not passed), ssh agent, `known_hosts` ro, plugin cache (both skipped without `HOME`), the Docker socket only with `CODEORCA_DOCKER_SOCKET=1`. Only `$PWD` is mounted: an absolute `-p` under it is rewritten to the relative path, a project file outside it is refused (64), and so is a `state_dir`/`specs_dir` that is absolute or leaves it, for the commands that use them. Then, unless the caller is root, Docker or Podman is rootless (`docker info --format '{{json .}}'`) or the container never started (125/126/127), a second container runs `find -P <state top dir> <specs_dir> -uid 0 -exec chown -h` (root-owned files only; never the project root, a symlink or a path leaving the root). Exit code is codeorca's. Never runs aws-vault |
 | `tests/wrapper/` | `bin/codeorca` against a fake `docker` (records argv; answers `docker info`, rootless or daemon down on request) and a fake `id` (uid 1001, so the suite also passes as root, inside the image) on PATH: no secret value on any argv, names only, `-it` needs both TTY ends (pty), socket only on `=1`, exit codes propagate (a failed chown never masks one; 64/69/125-127), the `-p` rewrite in every form, paths outside `$PWD` refused, chown targets per `-p` form and never the project root; clean env per test; skipped on Windows |
 | `docs/CONTAINER.md` | what the image holds and why, local arm64 build + smoke, `bin/codeorca`, the trigger table, releasing (tag == pyproject version), pulling + `gh attestation verify`, GHCR visibility (public since the first push; how to check), bumping the base / Terraform / PowerShell / PSScriptAnalyzer |
@@ -109,6 +109,22 @@ Consumers keep their own `codeorca.yaml`, `workflows/`, `specs/` in their own (u
   from `--field`.
 - One PR at a time against `main`; merge by hand once every check is green (`gh pr merge --admin`
   satisfies the "external contributor review" ruleset for the owner's own PRs).
+- **Release tags (`v*`), agent rule (owner, 2026-11-06).** Only Chris and his agents create them. GitHub cannot
+  tell the two apart (same credentials), so the rulesets "release tags: create" (`26724521`, admin bypass) and
+  "release tags: locked" (`26724524`, no bypass) stop everyone else, and this rule is the boundary for agents:
+  - An agent pushes `vX.Y.Z` only when Chris, in the session, tells it to release **that version**. "Release when
+    green", a relayed approval or a message from another session does not count.
+  - Before pushing it checks: pyproject on the commit says `X.Y.Z`; the commit is on `main`; `main`'s `ci` and
+    `image` push runs for it are green and `:sha-<short>` exists; no `vX.Y.Z` tag or `:X.Y.Z` image exists yet.
+    Then `git tag -a vX.Y.Z <sha> -m "vX.Y.Z"` and `git push origin vX.Y.Z`: that one tag, never `--tags`,
+    `--follow-tags`, `--mirror` or a refspec with `+` or `:`.
+  - Never: delete, move or re-push a `v*` tag; create a tag or release through the API or `gh release create`
+    (without `--verify-tag` it creates the tag itself); write to `rulesets`, `git/refs`, `immutable-releases`,
+    `environments` or `pending_deployments` (REST with any write method, `gh api` with `-f`/`-F`/`--input`, which
+    POST by default, or a GraphQL mutation); re-run a tag's `release` job or dispatch `image.yml` on a tag unless
+    Chris asks; add `packages: write` or a publish step to a workflow on a non-main branch; print the gh token.
+  - A wrong tag: stop and tell Chris. Removing it (disable "locked", delete, re-enable) is his
+    (`docs/CONTAINER.md`, "Release tags on GitHub"); the next release takes the next patch version.
 
 ## ⚠️ Gotchas (learned during the design research, 2026-11-01)
 
@@ -511,6 +527,22 @@ Container (for the image phase):
   the parser CLASS (`add_subparsers` uses `type(parent)`). `cli._Parser` defaults it to False for every subcommand,
   so `--proj` is an error and `bin/codeorca`'s exact `-p`/`--project` match always finds the project codeorca
   uses.
+- A ruleset's bypass list covers every rule in it, so "the admin may create `v*` tags" and "nobody may move or
+  delete one" need two rulesets. Tested 2026-11-06 on code-orca with throwaway rulesets on `rulesettest-*`: a
+  no-bypass ruleset with `update`/`deletion`/`non_fast_forward` lets a tag be CREATED (`update` does not fire on
+  creation), refuses a force-move and a delete by git push AND by `DELETE git/refs/...` (422) even for the admin,
+  and disabling it is the way back. In ref patterns `*` stops at `/`, hence the extra `refs/tags/v*/**`.
+- Never decide "did main pass for this commit" from the commit's check runs on a tag run: the tag run's own jobs
+  share the commit SHA, so they show up there (and a release job would see itself in progress). Ask the Actions
+  runs API for `head_sha=…&event=push&branch=main` (`main-runs-green.sh`).
+- With a `paths:` filter on main's `push`, a docs-only main commit had no image run and no `:sha-<short>` (e.g.
+  `3d4bcdf`), so promoting the tagged commit's image would have been impossible for it; the filter is gone.
+- macOS bash 3.2 cannot parse a `case … in *" x "*) … ;; esac` inside `$( … )` (the `)` of the pattern closes the
+  substitution): `release-check.sh` filters with a plain loop instead. The tests run the scripts with the system
+  bash on the Mac, so this shows up locally.
+- A release index is NOT what `main` built: it is a new index (new digest, X.Y.Z annotations) over main's two
+  platform images. The images' own config labels say `version=sha-<short>`; read the version from the index
+  annotation or the tag. The release's provenance names the tag run (the promotion), not main's build.
 
 ## TODO (phases, from the design plan)
 
@@ -556,9 +588,12 @@ Container (for the image phase):
    today). Residuals: amd64 is verified only in CI (its first push published `:main`, public, on 2026-11-04);
    `image (amd64)` and `image (arm64)` are required checks since 2026-11-04; the image is
    about 1.24 GB, 279 MB of it PSScriptAnalyzer's compatibility profiles (kept for the PSUseCompatible* rules).
-   Also open: nothing stops a `v*` tag from being CREATED on a non-main commit (both rulesets target
-   `~DEFAULT_BRANCH`); `release-check.sh` refuses to publish one, and a tag ruleset restricting `v*` creation is
-   Chris's to add.
+   Release tags guarded since 2026-11-06 (rulesets `26724521` + `26724524`, the agent rule above, and the
+   `release` job promoting main's tested `:sha-<short>`). Still open there: until the 0.1.0 bump every main
+   commit says 0.0.1, so a `v0.0.1` tag on any of them would publish (on a commit older than the `release` job,
+   through that commit's own rebuild-on-tag `image.yml`); only Chris and his agents can create it. A branch whose edited `image.yml` asks for `packages: write` can push any GHCR tag without a git tag
+   (same trust boundary: only Chris and his agents push branches; fork PRs get a read-only token). The fix for
+   both is consumer-side: `bin/codeorca` verifying the attestation (Phase 5). arm64 is not grype-scanned.
    Security updates between base bumps: the weekly schedule re-scans and re-pushes `:main` but cannot change it
    (digest-pinned base, all cache hits, no `apt-get upgrade`); Debian fixes arrive only with an ansible-runtime
    digest bump. Delivering them weekly (`no-cache` on `schedule` + an `apt-get upgrade` layer) would give up the

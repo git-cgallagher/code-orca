@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Refuses to re-point an existing release tag (.github/workflows/image.yml, manifest job, tag runs only):
+# Refuses to re-point an existing release tag (.github/workflows/image.yml, release job, tag runs only):
 #   .github/ci/refuse-overwrite.sh <image> <X.Y.Z> <dir holding one empty file per platform digest>
 # GHCR tags are mutable and consumers pin :X.Y.Z, so it must never move. Outcomes:
 #   - the tag does not exist (the registry says "not found"):   ok, rerun=false
-#   - it exists and its index lists exactly the digests in <dir>:   ok, rerun=true. This is a re-run of a manifest
+#   - it exists and its index lists exactly the digests in <dir>:   ok, rerun=true. This is a re-run of a release
 #     job that already published the tags and then failed (an attestation, say); the job re-points the tags at the
 #     EXISTING index (a carbon copy, same digest) and attests it.
 #   - it exists with any other content:   fail (release a new version instead)

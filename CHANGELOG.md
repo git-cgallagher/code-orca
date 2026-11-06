@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- Releases promote, never rebuild: a `v*` tag push runs only the new `release` job in `image.yml`, which checks the
+  tag (`release-check.sh`), that `main`'s own `ci` and `image` push runs passed for the commit (`main-runs-green.sh`,
+  through the Actions runs API, since the tag run's own jobs share the SHA) and that `:sha-<short>` is that commit's
+  two-platform image (`release-source.sh`), then writes `:X.Y.Z` as a new index over main's tested images,
+  annotated with the version. `:latest`/`:X.Y` skip a tag whose run failed and
+  whose image is absent (`counted-releases.sh`), so a stray tag cannot freeze them while two tags pushed together
+  still order correctly; the promoted amd64 image is grype-scanned again at release. `codeorca --version` now reads
+  the package metadata, so `pyproject.toml` is the only version source. Every push to `main` now builds (no paths filter), the tag
+  trigger is `v*` (a malformed tag fails loudly), and a manual run on a tag does nothing.
+- Release tags are guarded on GitHub: rulesets "release tags: create" (only the admin role creates `v*`) and
+  "release tags: locked" (nobody, the admin included, moves or deletes one), plus an agent rule in AGENTS.md
+  (an agent tags only on Chris's in-session instruction naming the version). `docs/CONTAINER.md` has the release
+  steps and how Chris removes a wrong tag.
 - CI: `image (amd64)` and `image (arm64)` are required checks on the "main protection" ruleset (2026-11-04).
 - Docs: the GHCR package `code-orca-runtime` was public from its first push (2026-11-04); `docs/CONTAINER.md`
   and AGENTS.md no longer describe making it public as a required manual step.
@@ -15,7 +28,8 @@
   `specs_dir: .` had chowned the whole tree), and is skipped under rootless Docker and when the container never
   started; a missing `docker` or unreachable daemon exits 69 (it had exited 1, like a failed workflow); `HOME` unset
   no longer aborts. codeorca takes no abbreviated long options (`--proj`), on any subcommand.
-  The image's OCI labels: `version` is `X.Y.Z` on a release (it was always `dev`), a new `revision` carries the commit,
+  The image's OCI labels: `version` is `sha-<short>` on every CI build (it was always `dev`; a release carries `X.Y.Z`
+  as an annotation on its index), a new `revision` carries the commit,
   and `licenses` adds `GPL-3.0-or-later` (ansible-core, ansible-lint).
   Releases (`.github/ci/release-check.sh`, `refuse-overwrite.sh`): only a strict `vX.Y.Z` tag on a `main` commit
   publishes (a prerelease tag had published only `:latest`; a branch tag published at all); `:latest` and `:X.Y` move
